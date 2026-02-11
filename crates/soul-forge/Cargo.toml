@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 orion-core = { path = "../orion-core" }
 orion-birth = { path = "../orion-birth" }
-ratatui = "0.26"
+ratatui = "0.30"
 tokio = { version = "1", features = ["rt", "macros"] }
 crossterm = "0.27"
 serde = { version = "1.0", features = ["derive"] }
