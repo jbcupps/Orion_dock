@@ -1,0 +1,21 @@
+[skill]
+id = "com.orion.skills.web-browse"
+name = "Web Browse"
+version = "0.1.0"
+description = "Direct web browsing: fetch URL (HTTP/Chromium), parse HTML, optional fallback to Tavily/Perplexity search"
+category = "Sensory"
+keywords = ["browse", "web", "fetch", "url", "html", "parse", "scrape"]
+
+[[permissions]]
+permission = { Network = "Full" }
+reason = "Fetch arbitrary public URLs and optional search API fallbacks"
+
+[[secrets]]
+name = "tavily"
+description = "Tavily API key for search fallback when direct fetch fails"
+required = false
+
+[[secrets]]
+name = "perplexity"
+description = "Perplexity API key for search fallback when direct fetch fails"
+required = false

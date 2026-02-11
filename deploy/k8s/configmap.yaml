@@ -1,0 +1,14 @@
+# Non-sensitive Orion app config. Replace namespace if not using deploy/k8s/namespace.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orion-config
+  namespace: orion
+  labels:
+    app.kubernetes.io/name: orion
+data:
+  MEMORY_BACKEND: "postgres"
+  BIRTH_MODEL: "qwen2.5:3b-instruct"
+  ID_MODEL_DEFAULT: ""
+  LOCAL_LLM_BASE_URL: "http://ollama:11434"
+  ORION_DATA_DIR: "/var/lib/orion"

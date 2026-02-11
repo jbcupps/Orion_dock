@@ -1,0 +1,15 @@
+[package]
+name = "skill-web-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orion-skills = { path = "../../crates/orion-skills" }
+orion-core = { path = "../../crates/orion-core" }
+orion-capabilities = { path = "../../crates/orion-capabilities" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true

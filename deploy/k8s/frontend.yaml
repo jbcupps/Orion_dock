@@ -1,0 +1,42 @@
+# Orion frontend (web UI). Serves static assets and proxies /api, /health to orion-api.
+# Matches docker compose full stack (frontend).
+# Build: docker build -f frontend/Dockerfile -t orion-frontend:latest .
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: orion
+  labels:
+    app.kubernetes.io/name: orion-frontend
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+  selector:
+    app: orion-frontend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: orion
+  labels:
+    app: orion-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orion-frontend
+  template:
+    metadata:
+      labels:
+        app: orion-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: orion-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80

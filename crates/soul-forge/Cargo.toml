@@ -1,0 +1,18 @@
+[package]
+name = "soul-forge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+orion-birth = { path = "../orion-birth" }
+ratatui = "0.26"
+tokio = { version = "1", features = ["rt", "macros"] }
+crossterm = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+rand = "0.8"
+anyhow = "1.0"
+chrono = "0.4"
+thiserror = "1.0"

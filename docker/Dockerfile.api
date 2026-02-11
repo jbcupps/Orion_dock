@@ -1,0 +1,35 @@
+# Orion API HTTP service. Build: docker build -f docker/Dockerfile.api -t orion-api:local .
+
+ARG RUST_VERSION=1.75
+
+# ---- builder ----
+FROM rust:${RUST_VERSION}-bookworm AS builder
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    pkg-config \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml ./
+COPY crates ./crates
+COPY skills ./skills
+
+RUN mkdir -p target
+RUN cargo build --release -p orion-api
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/target/release/orion-api /app/orion-api
+
+EXPOSE 8080
+CMD ["/app/orion-api"]

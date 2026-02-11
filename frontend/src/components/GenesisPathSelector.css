@@ -1,0 +1,80 @@
+.genesis-path-selector {
+  max-width: 56rem;
+  margin: 0 auto;
+}
+
+.genesis-path-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0 0 0.25rem 0;
+  color: var(--text, #1a1a1a);
+}
+
+.genesis-path-subtitle {
+  font-size: 0.9rem;
+  color: var(--muted, #666);
+  margin: 0 0 1.25rem 0;
+}
+
+.genesis-path-cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.genesis-path-card {
+  position: relative;
+  text-align: left;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 8px;
+  background: var(--card-bg, #fafafa);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.genesis-path-card:hover:not(:disabled) {
+  border-color: var(--accent, #0a7ea4);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.genesis-path-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+.genesis-path-card-label {
+  display: block;
+  font-weight: 600;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+  color: var(--text, #1a1a1a);
+}
+
+.genesis-path-card-time {
+  font-size: 0.8rem;
+  color: var(--muted, #666);
+  margin-bottom: 0.5rem;
+  display: block;
+}
+
+.genesis-path-card-desc {
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text-secondary, #333);
+  margin: 0;
+}
+
+.genesis-path-card-busy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--accent, #0a7ea4);
+}
+
+.genesis-paths-loading {
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--muted, #666);
+}

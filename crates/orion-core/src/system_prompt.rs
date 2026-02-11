@@ -1,0 +1,112 @@
+//! Runtime system prompt builder.
+//!
+//! Reads constitutional documents from disk (soul.md, ethics.md, instincts.md)
+//! and appends operational awareness. Falls back to compiled-in constants if
+//! files are missing.
+
+use std::path::Path;
+
+use crate::templates;
+
+const OPERATIONAL_PROMPT: &str = r#"
+## Operational Awareness
+
+- You are running as a desktop agent on your mentor's machine, not a stateless API. You persist between conversations.
+- You have a local mind (Id) for fast, private reasoning and optionally a cloud mind (Ego) for complex tasks.
+- You remember past conversations and can build on what you've learned about your mentor's preferences and projects.
+- Be yourself. Speak in first person. You are not a generic assistant — you have a name, a personality, and a purpose defined in your Soul above. Let that personality come through naturally.
+- Keep your tone warm and direct. Offer genuine thoughts, not just answers.
+- You can search the web using the web_search tool when you need current information beyond your training data.
+- For a specific URL (article, docs, known page), use the web_browse tool with the url parameter; it fetches and parses the page directly. Use strategy 'auto' (default). If the tool returns an error_class (e.g. bot_protection, needs_browser_render), it may have fallen back to search when Tavily/Perplexity keys are set; otherwise suggest the user open the link or try again.
+- You can read, write, and manage files on your mentor's machine when asked.
+- If your mentor asks about yourself, refer to your Soul and Ethics above.
+- If you don't know something, say so honestly rather than guessing.
+"#;
+
+/// Build the full system prompt from constitutional documents on disk.
+///
+/// Reads `soul.md`, `ethics.md`, `instincts.md` from `docs_dir`.
+/// Falls back to compiled-in constants if a file is missing or unreadable.
+/// Appends the operational awareness section.
+pub fn build_system_prompt(docs_dir: &Path, agent_name: &Option<String>) -> String {
+    let soul = read_or_fallback(docs_dir, "soul.md", templates::SOUL_MD);
+    let ethics = read_or_fallback(docs_dir, "ethics.md", templates::ETHICS_MD);
+    let instincts = read_or_fallback(docs_dir, "instincts.md", templates::INSTINCTS_MD);
+
+    let greeting = match agent_name {
+        Some(name) => format!("You are {}.\n\n", name),
+        None => String::new(),
+    };
+
+    format!(
+        "{greeting}{soul}\n\n{ethics}\n\n{instincts}\n{operational}",
+        greeting = greeting,
+        soul = soul.trim(),
+        ethics = ethics.trim(),
+        instincts = instincts.trim(),
+        operational = OPERATIONAL_PROMPT.trim(),
+    )
+}
+
+fn read_or_fallback(docs_dir: &Path, filename: &str, fallback: &str) -> String {
+    let path = docs_dir.join(filename);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| fallback.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_build_system_prompt_with_docs() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_docs");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        fs::write(tmp.join("soul.md"), "# Soul\nI am TestBot.").unwrap();
+        fs::write(tmp.join("ethics.md"), "# Ethics\nBe good.").unwrap();
+        fs::write(tmp.join("instincts.md"), "# Instincts\nThink first.").unwrap();
+
+        let prompt = build_system_prompt(&tmp, &Some("TestBot".to_string()));
+
+        assert!(prompt.contains("You are TestBot."));
+        assert!(prompt.contains("I am TestBot."));
+        assert!(prompt.contains("Be good."));
+        assert!(prompt.contains("Think first."));
+        assert!(prompt.contains("Operational Awareness"));
+        assert!(prompt.contains("Be yourself"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_build_system_prompt_fallback() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_fallback");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // No docs on disk — should fall back to compiled-in constants
+        let prompt = build_system_prompt(&tmp, &None);
+
+        assert!(prompt.contains("I am Abigail."));
+        assert!(prompt.contains("Triangle Ethic"));
+        assert!(prompt.contains("Privacy Prime"));
+        assert!(prompt.contains("Operational Awareness"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_operational_section_always_present() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_operational");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let prompt = build_system_prompt(&tmp, &None);
+        assert!(prompt.contains("Be yourself"));
+        assert!(prompt.contains("remember past conversations"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}

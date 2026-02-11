@@ -1,0 +1,25 @@
+[package]
+name = "orion-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+
+[dev-dependencies]
+orion-core = { path = "../orion-core" }
+
+[features]
+default = []
+postgres = ["sqlx", "tokio", "pgvector"]

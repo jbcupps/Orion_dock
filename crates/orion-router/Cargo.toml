@@ -1,0 +1,14 @@
+[package]
+name = "orion-router"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+orion-capabilities = { path = "../orion-capabilities" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true

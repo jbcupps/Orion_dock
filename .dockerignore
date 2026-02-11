@@ -1,0 +1,21 @@
+# Reduce Docker build context size
+.git
+.gitignore
+.claude
+.github
+target
+node_modules
+**/node_modules
+*.md
+!documents/*.md
+*.log
+.env
+.env.*
+!.env.example
+example.env
+.artifacts
+artifacts
+local-workspace
+.idea
+.vscode
+failed-logs.txt

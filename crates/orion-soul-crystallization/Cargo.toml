@@ -1,0 +1,12 @@
+[package]
+name = "orion-soul-crystallization"
+version.workspace = true
+edition.workspace = true
+description = "Depth-based psychometric profiling and soul crystallization engine for Orion birth"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

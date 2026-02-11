@@ -1,0 +1,23 @@
+[package]
+name = "orion-uat"
+version.workspace = true
+edition.workspace = true
+description = "Headless UAT driver for birth and early operation"
+
+[[bin]]
+name = "orion-uat"
+path = "src/main.rs"
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+orion-memory = { path = "../orion-memory", features = ["postgres"] }
+orion-birth = { path = "../orion-birth" }
+orion-capabilities = { path = "../orion-capabilities" }
+orion-router = { path = "../orion-router" }
+soul-forge = { path = "../soul-forge" }
+orion-soul-crystallization = { path = "../orion-soul-crystallization" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "orion-email"
+version.workspace = true
+edition.workspace = true
+description = "Email provider adapters (Gmail, Outlook) with OAuth2 and token lifecycle"
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+reqwest = { version = "0.11", features = ["json"] }
+base64 = "0.21"
+rand = "0.8"
+url = "2"
+sha2 = "0.10"
+urlencoding = "2"

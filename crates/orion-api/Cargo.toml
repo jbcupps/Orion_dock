@@ -1,0 +1,21 @@
+[package]
+name = "orion-api"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orion-api"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+orion-core = { path = "../orion-core" }
+orion-birth = { path = "../orion-birth" }
+soul-forge = { path = "../soul-forge" }
+uuid = { workspace = true }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true

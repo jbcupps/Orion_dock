@@ -1,0 +1,7 @@
+# Optional namespace for Orion stack. Omit to use default.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orion
+  labels:
+    app.kubernetes.io/name: orion

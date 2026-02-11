@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-build-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate docker compose config
+        run: docker compose -f docker/docker-compose.yml config -q
+      - name: Validate full-stack compose profile
+        run: docker compose -f docker/docker-compose.yml --profile full config -q
+
+      - name: Build Docker dev image
+        run: docker compose -f docker/docker-compose.yml build orion-build
+
+      - name: Run lint/build/test in container (fast)
+        run: docker compose -f docker/docker-compose.yml run --rm -e UAT_MODE=fast orion-build
+
+      - name: Check docs/index.html
+        run: ./scripts/check-docs-html.sh .
+
+      - name: Collect failure artifacts
+        if: failure()
+        run: ./scripts/collect-failure-artifacts.sh
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uat-failure-artifacts
+          path: artifacts/
+
+  docker-full-uat:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate full-stack compose profile
+        run: docker compose -f docker/docker-compose.yml --profile full config -q
+
+      - name: Build Docker dev image
+        run: docker compose -f docker/docker-compose.yml build orion-build
+
+      - name: Build and start full stack
+        run: |
+          docker compose -f docker/docker-compose.yml --profile full build orion-api frontend
+          docker compose -f docker/docker-compose.yml --profile full up -d postgres ollama orion-api frontend
+
+      - name: Wait for orion-api
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+              echo "orion-api is ready."
+              break
+            fi
+            if [ $i -eq 30 ]; then echo "orion-api did not become ready."; exit 1; fi
+            sleep 2
+          done
+
+      - name: Run full UAT in container
+        run: |
+          docker compose -f docker/docker-compose.yml --profile full run --rm \
+            -e UAT_MODE=full \
+            -e DATABASE_URL=postgres://orion:orion_dev@postgres:5432/orion \
+            orion-build
+
+      - name: Collect failure artifacts
+        if: failure()
+        run: ./scripts/collect-failure-artifacts.sh
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uat-full-failure-artifacts
+          path: artifacts/

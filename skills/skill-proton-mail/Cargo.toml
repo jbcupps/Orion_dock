@@ -1,0 +1,16 @@
+[package]
+name = "skill-proton-mail"
+version.workspace = true
+edition.workspace = true
+description = "Proton Mail-style email skill wrapping orion-skills IMAP/SMTP"
+
+[dependencies]
+orion-skills = { path = "../../crates/orion-skills" }
+orion-core = { path = "../../crates/orion-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true

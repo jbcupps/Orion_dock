@@ -1,0 +1,35 @@
+# Environment and secrets
+.env
+.env.local
+*.local
+secrets.bin
+keys.bin
+
+# Rust
+target/
+*.pdb
+
+# Application data files (created at runtime, not in repo)
+config.json
+orion_seed.db
+orion_seed.db-wal
+orion_seed.db-shm
+external_pubkey.bin
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local workspace
+local-workspace/
+
+# Test run artifacts (local-verify and UAT triage)
+.artifacts/
+artifacts/
+failed-logs.txt
+*.log
+
+.DS_Store
+Thumbs.db

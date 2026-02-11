@@ -1,0 +1,21 @@
+[package]
+name = "orion-birth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orion-core = { path = "../orion-core" }
+orion-memory = { path = "../orion-memory" }
+orion-capabilities = { path = "../orion-capabilities" }
+orion-router = { path = "../orion-router" }
+orion-soul-crystallization = { path = "../orion-soul-crystallization" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+base64.workspace = true

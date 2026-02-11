@@ -1,0 +1,76 @@
+# Orion API HTTP service. Matches docker compose full stack (orion-api).
+# Build: docker build -f docker/Dockerfile.api -t orion-api:latest .
+# Expects ConfigMap orion-config, Secret orion-secret (DATABASE_URL).
+apiVersion: v1
+kind: Service
+metadata:
+  name: orion-api
+  namespace: orion
+  labels:
+    app.kubernetes.io/name: orion-api
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: orion-api
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orion-data-pvc
+  namespace: orion
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orion-api
+  namespace: orion
+  labels:
+    app: orion-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orion-api
+  template:
+    metadata:
+      labels:
+        app: orion-api
+    spec:
+      containers:
+        - name: orion-api
+          image: orion-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: orion-config
+            - secretRef:
+                name: orion-secret
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/orion
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: orion-data-pvc
