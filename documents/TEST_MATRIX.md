@@ -75,10 +75,13 @@ Canonical inventory of current tests and target coverage per crate and UI surfac
 - UAT-1 Startup health (`/health`)
 - UAT-2 Birth journey (`/api/status` birth_complete / birth_stage)
 - UAT-3 Routing correctness (`/api/status` local_llm_configured)
-- UAT-4 Superego safety (unit/integration in crates)
-- UAT-5 Skills safety envelope (unit tests in skills)
-- UAT-6 Persistence durability (Postgres integration test in full mode)
+- UAT-4 Genesis path listing (`/api/genesis/paths` returns 5+ entries with id/label/description/estimated_time)
+- UAT-5 Create agent and start Soul Forge Genesis (create → load → birth flow → genesis/start → assert scenario1)
+- UAT-6 Soul Forge scenario progression (3x forge/select → assert archetype + soul_hash)
 - UAT-7 Failure handling (`/ready`)
+- UAT-8 Birth state with Postgres backend (`GET /api/agents/:id/birth/state` returns 200, stage "Darkness"; validates spawn_blocking runtime isolation, Postgres feature flag, Docker migration availability)
+- UAT-9 Advance past Darkness (`POST /api/agents/:id/birth/advance-darkness` returns 200; Darkness → Ignition transition)
+- UAT-10 Ignition to Connectivity (`POST /api/agents/:id/birth/ignition` returns 200; Ignition → Connectivity transition, prerequisite for Genesis)
 
 ---
 

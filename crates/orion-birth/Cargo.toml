@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 orion-core = { path = "../orion-core" }
-orion-memory = { path = "../orion-memory" }
+orion-memory = { path = "../orion-memory", features = ["postgres"] }
 orion-capabilities = { path = "../orion-capabilities" }
 orion-router = { path = "../orion-router" }
 orion-soul-crystallization = { path = "../orion-soul-crystallization" }

@@ -52,6 +52,19 @@ impl BirthStage {
             BirthStage::Emergence => None,
         }
     }
+
+    /// Parse a stage name (as persisted in config.birth_stage) back to enum.
+    /// Returns None for unrecognized strings.
+    pub fn from_name(s: &str) -> Option<BirthStage> {
+        match s {
+            "Darkness" => Some(BirthStage::Darkness),
+            "Ignition" => Some(BirthStage::Ignition),
+            "Connectivity" => Some(BirthStage::Connectivity),
+            "Genesis" => Some(BirthStage::Genesis),
+            "Emergence" => Some(BirthStage::Emergence),
+            _ => None,
+        }
+    }
 }
 
 /// Depth level for Soul Crystallization path (abigail-style).
@@ -90,9 +103,7 @@ pub enum GenesisPath {
     /// Existing chat with recommend_crystallize tool
     Direct,
     /// Abigail-style depth-based psychometric profiling
-    SoulCrystallization {
-        depth: SoulCrystallizationDepth,
-    },
+    SoulCrystallization { depth: SoulCrystallizationDepth },
     /// Scenario-based calibration ritual (archetypes, sigil)
     SoulForge,
 }
@@ -203,10 +214,16 @@ impl BirthOrchestrator {
         if store.has_birth()? {
             return Err(BirthError::AlreadyBorn.into());
         }
+        // Restore persisted stage from config (if any), otherwise start at Darkness.
+        let stage = config
+            .birth_stage
+            .as_deref()
+            .and_then(BirthStage::from_name)
+            .unwrap_or(BirthStage::Darkness);
         Ok(Self {
             config,
             store,
-            stage: BirthStage::Darkness,
+            stage,
             signing_key: None,
             private_key_base64: None,
             conversation_history: Vec::new(),
@@ -799,6 +816,51 @@ mod tests {
         // In Darkness stage, complete_emergence should fail
         let result = orch.complete_emergence();
         assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_stage_from_name() {
+        assert_eq!(BirthStage::from_name("Darkness"), Some(BirthStage::Darkness));
+        assert_eq!(BirthStage::from_name("Ignition"), Some(BirthStage::Ignition));
+        assert_eq!(BirthStage::from_name("Connectivity"), Some(BirthStage::Connectivity));
+        assert_eq!(BirthStage::from_name("Genesis"), Some(BirthStage::Genesis));
+        assert_eq!(BirthStage::from_name("Emergence"), Some(BirthStage::Emergence));
+        assert_eq!(BirthStage::from_name("bogus"), None);
+        assert_eq!(BirthStage::from_name(""), None);
+    }
+
+    #[test]
+    fn test_new_restores_persisted_stage() {
+        let tmp = std::env::temp_dir().join("orion_birth_restore_stage");
+        let _ = fs::remove_dir_all(&tmp);
+
+        // Fresh config — should default to Darkness
+        let config = test_config(&tmp);
+        let orch = BirthOrchestrator::new(config).unwrap();
+        assert_eq!(orch.current_stage(), BirthStage::Darkness);
+        drop(orch);
+
+        // Config with persisted Ignition stage — should restore to Ignition
+        let mut config2 = test_config(&tmp);
+        config2.birth_stage = Some("Ignition".to_string());
+        let orch2 = BirthOrchestrator::new(config2).unwrap();
+        assert_eq!(orch2.current_stage(), BirthStage::Ignition);
+        drop(orch2);
+
+        // Config with persisted Connectivity stage — should restore to Connectivity
+        let mut config3 = test_config(&tmp);
+        config3.birth_stage = Some("Connectivity".to_string());
+        let orch3 = BirthOrchestrator::new(config3).unwrap();
+        assert_eq!(orch3.current_stage(), BirthStage::Connectivity);
+        drop(orch3);
+
+        // Config with unknown stage string — should fall back to Darkness
+        let mut config4 = test_config(&tmp);
+        config4.birth_stage = Some("unknown_stage".to_string());
+        let orch4 = BirthOrchestrator::new(config4).unwrap();
+        assert_eq!(orch4.current_stage(), BirthStage::Darkness);
 
         let _ = fs::remove_dir_all(&tmp);
     }

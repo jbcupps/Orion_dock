@@ -27,7 +27,7 @@ export default function ForgeScenario({
   const [state, setState] = useState(initialState ?? 'scenario1');
   const [prompt, setPrompt] = useState(initialPrompt ?? '');
   const [choices, setChoices] = useState<string[]>(initialChoices ?? []);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [, setSelected] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{
     archetype: string;

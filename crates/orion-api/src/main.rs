@@ -5,7 +5,8 @@ use axum::{
 };
 use orion_birth::{GenesisPath, SoulCrystallizationDepth};
 use orion_core::{
-    AppConfig, GlobalConfig, AgentEntry, CONFIG_SCHEMA_VERSION, MemoryBackend, RoutingMode,
+    validate_local_llm_url, AgentEntry, AppConfig, GlobalConfig, MemoryBackend, RoutingMode,
+    CONFIG_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use std::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
+
 
 #[derive(Clone)]
 struct AppState {
@@ -75,13 +77,17 @@ fn agent_dir(id: &str) -> Option<PathBuf> {
 
 /// Persist genesis path for an agent so it can be restored when loading orchestrator.
 fn persist_genesis_path(id: &str, path: &GenesisPath) -> Result<(), std::io::Error> {
-    let dir = agent_dir(id).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data root"))?;
+    let dir = agent_dir(id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data root"))?;
     let depth = match path {
         GenesisPath::SoulCrystallization { depth } => Some(depth.as_str().to_string()),
         _ => None,
     };
     let value = serde_json::json!({ "path": path.id(), "depth": depth });
-    std::fs::write(dir.join("genesis_path.json"), serde_json::to_string_pretty(&value).unwrap())
+    std::fs::write(
+        dir.join("genesis_path.json"),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
 }
 
 /// Read only birth_complete and birth_stage from config.json (no migrations).
@@ -160,6 +166,19 @@ struct ForgeSelectRequest {
 }
 
 #[derive(Serialize)]
+struct BirthStateResponse {
+    stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_base64: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IgnitionRequest {
+    #[serde(default)]
+    local_llm_base_url: Option<String>,
+}
+
+#[derive(Serialize)]
 struct CreateAgentResponse {
     id: String,
 }
@@ -183,7 +202,8 @@ async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
-async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::StatusCode, String)> {
+async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::StatusCode, String)>
+{
     let root = data_root().ok_or_else(|| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -271,9 +291,7 @@ async fn api_create_agent(
         )
     })?;
 
-    let database_url = std::env::var("DATABASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
     let memory_backend = std::env::var("MEMORY_BACKEND")
         .ok()
         .unwrap_or_else(|| "sqlite".to_string());
@@ -335,12 +353,7 @@ async fn api_create_agent(
         name: name.to_string(),
         directory: PathBuf::from(format!("identities/{}", uuid)),
     })
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::CONFLICT,
-            e.to_string(),
-        )
-    })?;
+    .map_err(|e| (axum::http::StatusCode::CONFLICT, e.to_string()))?;
     gc.save(&root).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -392,6 +405,181 @@ async fn api_load_agent(
     })?;
 
     tracing::info!("Loaded agent {}", id);
+    Ok(Json(HealthResponse { status: "ok" }))
+}
+
+/// GET /api/agents/:id/birth/state — materialize Darkness if needed and return stage + one-time private key.
+async fn api_birth_state(
+    Path(id): Path<String>,
+) -> Result<Json<BirthStateResponse>, (axum::http::StatusCode, String)> {
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load config: {}", e),
+        )
+    })?;
+    if config.birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Agent birth already complete".to_string(),
+        ));
+    }
+
+    // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
+    let cp = config_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<BirthStateResponse, String> {
+        let mut orch = orion_birth::BirthOrchestrator::new(config.clone())
+            .map_err(|e| format!("Orchestrator: {}", e))?;
+
+        let stage = orch.current_stage();
+        let stage_name = stage.name().to_string();
+
+        let private_key_base64 = if stage == orion_birth::BirthStage::Darkness {
+            let pubkey_path = config.data_dir.join("external_pubkey.bin");
+            if !pubkey_path.exists() {
+                orch.generate_identity(&config.docs_dir)
+                    .map_err(|e| format!("Generate identity: {}", e))?;
+                orch.config_mut()
+                    .set_birth_stage(orion_birth::BirthStage::Darkness.name());
+                orch.config_mut()
+                    .save(&cp)
+                    .map_err(|e| format!("Save config: {}", e))?;
+                orch.get_private_key_base64().map(String::from)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(BirthStateResponse {
+            stage: stage_name,
+            private_key_base64,
+        })
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join: {}", e),
+        )
+    })?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+/// POST /api/agents/:id/birth/advance-darkness — user has saved the private key; advance to Ignition.
+async fn api_birth_advance_darkness(
+    Path(id): Path<String>,
+) -> Result<Json<HealthResponse>, (axum::http::StatusCode, String)> {
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load config: {}", e),
+        )
+    })?;
+
+    if config.birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Agent birth already complete".to_string(),
+        ));
+    }
+
+    // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut orch = orion_birth::BirthOrchestrator::new(config)
+            .map_err(|e| format!("Orchestrator: {}", e))?;
+        orch.advance_past_darkness()
+            .map_err(|e| format!("Advance: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join: {}", e),
+        )
+    })?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(HealthResponse { status: "ok" }))
+}
+
+/// POST /api/agents/:id/birth/ignition — set local LLM URL (optional) and advance to Connectivity.
+async fn api_birth_ignition(
+    Path(id): Path<String>,
+    Json(body): Json<IgnitionRequest>,
+) -> Result<Json<HealthResponse>, (axum::http::StatusCode, String)> {
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load config: {}", e),
+        )
+    })?;
+
+    if config.birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Agent birth already complete".to_string(),
+        ));
+    }
+
+    if let Some(ref url) = body.local_llm_base_url {
+        let validated = validate_local_llm_url(url).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid local LLM URL: {}", e),
+            )
+        })?;
+        config.local_llm_base_url = Some(validated);
+        config.save(&config_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Save config: {}", e),
+            )
+        })?;
+    }
+
+    // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut orch = orion_birth::BirthOrchestrator::new(config)
+            .map_err(|e| format!("Orchestrator: {}", e))?;
+        orch.advance_to_connectivity()
+            .map_err(|e| format!("Advance: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join: {}", e),
+        )
+    })?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     Ok(Json(HealthResponse { status: "ok" }))
 }
 
@@ -461,36 +649,35 @@ async fn api_genesis_start(
         }
     };
 
-    let mut orch = orion_birth::BirthOrchestrator::new(config.clone()).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Orchestrator: {}", e),
-        )
-    })?;
+    // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
+    let path_clone = path.clone();
+    let id_clone = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut orch = orion_birth::BirthOrchestrator::new(config.clone())
+            .map_err(|e| format!("Orchestrator: {}", e))?;
 
-    if orch.current_stage() != orion_birth::BirthStage::Connectivity {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            format!(
+        if orch.current_stage() != orion_birth::BirthStage::Connectivity {
+            return Err(format!(
                 "Agent must be in Connectivity stage to start Genesis (current: {:?})",
                 orch.current_stage()
-            ),
-        ));
-    }
+            ));
+        }
 
-    orch.advance_to_genesis_with_path(path.clone()).map_err(|e| {
+        orch.advance_to_genesis_with_path(path_clone.clone())
+            .map_err(|e| format!("Failed to advance: {}", e))?;
+
+        persist_genesis_path(&id_clone, &path_clone)
+            .map_err(|e| format!("Failed to persist path: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to advance: {}", e),
+            format!("Task join: {}", e),
         )
-    })?;
-
-    persist_genesis_path(&id, &path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to persist path: {}", e),
-        )
-    })?;
+    })?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if let GenesisPath::SoulForge = path {
         let mut app = soul_forge::App::new();
@@ -534,7 +721,8 @@ async fn api_genesis_forge_select(
     let app = apps.get_mut(&id).ok_or_else(|| {
         (
             axum::http::StatusCode::NOT_FOUND,
-            "No Soul Forge session for this agent. Start Genesis with path soul_forge first.".to_string(),
+            "No Soul Forge session for this agent. Start Genesis with path soul_forge first."
+                .to_string(),
         )
     })?;
 
@@ -617,9 +805,18 @@ async fn main() -> std::io::Result<()> {
         .route("/api/identities", get(api_identities))
         .route("/api/agents", post(api_create_agent))
         .route("/api/agents/:id/load", post(api_load_agent))
+        .route("/api/agents/:id/birth/state", get(api_birth_state))
+        .route(
+            "/api/agents/:id/birth/advance-darkness",
+            post(api_birth_advance_darkness),
+        )
+        .route("/api/agents/:id/birth/ignition", post(api_birth_ignition))
         .route("/api/genesis/paths", get(api_genesis_paths))
         .route("/api/agents/:id/genesis/start", post(api_genesis_start))
-        .route("/api/agents/:id/genesis/forge/select", post(api_genesis_forge_select))
+        .route(
+            "/api/agents/:id/genesis/forge/select",
+            post(api_genesis_forge_select),
+        )
         .layer(cors)
         .with_state(state);
 

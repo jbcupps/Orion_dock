@@ -146,6 +146,53 @@ body {
   color: var(--muted);
 }
 
+.private-key-block {
+  margin: 0.75rem 0;
+  padding: 0.75rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+.button-primary {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.button-primary:hover {
+  background: var(--accent-dim);
+}
+
+.birth-darkness-panel label,
+.birth-ignition-panel label {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.input-url {
+  display: block;
+  width: 100%;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
 /* Splash screen */
 .splash-screen {
   position: fixed;

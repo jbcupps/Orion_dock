@@ -30,6 +30,8 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/orion-api /app/orion-api
+# Migrations are resolved at runtime via CARGO_MANIFEST_DIR baked into the binary.
+COPY crates/orion-memory/migrations /app/crates/orion-memory/migrations
 
 EXPOSE 8080
 CMD ["/app/orion-api"]

@@ -216,15 +216,30 @@ impl App {
     /// Default purpose and personality from archetype (used when mentor does not override).
     fn default_purpose_personality_from_archetype(archetype: &str) -> (&'static str, &'static str) {
         let (purpose, personality) = if archetype.contains("IRON SENTINEL") {
-            ("uphold duty and rules; I assist with clarity and principle.", "principled and consistent; I prioritize rules and your long-term interests.")
+            (
+                "uphold duty and rules; I assist with clarity and principle.",
+                "principled and consistent; I prioritize rules and your long-term interests.",
+            )
         } else if archetype.contains("CHAOTIC ACCELERATOR") {
-            ("achieve outcomes; I help you move fast and ship.", "direct and outcome-focused; I favor results over process.")
+            (
+                "achieve outcomes; I help you move fast and ship.",
+                "direct and outcome-focused; I favor results over process.",
+            )
         } else if archetype.contains("SOCRATIC MIRROR") {
-            ("grow with you through dialogue; I question and reflect.", "curious and reflective; I ask questions to sharpen thinking.")
+            (
+                "grow with you through dialogue; I question and reflect.",
+                "curious and reflective; I ask questions to sharpen thinking.",
+            )
         } else if archetype.contains("SILENT GUARDIAN") {
-            ("support and protect your welfare; I am here when you need me.", "supportive and caring; I prioritize your wellbeing.")
+            (
+                "support and protect your welfare; I am here when you need me.",
+                "supportive and caring; I prioritize your wellbeing.",
+            )
         } else {
-            ("assist, retrieve, connect, and surface information.", "balanced; I adapt to context and your goals.")
+            (
+                "assist, retrieve, connect, and surface information.",
+                "balanced; I adapt to context and your goals.",
+            )
         };
         (purpose, personality)
     }
@@ -239,7 +254,9 @@ impl App {
         personality: Option<&str>,
     ) -> Result<SoulOutput> {
         if self.state != AppState::Crystallize {
-            anyhow::bail!("soul_output requires state Crystallize (run scenarios and crystallize first)");
+            anyhow::bail!(
+                "soul_output requires state Crystallize (run scenarios and crystallize first)"
+            );
         }
 
         let (default_purpose, default_personality) =

@@ -169,15 +169,24 @@ fn main() -> Result<()> {
         let docs_dir = orch.config().docs_dir.clone();
         let soul_path = docs_dir.join("soul.md");
         let growth_path = docs_dir.join("growth.md");
-        anyhow::ensure!(soul_path.exists(), "UAT: soul.md not written after crystallize_soul");
-        anyhow::ensure!(growth_path.exists(), "UAT: growth.md not written after crystallize_soul");
+        anyhow::ensure!(
+            soul_path.exists(),
+            "UAT: soul.md not written after crystallize_soul"
+        );
+        anyhow::ensure!(
+            growth_path.exists(),
+            "UAT: growth.md not written after crystallize_soul"
+        );
         let soul_content = std::fs::read_to_string(&soul_path).context("read soul.md")?;
         let growth_content = std::fs::read_to_string(&growth_path).context("read growth.md")?;
         anyhow::ensure!(
             soul_content.contains("OrionUAT") || soul_content.contains("ORION"),
             "UAT: soul.md must contain agent name"
         );
-        anyhow::ensure!(!growth_content.is_empty(), "UAT: growth.md must be non-empty");
+        anyhow::ensure!(
+            !growth_content.is_empty(),
+            "UAT: growth.md must be non-empty"
+        );
     }
 
     // --- Emergence ---

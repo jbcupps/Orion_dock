@@ -1,5 +1,13 @@
-import { useEffect, useState } from 'react';
-import { fetchHealth, fetchStatus, type StatusResponse } from './api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  advanceDarkness,
+  fetchBirthState,
+  fetchHealth,
+  fetchStatus,
+  setIgnition,
+  type BirthStateResponse,
+  type StatusResponse,
+} from './api';
 import { stageDisplayMessage, OPERATION_MESSAGE } from './birthStages';
 import SplashScreen from './components/SplashScreen';
 import HiveScreen from './components/HiveScreen';
@@ -21,6 +29,10 @@ function App() {
     prompt?: string;
     choices?: string[];
   } | null>(null);
+  const [birthState, setBirthState] = useState<BirthStateResponse | null>(null);
+  const [birthStateLoading, setBirthStateLoading] = useState(false);
+  const [birthStateError, setBirthStateError] = useState<string | null>(null);
+  const [ignitionUrl, setIgnitionUrl] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +75,70 @@ function App() {
     };
   }, [appState]);
 
+  // Materialize Darkness and get one-time private key when in early birth
+  const needBirthState =
+    currentAgentId &&
+    status &&
+    !status.birth_complete &&
+    (status.birth_stage == null || status.birth_stage === 'Darkness');
+  useEffect(() => {
+    if (!needBirthState || !currentAgentId) return;
+    if (birthState != null && birthState.stage === 'Darkness') return;
+    let cancelled = false;
+    setBirthStateError(null);
+    setBirthStateLoading(true);
+    (async () => {
+      try {
+        const state = await fetchBirthState(currentAgentId);
+        if (!cancelled) {
+          setBirthState(state);
+          setBirthStateError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setBirthState(null);
+          setBirthStateError(e instanceof Error ? e.message : 'Failed to load birth state');
+        }
+      } finally {
+        if (!cancelled) setBirthStateLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentAgentId, needBirthState, birthState?.stage]);
+
+  const handleSavedKey = useCallback(async () => {
+    if (!currentAgentId) return;
+    setError(null);
+    try {
+      await advanceDarkness(currentAgentId);
+      setBirthState(null);
+      const s = await fetchStatus();
+      setStatus(s);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to advance');
+    }
+  }, [currentAgentId]);
+
+  const handleIgnitionSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!currentAgentId) return;
+      setError(null);
+      try {
+        await setIgnition(
+          currentAgentId,
+          ignitionUrl.trim() || undefined
+        );
+        setIgnitionUrl('');
+        const s = await fetchStatus();
+        setStatus(s);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to set Ignition');
+      }
+    },
+    [currentAgentId, ignitionUrl]
+  );
+
   const handleSplashComplete = () => {
     setAppState('hive');
   };
@@ -83,6 +159,8 @@ function App() {
     setCurrentAgentId(null);
     setGenesisPathStarted(null);
     setForgeInitial(null);
+    setBirthState(null);
+    setBirthStateError(null);
   };
 
   const handleGenesisStarted = (
@@ -126,6 +204,17 @@ function App() {
       ? OPERATION_MESSAGE
       : stageDisplayMessage(status?.birth_stage ?? null);
 
+  // Show Darkness panel whenever we're in early birth (null or Darkness) so user always sees this step
+  const showDarknessPanel =
+    currentAgentId &&
+    status &&
+    !status.birth_complete &&
+    (status.birth_stage == null || status.birth_stage === 'Darkness');
+  const showIgnitionPanel =
+    currentAgentId &&
+    status &&
+    !status.birth_complete &&
+    status.birth_stage === 'Ignition';
   const showPathSelector =
     status && !status.birth_complete && status.birth_stage === 'Connectivity' && currentAgentId;
   const showForgeScenario =
@@ -150,7 +239,79 @@ function App() {
       </header>
       {error && <p className="error">{error}</p>}
       <main className="main">
-        {showPathSelector && (
+        {showDarknessPanel && (
+          <section className="panel birth-darkness-panel">
+            <h2>Darkness</h2>
+            <p className="phase-message">Save your identity key. You will only see it once.</p>
+            {birthStateError && (
+              <p className="error">
+                {birthStateError}
+                <button
+                  type="button"
+                  className="button-primary"
+                  style={{ marginLeft: '0.75rem' }}
+                  onClick={() => {
+                    setBirthStateError(null);
+                    setBirthState(null);
+                  }}
+                >
+                  Retry
+                </button>
+              </p>
+            )}
+            {!birthStateError && birthStateLoading && (
+              <p className="muted">Generating identity…</p>
+            )}
+            {!birthStateError && !birthStateLoading && birthState?.private_key_base64 && (
+              <>
+                <pre className="private-key-block" aria-label="Private key (base64)">
+                  {birthState.private_key_base64}
+                </pre>
+                <p className="muted">Store this key securely. It cannot be recovered.</p>
+                <button
+                  type="button"
+                  className="button-primary"
+                  onClick={handleSavedKey}
+                >
+                  I&apos;ve saved the key
+                </button>
+              </>
+            )}
+            {!birthStateError && !birthStateLoading && birthState && !birthState.private_key_base64 && (
+              <>
+                <p className="muted">Key was already shown. Continue to Ignition.</p>
+                <button
+                  type="button"
+                  className="button-primary"
+                  onClick={handleSavedKey}
+                >
+                  Continue to Ignition
+                </button>
+              </>
+            )}
+          </section>
+        )}
+        {showIgnitionPanel && (
+          <section className="panel birth-ignition-panel">
+            <h2>Ignition</h2>
+            <p className="phase-message">Configure your local LLM (e.g. Ollama). Use localhost or 127.0.0.1.</p>
+            <form onSubmit={handleIgnitionSubmit}>
+              <label htmlFor="ignition-url">Local LLM base URL (optional if already set)</label>
+              <input
+                id="ignition-url"
+                type="url"
+                placeholder="http://localhost:11434"
+                value={ignitionUrl}
+                onChange={(e) => setIgnitionUrl(e.target.value)}
+                className="input-url"
+              />
+              <button type="submit" className="button-primary">
+                Continue to Connectivity
+              </button>
+            </form>
+          </section>
+        )}
+        {showPathSelector && !showDarknessPanel && !showIgnitionPanel && (
           <section className="panel genesis-panel">
             <GenesisPathSelector
               agentId={currentAgentId}
@@ -159,7 +320,7 @@ function App() {
             />
           </section>
         )}
-        {showForgeScenario && !showPathSelector && (
+        {showForgeScenario && !showPathSelector && !showDarknessPanel && !showIgnitionPanel && (
           <section className="panel forge-panel">
             <ForgeScenario
               agentId={currentAgentId!}
@@ -171,7 +332,7 @@ function App() {
             />
           </section>
         )}
-        {!showPathSelector && !showForgeScenario && (
+        {!showPathSelector && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
           <>
             <section className="panel phase-panel">
               <h2>{phase}</h2>
