@@ -266,17 +266,23 @@ pub fn redact_api_keys(text: &str) -> String {
     result
 }
 
-/// Parse ```tool_request\n{...}``` blocks from assistant content.
+/// Parse tool request blocks from assistant content.
+///
+/// Supports two formats that LLMs commonly emit:
+/// 1. Code-fenced: `` ```tool_request\n{...}``` ``
+/// 2. XML-tagged: `<tool_request>\n{...}\n</tool_request>`
+///
 /// Returns (content with blocks stripped, vec of parsed tool requests).
 pub fn parse_tool_requests(content: &str) -> (String, Vec<BirthToolRequest>) {
-    const MARKER: &str = "```tool_request";
-    let mut out = String::with_capacity(content.len());
     let mut tool_requests = Vec::new();
-    let mut rest = content;
 
-    while let Some(open) = rest.find(MARKER) {
+    // Pass 1: extract code-fenced blocks (```tool_request ... ```)
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    const CODE_MARKER: &str = "```tool_request";
+    while let Some(open) = rest.find(CODE_MARKER) {
         out.push_str(&rest[..open]);
-        rest = &rest[open + MARKER.len()..];
+        rest = &rest[open + CODE_MARKER.len()..];
         let close = rest.find("```").unwrap_or(rest.len());
         let block = rest[..close].trim();
         rest = rest[close.min(rest.len())..]
@@ -288,7 +294,28 @@ pub fn parse_tool_requests(content: &str) -> (String, Vec<BirthToolRequest>) {
         }
     }
     out.push_str(rest);
-    (out.trim().to_string(), tool_requests)
+
+    // Pass 2: extract XML-tagged blocks (<tool_request> ... </tool_request>)
+    let mut out2 = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    const XML_OPEN: &str = "<tool_request>";
+    const XML_CLOSE: &str = "</tool_request>";
+    while let Some(open) = rest.find(XML_OPEN) {
+        out2.push_str(&rest[..open]);
+        rest = &rest[open + XML_OPEN.len()..];
+        let close = rest.find(XML_CLOSE).unwrap_or(rest.len());
+        let block = rest[..close].trim();
+        rest = rest[close.min(rest.len())..]
+            .strip_prefix(XML_CLOSE)
+            .unwrap_or(rest);
+
+        if let Ok(parsed) = serde_json::from_str::<BirthToolRequest>(block) {
+            tool_requests.push(parsed);
+        }
+    }
+    out2.push_str(rest);
+
+    (out2.trim().to_string(), tool_requests)
 }
 
 #[cfg(test)]

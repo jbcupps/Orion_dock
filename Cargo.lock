@@ -233,6 +233,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "async-task"
 version = "4.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2300,16 +2322,28 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 name = "orion-api"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "axum",
  "base64 0.21.7",
+ "chrono",
+ "futures-core",
  "orion-birth",
  "orion-capabilities",
  "orion-core",
  "orion-router",
+ "orion-skills",
  "serde",
  "serde_json",
+ "skill-filesystem",
+ "skill-http",
+ "skill-perplexity-search",
+ "skill-proton-mail",
+ "skill-shell",
+ "skill-web-browse",
+ "skill-web-search",
  "soul-forge",
  "tokio",
+ "tokio-stream",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -2440,15 +2474,19 @@ dependencies = [
  "async-imap",
  "async-native-tls",
  "async-trait",
+ "base64 0.21.7",
  "chrono",
+ "ed25519-dalek",
  "futures-util",
  "lettre",
  "mail-parser",
  "notify",
  "orion-core",
+ "rand 0.8.5",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

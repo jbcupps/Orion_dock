@@ -432,6 +432,181 @@ export async function sendChat(
   return res.json();
 }
 
+// ---- Agentic Loop API ----
+
+export interface AgenticRunRequest {
+  goal: string;
+  max_turns?: number;
+  auto_approve_safe_tools?: boolean;
+}
+
+export interface AgenticRunStartResponse {
+  task_id: string;
+  stream_url: string;
+}
+
+export interface AgenticEventThinking {
+  event: 'Thinking';
+  data: { turn: number; content: string };
+}
+
+export interface AgenticEventToolCall {
+  event: 'ToolCall';
+  data: { turn: number; tool_name: string; arguments: unknown };
+}
+
+export interface AgenticEventToolResult {
+  event: 'ToolResult';
+  data: { turn: number; tool_name: string; success: boolean; output: string };
+}
+
+export interface AgenticEventMentorNeeded {
+  event: 'MentorNeeded';
+  data: { turn: number; question: string };
+}
+
+export interface AgenticEventConfirmationNeeded {
+  event: 'ConfirmationNeeded';
+  data: { turn: number; tool_name: string; arguments: unknown };
+}
+
+export interface AgenticEventDone {
+  event: 'Done';
+  data: { summary: string; status: string; turns_used: number; tool_calls: number };
+}
+
+export interface AgenticEventError {
+  event: 'Error';
+  data: { message: string };
+}
+
+export type AgenticEvent =
+  | AgenticEventThinking
+  | AgenticEventToolCall
+  | AgenticEventToolResult
+  | AgenticEventMentorNeeded
+  | AgenticEventConfirmationNeeded
+  | AgenticEventDone
+  | AgenticEventError;
+
+export async function startAgenticRun(
+  agentId: string,
+  request: AgenticRunRequest
+): Promise<AgenticRunStartResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/run`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Start agentic run failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export function subscribeToAgenticStream(
+  agentId: string,
+  taskId: string,
+  onEvent: (eventName: string, data: unknown) => void,
+  onError?: (error: Event) => void
+): EventSource {
+  const base = getBaseUrl();
+  const url = `${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`;
+  const es = new EventSource(url);
+
+  const eventTypes = [
+    'thinking',
+    'tool_call',
+    'tool_result',
+    'mentor_needed',
+    'confirmation_needed',
+    'done',
+    'error',
+    'lagged',
+  ];
+
+  for (const eventType of eventTypes) {
+    es.addEventListener(eventType, (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        onEvent(eventType, data);
+      } catch {
+        onEvent(eventType, event.data);
+      }
+    });
+  }
+
+  if (onError) {
+    es.onerror = onError;
+  }
+
+  return es;
+}
+
+export async function respondToAgent(
+  agentId: string,
+  taskId: string,
+  response: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/respond`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, response }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Respond to agent failed: ${res.status}`);
+  }
+}
+
+export async function confirmAgentTool(
+  agentId: string,
+  taskId: string,
+  approved: boolean
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/confirm`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, approved }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Confirm tool failed: ${res.status}`);
+  }
+}
+
+export async function cancelAgenticRun(
+  agentId: string,
+  taskId: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/cancel`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Cancel agentic run failed: ${res.status}`);
+  }
+}
+
 // ---- External Verification API ----
 
 export interface AgentIdentityBundle {

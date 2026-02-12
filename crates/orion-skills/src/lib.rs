@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod registry;
 pub mod runtime;
 pub mod sandbox;
+pub mod signing;
 pub mod skill;
 pub mod transport;
 pub mod watcher;

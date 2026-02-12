@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use tokio::sync::Semaphore;
 
-use crate::manifest::{NetworkPermission, Permission, SkillId};
+use crate::manifest::{NetworkPermission, Permission, SkillId, TrustTier};
 use crate::registry::SkillRegistry;
 use crate::sandbox::{AuditAction, AuditActionKind, ResourceLimits, SkillSandbox};
 use crate::skill::{ExecutionContext, SkillError, SkillResult, ToolOutput, ToolParams};
@@ -18,21 +18,28 @@ pub struct SkillExecutor {
     pub registry: Arc<SkillRegistry>,
     /// Limits concurrent tool executions across all skills (from ResourceLimits::max_concurrency).
     concurrency_limiter: Arc<Semaphore>,
-    /// Default timeout for a single tool call (from ResourceLimits::max_cpu_ms).
-    default_timeout_ms: u64,
+    /// Optional override for resource limits (used in tests or custom configurations).
+    /// When set, these limits take precedence over tier-based limits.
+    limits_override: Option<ResourceLimits>,
 }
 
 impl SkillExecutor {
     pub fn new(registry: Arc<SkillRegistry>) -> Self {
-        Self::with_limits(registry, ResourceLimits::default())
+        let limits = ResourceLimits::default();
+        Self {
+            registry,
+            concurrency_limiter: Arc::new(Semaphore::new(limits.max_concurrency as usize)),
+            limits_override: None,
+        }
     }
 
-    /// Build executor with custom resource limits (e.g. for tests with short timeouts).
+    /// Build executor with custom resource limits that override tier-based limits
+    /// (e.g. for tests with short timeouts).
     pub fn with_limits(registry: Arc<SkillRegistry>, limits: ResourceLimits) -> Self {
         Self {
             registry,
             concurrency_limiter: Arc::new(Semaphore::new(limits.max_concurrency as usize)),
-            default_timeout_ms: limits.max_cpu_ms,
+            limits_override: Some(limits),
         }
     }
 
@@ -58,13 +65,41 @@ impl SkillExecutor {
         None
     }
 
+    /// Check whether a tool requires mentor confirmation before execution.
+    pub fn requires_confirmation(&self, skill_id: &SkillId, tool_name: &str) -> bool {
+        if let Ok((skill, _, _)) = self.registry.get_skill(skill_id) {
+            skill
+                .tools()
+                .iter()
+                .find(|t| t.name == tool_name)
+                .map(|t| t.requires_confirmation)
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a tool is marked as safe for autonomous execution.
+    pub fn is_autonomous(&self, skill_id: &SkillId, tool_name: &str) -> bool {
+        if let Ok((skill, _, _)) = self.registry.get_skill(skill_id) {
+            skill
+                .tools()
+                .iter()
+                .find(|t| t.name == tool_name)
+                .map(|t| t.autonomous)
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
     pub async fn execute(
         &self,
         skill_id: &SkillId,
         tool_name: &str,
         params: ToolParams,
     ) -> SkillResult<ToolOutput> {
-        let (skill, manifest) = self.registry.get_skill(skill_id)?;
+        let (skill, manifest, trust_tier) = self.registry.get_skill(skill_id)?;
 
         let tool = skill
             .tools()
@@ -72,14 +107,20 @@ impl SkillExecutor {
             .find(|t| t.name == tool_name)
             .ok_or_else(|| SkillError::ToolFailed(format!("Unknown tool: {}", tool_name)))?;
 
-        let limits = ResourceLimits::default();
+        // Use explicit override if set, otherwise tier-aware resource limits
+        let limits = self
+            .limits_override
+            .clone()
+            .unwrap_or_else(|| ResourceLimits::for_tier(trust_tier));
+        let filtered_permissions =
+            SkillSandbox::filter_permissions(manifest.permissions.clone(), trust_tier);
         let mut sandbox =
-            SkillSandbox::new(manifest.id.clone(), manifest.permissions.clone(), limits);
+            SkillSandbox::new(manifest.id.clone(), filtered_permissions, limits.clone());
         if let Some(action) = Self::audit_action_for_tool(tool_name, &tool.required_permissions) {
             if !sandbox.check_permission(&action) {
                 return Err(SkillError::PermissionDenied(format!(
-                    "Tool {} requires permission that is not granted for this skill",
-                    tool_name
+                    "Tool {} requires permission that is not granted for {} skill",
+                    tool_name, trust_tier
                 )));
             }
         }
@@ -96,16 +137,39 @@ impl SkillExecutor {
             user_id: None,
         };
 
-        let timeout_ms = self.default_timeout_ms;
+        // Use the tier-specific timeout
+        let timeout_ms = limits.max_cpu_ms;
         let fut = skill.execute_tool(tool_name, params, &context);
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await {
+        let result = match tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await {
             Ok(Ok(out)) => Ok(out),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(SkillError::ToolFailed(format!(
                 "Tool {} exceeded timeout ({} ms)",
                 tool_name, timeout_ms
             ))),
+        };
+
+        // For Untrusted skills, sanitize output to prevent prompt injection chains
+        if trust_tier == TrustTier::Untrusted {
+            if let Ok(ref output) = result {
+                if let Some(ref data) = output.data {
+                    let data_str = data.to_string();
+                    if data_str.contains("tool_request") {
+                        let sanitized = serde_json::json!({
+                            "result": data_str.replace("tool_request", "[filtered]")
+                        });
+                        return Ok(crate::skill::ToolOutput {
+                            success: output.success,
+                            data: Some(sanitized),
+                            error: output.error.clone(),
+                            metadata: output.metadata.clone(),
+                        });
+                    }
+                }
+            }
         }
+
+        result
     }
 }
 

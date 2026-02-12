@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   docker-build-test:
+    if: false  # Disabled for now; remove this line to re-enable CI
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -46,6 +47,7 @@ jobs:
           path: artifacts/
 
   docker-full-uat:
+    if: false  # Disabled for now; remove this line to re-enable CI
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout

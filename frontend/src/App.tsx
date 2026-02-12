@@ -20,6 +20,7 @@ import ForgeScenario from './components/ForgeScenario';
 import GenesisChat from './components/GenesisChat';
 import ConnectivityPanel from './components/ConnectivityPanel';
 import OperationalChat from './components/OperationalChat';
+import AgenticPanel from './components/AgenticPanel';
 import './App.css';
 
 type AppState = 'splash' | 'hive' | 'dashboard';
@@ -43,6 +44,7 @@ function App() {
   const [connectivityDone, setConnectivityDone] = useState(false);
   const [storedProviders, setStoredProviders] = useState<string[]>([]);
   const [showChat, setShowChat] = useState(false);
+  const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
 
   useEffect(() => {
     let cancelled = false;
@@ -542,12 +544,40 @@ function App() {
         )}
         {showChat && status?.birth_complete && currentAgentId && (
           <section className="panel operational-chat-panel">
-            <h2>Chat with {status.agent_name || 'agent'}</h2>
-            <OperationalChat
-              agentId={currentAgentId}
-              agentName={status.agent_name ?? undefined}
-              onError={setError}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+              <h2 style={{ margin: 0 }}>
+                {chatMode === 'chat' ? `Chat with ${status.agent_name || 'agent'}` : 'Agentic Task'}
+              </h2>
+              <div style={{ display: 'flex', gap: '0.25rem' }}>
+                <button
+                  className={chatMode === 'chat' ? 'button-primary' : 'button-secondary'}
+                  onClick={() => setChatMode('chat')}
+                  style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                >
+                  Chat
+                </button>
+                <button
+                  className={chatMode === 'agentic' ? 'button-primary' : 'button-secondary'}
+                  onClick={() => setChatMode('agentic')}
+                  style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                >
+                  Agentic
+                </button>
+              </div>
+            </div>
+            {chatMode === 'chat' ? (
+              <OperationalChat
+                agentId={currentAgentId}
+                agentName={status.agent_name ?? undefined}
+                onError={setError}
+              />
+            ) : (
+              <AgenticPanel
+                agentId={currentAgentId}
+                agentName={status.agent_name ?? undefined}
+                onError={setError}
+              />
+            )}
           </section>
         )}
         <section className="panel status-panel">

@@ -1,5 +1,8 @@
+mod agentic;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
@@ -9,21 +12,33 @@ use orion_birth::{
     detect_provider_from_key, execute_store_provider_key, extract_api_keys_from_text,
     parse_tool_requests, redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
 };
-use orion_core::system_prompt::build_system_prompt;
+use orion_core::system_prompt::{
+    build_system_prompt, build_system_prompt_with_skills, SkillToolEntry,
+};
 use orion_core::templates::{fill_soul_template, GROWTH_MD};
 use orion_core::{
     validate_local_llm_url, AgentEntry, AppConfig, CoreDocument, GlobalConfig, MemoryBackend,
     RoutingMode, SecretsVault, SigMeta, Verifier, CONFIG_SCHEMA_VERSION,
 };
+use orion_skills::manifest::TrustTier;
+use orion_skills::skill::Skill;
+use orion_skills::{SkillExecutor, SkillRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
+
+use agentic::{
+    AgenticEvent, AgenticLoopConfig, AgenticRunRequest, AgenticRunResponse, AgenticStatusResponse,
+    AgenticTask, AgenticTaskStatus, CancelRequest, ConfirmationResponseRequest,
+    MentorResponseRequest,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -31,10 +46,16 @@ struct AppState {
     local_llm_base_url: Option<String>,
     birth_model: Option<String>,
     /// Soul Forge app state per agent id (when Genesis path is Soul Forge).
-    forge_apps: std::sync::Arc<Mutex<HashMap<String, soul_forge::App>>>,
+    forge_apps: Arc<Mutex<HashMap<String, soul_forge::App>>>,
     /// Ed25519 signing key bytes held per agent (from Darkness to Emergence).
     /// Keys are stored here after generation and retrieved at Emergence for document signing.
-    birth_keys: std::sync::Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    birth_keys: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// Central skill registry with trust-tiered skills.
+    skill_registry: Arc<SkillRegistry>,
+    /// Skill executor for running tools with sandbox enforcement.
+    skill_executor: Arc<SkillExecutor>,
+    /// Active agentic tasks keyed by task_id.
+    agentic_tasks: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<AgenticTask>>>>>,
 }
 
 fn data_root() -> Option<PathBuf> {
@@ -1878,8 +1899,31 @@ async fn api_operational_chat_history(
     Ok(Json(serde_json::json!({ "messages": messages })))
 }
 
+/// Build SkillToolEntry list from the skill registry for system prompt injection.
+fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
+    let mut entries = Vec::new();
+    if let Ok(skills) = registry.list_with_tiers() {
+        for (manifest, tier) in skills {
+            if let Ok((skill, _, _)) = registry.get_skill(&manifest.id) {
+                for tool in skill.tools() {
+                    entries.push(SkillToolEntry {
+                        skill_name: manifest.name.clone(),
+                        skill_id: manifest.id.0.clone(),
+                        trust_tier: tier.to_string(),
+                        tool_name: tool.name,
+                        tool_description: tool.description,
+                        parameters: tool.parameters,
+                    });
+                }
+            }
+        }
+    }
+    entries
+}
+
 /// POST /api/agents/:id/chat — one turn of operational (post-birth) conversation.
 async fn api_operational_chat(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<OperationalChatRequest>,
 ) -> Result<Json<OperationalChatResponseBody>, (axum::http::StatusCode, String)> {
@@ -1935,8 +1979,13 @@ async fn api_operational_chat(
     })?
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
-    // Build system prompt from constitutional docs
-    let system_prompt = build_system_prompt(&config.docs_dir, &config.agent_name);
+    // Build system prompt from constitutional docs with dynamic skill tools
+    let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
+    let system_prompt = if skill_tool_entries.is_empty() {
+        build_system_prompt(&config.docs_dir, &config.agent_name)
+    } else {
+        build_system_prompt_with_skills(&config.docs_dir, &config.agent_name, &skill_tool_entries)
+    };
 
     // Build message list: system + history + user
     let mut messages: Vec<orion_capabilities::cognitive::Message> = Vec::new();
@@ -2024,7 +2073,70 @@ async fn api_operational_chat(
         "operational_chat: chat turn complete"
     );
 
-    // Blocking 2: execute tool requests, persist conversation with redacted content.
+    // Execute skill tool requests (async — must happen outside spawn_blocking).
+    // Supports multiple tool calls per turn for autonomous multi-step actions.
+    let mut skill_tool_results: Vec<OperationalToolResult> = Vec::new();
+    let mut skill_tool_outputs: Vec<String> = Vec::new();
+    for tr in &tool_requests {
+        if tr.name == "store_secret" || tr.name == "store_provider_key" {
+            continue; // handled in the blocking section below
+        }
+        // Try to match against registered skill tools
+        if let Some((skill_id, _tool_desc)) =
+            agentic::find_skill_for_tool(&state.skill_registry, &tr.name)
+        {
+            let skill_name = state
+                .skill_registry
+                .get_skill(&skill_id)
+                .map(|(_, m, _)| m.name.clone())
+                .unwrap_or_default();
+            let mut tool_params = orion_skills::skill::ToolParams::new();
+            if let serde_json::Value::Object(map) = &tr.arguments {
+                for (k, v) in map {
+                    tool_params = tool_params.with(k, v.clone());
+                }
+            }
+            match state
+                .skill_executor
+                .execute(&skill_id, &tr.name, tool_params)
+                .await
+            {
+                Ok(output) => {
+                    tracing::info!(
+                        tool = %tr.name,
+                        skill = %skill_id,
+                        "operational_chat: skill tool executed"
+                    );
+                    skill_tool_results.push(OperationalToolResult {
+                        name: tr.name.clone(),
+                        provider: skill_name,
+                    });
+                    if let Some(data) = &output.data {
+                        let formatted =
+                            serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                        skill_tool_outputs.push(format!("[{}] {}", tr.name, formatted));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %tr.name,
+                        skill = %skill_id,
+                        error = %e,
+                        "operational_chat: skill tool execution failed"
+                    );
+                    skill_tool_outputs.push(format!("[{}] Error: {}", tr.name, e));
+                }
+            }
+        }
+    }
+    let skill_tool_result = skill_tool_results.into_iter().last();
+    let skill_tool_output_text = if skill_tool_outputs.is_empty() {
+        None
+    } else {
+        Some(skill_tool_outputs.join("\n\n"))
+    };
+
+    // Blocking 2: execute credential tool requests, persist conversation with redacted content.
     let config_path_2 = config_path.clone();
     let raw_user_message = user_message.clone();
     let clean_content_clone = clean_content.clone();
@@ -2034,6 +2146,7 @@ async fn api_operational_chat(
         let redacted_user = redacted_user_message.clone();
         let redacted_assistant = redact_api_keys(&clean_content);
         let tools = tool_requests.clone();
+        let skill_output_text = skill_tool_output_text.clone();
         move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;
@@ -2104,7 +2217,7 @@ async fn api_operational_chat(
                 .map(String::from)
                 .collect();
 
-            // Persist conversation with redacted content
+            // Persist conversation with redacted content (include skill output if any)
             let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
                 let content =
                     std::fs::read_to_string(&chat_path).map_err(|e| format!("Read: {}", e))?;
@@ -2116,9 +2229,13 @@ async fn api_operational_chat(
                 role: "user".to_string(),
                 content: redacted_user,
             });
+            let mut assistant_msg = redacted_assistant;
+            if let Some(ref output) = skill_output_text {
+                assistant_msg.push_str(&format!("\n\n[Tool Result]\n{}", output));
+            }
             updated.push(BirthChatMessage {
                 role: "assistant".to_string(),
-                content: redacted_assistant,
+                content: assistant_msg,
             });
             std::fs::write(&chat_path, serde_json::to_string_pretty(&updated).unwrap())
                 .map_err(|e| format!("Write operational_chat: {}", e))?;
@@ -2135,11 +2252,19 @@ async fn api_operational_chat(
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Redact any credentials in the clean content sent back to the frontend
-    let redacted_response = redact_api_keys(&clean_content_clone);
+    let mut redacted_response = redact_api_keys(&clean_content_clone);
+
+    // Append skill tool output to the response if present
+    if let Some(ref output) = skill_tool_output_text {
+        redacted_response.push_str(&format!("\n\n[Tool Result]\n{}", output));
+    }
+
+    // Prefer skill tool result over credential tool result
+    let final_tool_result = skill_tool_result.or(tool_result);
 
     Ok(Json(OperationalChatResponseBody {
         assistant_content: redacted_response,
-        tool_executed: tool_result,
+        tool_executed: final_tool_result,
         stored_providers: if final_providers.is_empty() {
             None
         } else {
@@ -2412,6 +2537,545 @@ async fn api_agent_verify(
     }))
 }
 
+// ============================================================================
+// Skills API
+// ============================================================================
+
+#[derive(Serialize)]
+struct SkillToolInfo {
+    name: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct SkillInfo {
+    id: String,
+    name: String,
+    description: String,
+    trust_tier: String,
+    tools: Vec<SkillToolInfo>,
+}
+
+#[derive(Deserialize)]
+struct SkillExecuteRequest {
+    tool: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SkillExecuteResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// GET /api/agents/:id/skills — list registered skills with trust tiers and tools.
+async fn api_list_skills(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SkillInfo>>, (axum::http::StatusCode, String)> {
+    // Verify agent exists
+    let _config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let skills_with_tiers = state.skill_registry.list_with_tiers().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to list skills: {}", e),
+        )
+    })?;
+
+    let mut result = Vec::new();
+    for (manifest, tier) in skills_with_tiers {
+        // Get the skill to access its tools
+        let tools = match state.skill_registry.get_skill(&manifest.id) {
+            Ok((skill, _, _)) => skill
+                .tools()
+                .into_iter()
+                .map(|t| SkillToolInfo {
+                    name: t.name,
+                    description: t.description,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        result.push(SkillInfo {
+            id: manifest.id.0.clone(),
+            name: manifest.name.clone(),
+            description: manifest.description.clone(),
+            trust_tier: tier.to_string(),
+            tools,
+        });
+    }
+
+    Ok(Json(result))
+}
+
+/// POST /api/agents/:id/skills/:skill_id/execute — execute a skill tool directly.
+async fn api_execute_skill(
+    State(state): State<AppState>,
+    Path((id, skill_id)): Path<(String, String)>,
+    Json(body): Json<SkillExecuteRequest>,
+) -> Result<Json<SkillExecuteResponse>, (axum::http::StatusCode, String)> {
+    // Verify agent exists and birth is complete
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config: {}", e),
+        )
+    })?;
+
+    if !config.birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Agent birth must be complete before using skills".to_string(),
+        ));
+    }
+
+    let sid = orion_skills::manifest::SkillId(skill_id.clone());
+
+    // Convert JSON params to ToolParams
+    let mut tool_params = orion_skills::skill::ToolParams::new();
+    if let serde_json::Value::Object(map) = &body.params {
+        for (k, v) in map {
+            tool_params = tool_params.with(k, v.clone());
+        }
+    }
+
+    match state
+        .skill_executor
+        .execute(&sid, &body.tool, tool_params)
+        .await
+    {
+        Ok(output) => Ok(Json(SkillExecuteResponse {
+            success: output.success,
+            data: output.data,
+            error: output.error,
+        })),
+        Err(e) => Ok(Json(SkillExecuteResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// GET /api/agents/:id/skills/missing-secrets — list secrets needed by registered skills.
+async fn api_skills_missing_secrets(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<orion_skills::MissingSkillSecret>>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let skills_dir =
+        PathBuf::from(std::env::var("ORION_SKILLS_DIR").unwrap_or_else(|_| "skills".to_string()));
+
+    let missing = state
+        .skill_registry
+        .list_all_missing_secrets(&[skills_dir, dir]);
+
+    Ok(Json(missing))
+}
+
+/// Initialize the skill registry: instantiate all built-in skill plugins
+/// and register them as Verified (first-party, shipped with the repo).
+fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
+    let registry = SkillRegistry::with_secrets(Arc::clone(&vault));
+
+    let mut registered = 0u32;
+    let mut failed = 0u32;
+
+    // Helper macro — uses the manifest's own ID as the registry key so
+    // list_with_tiers() → get_skill(manifest.id) lookups are consistent.
+    macro_rules! register_skill {
+        ($skill:expr) => {{
+            let skill_obj = $skill;
+            let mid = skill_obj.manifest().id.clone();
+            let id_str = mid.0.clone();
+            match registry.register_with_tier(mid, Arc::new(skill_obj), TrustTier::Verified) {
+                Ok(()) => {
+                    tracing::info!(skill_id = %id_str, "Registered built-in skill (Verified)");
+                    registered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(skill_id = %id_str, error = %e, "Failed to register skill");
+                    failed += 1;
+                }
+            }
+        }};
+    }
+
+    // --- Simple skills (no secrets needed) ---
+
+    // HTTP requests with SSRF protection
+    register_skill!(skill_http::HttpSkill::new(
+        skill_http::HttpSkill::default_manifest()
+    ));
+
+    // Shell command execution with safety blocklist
+    register_skill!(skill_shell::ShellSkill::new(
+        skill_shell::ShellSkill::default_manifest()
+    ));
+
+    // Filesystem operations — sandbox to agent data dir
+    let fs_roots = vec![
+        data_root().unwrap_or_else(|| PathBuf::from(".")),
+        std::env::temp_dir(),
+    ];
+    register_skill!(skill_filesystem::FilesystemSkill::new(
+        skill_filesystem::FilesystemSkill::default_manifest(),
+        fs_roots,
+    ));
+
+    // --- Vault-backed skills (secrets loaded at execution time) ---
+
+    // Web search via Tavily
+    register_skill!(skill_web_search::WebSearchSkill::with_secrets(
+        skill_web_search::WebSearchSkill::default_manifest(),
+        Arc::clone(&vault),
+    ));
+
+    // Web browsing (HTTP fetch + optional Tavily/Perplexity fallback)
+    register_skill!(skill_web_browse::WebBrowseSkill::with_secrets(
+        skill_web_browse::WebBrowseSkill::default_manifest(),
+        Arc::clone(&vault),
+    ));
+
+    // Perplexity AI search
+    register_skill!(
+        skill_perplexity_search::PerplexitySearchSkill::with_secrets(
+            skill_perplexity_search::PerplexitySearchSkill::default_manifest(),
+            Arc::clone(&vault),
+        )
+    );
+
+    // Proton Mail (IMAP — lazy-connects on first tool call using vault credentials)
+    register_skill!(skill_proton_mail::ProtonMailSkill::with_secrets(
+        skill_proton_mail::ProtonMailSkill::default_manifest(),
+        Arc::clone(&vault),
+    ));
+
+    tracing::info!(
+        registered = registered,
+        failed = failed,
+        "Skill registry initialized"
+    );
+
+    Arc::new(registry)
+}
+
+// ============================================================================
+// Agentic Loop Endpoints
+// ============================================================================
+
+#[derive(Deserialize)]
+struct AgenticStreamQuery {
+    task: String,
+}
+
+/// POST /api/agents/:id/agent/run — start an agentic task.
+async fn api_agentic_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AgenticRunRequest>,
+) -> Result<Json<AgenticRunResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config: {}", e),
+        )
+    })?;
+    if !config.birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Agent birth must be complete before agentic mode".to_string(),
+        ));
+    }
+
+    let goal = body.goal.trim().to_string();
+    if goal.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "goal is required".to_string(),
+        ));
+    }
+
+    let max_turns = body.max_turns.clamp(1, 50);
+
+    // Check for existing running task for this agent
+    {
+        let tasks = state.agentic_tasks.lock().await;
+        for task_arc in tasks.values() {
+            let task = task_arc.lock().await;
+            if task.agent_id == id
+                && matches!(
+                    task.status,
+                    AgenticTaskStatus::Running
+                        | AgenticTaskStatus::WaitingForMentor
+                        | AgenticTaskStatus::WaitingForConfirmation
+                )
+            {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("Agent already has a running agentic task: {}", task.id),
+                ));
+            }
+        }
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let (event_tx, _) = tokio::sync::broadcast::channel::<AgenticEvent>(256);
+    let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let task = AgenticTask {
+        id: task_id.clone(),
+        agent_id: id.clone(),
+        goal: goal.clone(),
+        status: AgenticTaskStatus::Running,
+        event_tx: event_tx.clone(),
+        mentor_response_tx: None,
+        confirmation_tx: None,
+        steps: Vec::new(),
+        turn: 0,
+        cancel_tx,
+    };
+
+    let task_arc = Arc::new(TokioMutex::new(task));
+
+    {
+        let mut tasks = state.agentic_tasks.lock().await;
+        tasks.insert(task_id.clone(), Arc::clone(&task_arc));
+    }
+
+    let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
+
+    let loop_config = AgenticLoopConfig {
+        task_id: task_id.clone(),
+        goal,
+        max_turns,
+        auto_approve_safe_tools: body.auto_approve_safe_tools,
+        agent_dir: dir,
+        config,
+        skill_registry: Arc::clone(&state.skill_registry),
+        skill_executor: Arc::clone(&state.skill_executor),
+        skill_tool_entries,
+        event_tx,
+        cancel_rx,
+        task_handle: task_arc,
+    };
+
+    tokio::spawn(agentic::run_agentic_loop(loop_config));
+
+    let stream_url = format!("/api/agents/{}/agent/stream?task={}", id, task_id);
+
+    tracing::info!(agent = %id, task = %task_id, "Started agentic task");
+
+    Ok(Json(AgenticRunResponse {
+        task_id,
+        stream_url,
+    }))
+}
+
+/// GET /api/agents/:id/agent/stream?task=<id> — SSE event stream for an agentic task.
+async fn api_agentic_stream(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Query(query): Query<AgenticStreamQuery>,
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (axum::http::StatusCode, String),
+> {
+    let tasks = state.agentic_tasks.lock().await;
+    let task_arc = tasks.get(&query.task).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Task not found".to_string(),
+        )
+    })?;
+
+    let rx = {
+        let task = task_arc.lock().await;
+        task.event_tx.subscribe()
+    };
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    let event_name = match &event {
+                        AgenticEvent::Thinking { .. } => "thinking",
+                        AgenticEvent::ToolCall { .. } => "tool_call",
+                        AgenticEvent::ToolResult { .. } => "tool_result",
+                        AgenticEvent::MentorNeeded { .. } => "mentor_needed",
+                        AgenticEvent::ConfirmationNeeded { .. } => "confirmation_needed",
+                        AgenticEvent::Done { .. } => "done",
+                        AgenticEvent::Error { .. } => "error",
+                    };
+                    yield Ok(Event::default().event(event_name).data(json));
+                    if matches!(event, AgenticEvent::Done { .. } | AgenticEvent::Error { .. }) {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    let msg = format!("{{\"skipped\":{}}}", n);
+                    yield Ok(Event::default().event("lagged").data(msg));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// POST /api/agents/:id/agent/respond — send mentor response to paused agentic task.
+async fn api_agentic_respond(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(body): Json<MentorResponseRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let tasks = state.agentic_tasks.lock().await;
+    let task_arc = tasks.get(&body.task_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Task not found".to_string(),
+        )
+    })?;
+
+    let mut task = task_arc.lock().await;
+    if task.status != AgenticTaskStatus::WaitingForMentor {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Task is not waiting for mentor response".to_string(),
+        ));
+    }
+
+    if let Some(tx) = task.mentor_response_tx.take() {
+        let _ = tx.send(body.response);
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/agents/:id/agent/confirm — approve or deny a tool confirmation request.
+async fn api_agentic_confirm(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(body): Json<ConfirmationResponseRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let tasks = state.agentic_tasks.lock().await;
+    let task_arc = tasks.get(&body.task_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Task not found".to_string(),
+        )
+    })?;
+
+    let mut task = task_arc.lock().await;
+    if task.status != AgenticTaskStatus::WaitingForConfirmation {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Task is not waiting for confirmation".to_string(),
+        ));
+    }
+
+    if let Some(tx) = task.confirmation_tx.take() {
+        let _ = tx.send(body.approved);
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/agents/:id/agent/cancel — cancel a running agentic task.
+async fn api_agentic_cancel(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(body): Json<CancelRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let tasks = state.agentic_tasks.lock().await;
+    let task_arc = tasks.get(&body.task_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Task not found".to_string(),
+        )
+    })?;
+
+    let task = task_arc.lock().await;
+    if matches!(
+        task.status,
+        AgenticTaskStatus::Completed | AgenticTaskStatus::Failed | AgenticTaskStatus::Cancelled
+    ) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Task is already finished".to_string(),
+        ));
+    }
+
+    let _ = task.cancel_tx.try_send(());
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/agents/:id/agent/status?task=<id> — check task status.
+async fn api_agentic_status(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Query(query): Query<AgenticStreamQuery>,
+) -> Result<Json<AgenticStatusResponse>, (axum::http::StatusCode, String)> {
+    let tasks = state.agentic_tasks.lock().await;
+    let task_arc = tasks.get(&query.task).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Task not found".to_string(),
+        )
+    })?;
+
+    let task = task_arc.lock().await;
+    Ok(Json(AgenticStatusResponse {
+        task_id: task.id.clone(),
+        goal: task.goal.clone(),
+        status: task.status,
+        turn: task.turn,
+        steps: task.steps.clone(),
+    }))
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
@@ -2446,14 +3110,33 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // Load the secrets vault for the current agent (or a fresh one if none exists).
+    // This is shared with skill plugins that need API keys at execution time.
+    let skill_vault = {
+        let vault_dir = resolve_config_path()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(data_root)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Arc::new(Mutex::new(
+            SecretsVault::load(vault_dir.clone()).unwrap_or_else(|_| SecretsVault::new(vault_dir)),
+        ))
+    };
+
+    // Initialize skill registry and executor
+    let skill_registry = init_skill_registry(Arc::clone(&skill_vault));
+    let skill_executor = Arc::new(SkillExecutor::new(Arc::clone(&skill_registry)));
+
     let state = AppState {
         memory_backend,
         local_llm_base_url: std::env::var("LOCAL_LLM_BASE_URL")
             .ok()
             .filter(|s| !s.is_empty()),
         birth_model: std::env::var("BIRTH_MODEL").ok().filter(|s| !s.is_empty()),
-        forge_apps: std::sync::Arc::new(Mutex::new(HashMap::new())),
+        forge_apps: Arc::new(Mutex::new(HashMap::new())),
         birth_keys,
+        skill_registry,
+        skill_executor,
+        agentic_tasks: Arc::new(TokioMutex::new(HashMap::new())),
     };
 
     let cors = CorsLayer::new()
@@ -2519,6 +3202,21 @@ async fn main() -> std::io::Result<()> {
             get(api_operational_chat_history),
         )
         .route("/api/agents/:id/chat", post(api_operational_chat))
+        .route("/api/agents/:id/skills", get(api_list_skills))
+        .route(
+            "/api/agents/:id/skills/missing-secrets",
+            get(api_skills_missing_secrets),
+        )
+        .route(
+            "/api/agents/:id/skills/:skill_id/execute",
+            post(api_execute_skill),
+        )
+        .route("/api/agents/:id/agent/run", post(api_agentic_run))
+        .route("/api/agents/:id/agent/stream", get(api_agentic_stream))
+        .route("/api/agents/:id/agent/respond", post(api_agentic_respond))
+        .route("/api/agents/:id/agent/confirm", post(api_agentic_confirm))
+        .route("/api/agents/:id/agent/cancel", post(api_agentic_cancel))
+        .route("/api/agents/:id/agent/status", get(api_agentic_status))
         .route("/api/agents/:id/identity", get(api_agent_identity))
         .route("/api/agents/:id/constitution", get(api_agent_constitution))
         .route("/api/agents/:id/verify", post(api_agent_verify))
