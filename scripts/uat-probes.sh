@@ -127,6 +127,63 @@ if [[ "$ignition_http" != "200" ]]; then
 fi
 echo "UAT-10 Ignition (advance to Connectivity): OK"
 
+# --- UAT-11: Connectivity providers (initially empty) ---
+providers_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/providers")
+providers_http=$(echo "$providers_body" | tail -n1)
+providers_json=$(echo "$providers_body" | sed '$d')
+if [[ "$providers_http" != "200" ]]; then
+  fail "UAT-11: connectivity/providers returned $providers_http (expected 200): $providers_json"
+fi
+if ! echo "$providers_json" | grep -q '"providers"'; then
+  fail "UAT-11: connectivity/providers missing providers field: $providers_json"
+fi
+echo "UAT-11 Connectivity providers (initial): OK"
+
+# --- UAT-12: Store a provider key (validation off — no real key) ---
+store_key_body=$(curl -s -w "\n%{http_code}" --max-time 15 -X POST \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/keys" \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"openai","key":"sk-test-uat-probe-dummy-key-1234567890","validate":false}')
+store_key_http=$(echo "$store_key_body" | tail -n1)
+store_key_json=$(echo "$store_key_body" | sed '$d')
+if [[ "$store_key_http" != "200" ]]; then
+  fail "UAT-12: connectivity/keys store returned $store_key_http (expected 200): $store_key_json"
+fi
+if ! echo "$store_key_json" | grep -q '"ok":true'; then
+  fail "UAT-12: connectivity/keys store missing ok:true: $store_key_json"
+fi
+if ! echo "$store_key_json" | grep -q '"provider":"openai"'; then
+  fail "UAT-12: connectivity/keys store wrong provider: $store_key_json"
+fi
+echo "UAT-12 Store provider key (no validation): OK"
+
+# --- UAT-13: Verify stored provider appears ---
+providers2_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/providers")
+providers2_http=$(echo "$providers2_body" | tail -n1)
+providers2_json=$(echo "$providers2_body" | sed '$d')
+if [[ "$providers2_http" != "200" ]]; then
+  fail "UAT-13: connectivity/providers returned $providers2_http after store: $providers2_json"
+fi
+if ! echo "$providers2_json" | grep -q '"openai"'; then
+  fail "UAT-13: connectivity/providers does not include openai after store: $providers2_json"
+fi
+echo "UAT-13 Connectivity providers (after store): OK"
+
+# --- UAT-14: Connectivity chat history (initially empty) ---
+chat_hist_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/chat/history")
+chat_hist_http=$(echo "$chat_hist_body" | tail -n1)
+chat_hist_json=$(echo "$chat_hist_body" | sed '$d')
+if [[ "$chat_hist_http" != "200" ]]; then
+  fail "UAT-14: connectivity/chat/history returned $chat_hist_http (expected 200): $chat_hist_json"
+fi
+if ! echo "$chat_hist_json" | grep -q '"messages"'; then
+  fail "UAT-14: connectivity/chat/history missing messages field: $chat_hist_json"
+fi
+echo "UAT-14 Connectivity chat history (initial): OK"
+
 # Now agent is in Connectivity — proceed with Genesis flow
 genesis_start_body=$(curl -s -w "\n%{http_code}" --max-time 10 -X POST \
   "${ORION_API_URL}/api/agents/${agent_id}/genesis/start" \

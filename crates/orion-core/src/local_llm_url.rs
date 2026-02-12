@@ -9,6 +9,17 @@ use url::Url;
 /// Allowed hostnames for local LLM (case-insensitive).
 const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 
+/// Returns additional allowed hosts from the `ALLOWED_LLM_HOSTS` env var
+/// (comma-separated). Used to permit Docker service names like `ollama`.
+fn extra_allowed_hosts() -> Vec<String> {
+    std::env::var("ALLOWED_LLM_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Validates that the URL is safe for use as a local LLM base URL (SSRF mitigation).
 /// Returns the normalized URL string (with trailing slash removed) on success.
 pub fn validate_local_llm_url(url_str: &str) -> Result<String> {
@@ -38,8 +49,12 @@ pub fn validate_local_llm_url(url_str: &str) -> Result<String> {
         .host_str()
         .ok_or_else(|| CoreError::Config("Local LLM URL must have a host".into()))?;
 
+    let extra = extra_allowed_hosts();
     let allowed = match url.host() {
-        Some(url::Host::Domain(d)) => ALLOWED_HOSTS.iter().any(|h| d.eq_ignore_ascii_case(h)),
+        Some(url::Host::Domain(d)) => {
+            ALLOWED_HOSTS.iter().any(|h| d.eq_ignore_ascii_case(h))
+                || extra.iter().any(|h| d.eq_ignore_ascii_case(h))
+        }
         Some(url::Host::Ipv4(ip)) => {
             let octets = ip.octets();
             octets[0] == 127 // 127.0.0.0/8 loopback
@@ -98,5 +113,19 @@ mod tests {
     fn test_empty_rejected() {
         assert!(validate_local_llm_url("").is_err());
         assert!(validate_local_llm_url("   ").is_err());
+    }
+
+    #[test]
+    fn test_docker_host_rejected_by_default() {
+        std::env::remove_var("ALLOWED_LLM_HOSTS");
+        assert!(validate_local_llm_url("http://ollama:11434").is_err());
+    }
+
+    #[test]
+    fn test_docker_host_allowed_via_env() {
+        std::env::set_var("ALLOWED_LLM_HOSTS", "ollama");
+        let u = validate_local_llm_url("http://ollama:11434").unwrap();
+        assert_eq!(u, "http://ollama:11434");
+        std::env::remove_var("ALLOWED_LLM_HOSTS");
     }
 }

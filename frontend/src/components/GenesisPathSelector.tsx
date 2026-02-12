@@ -4,7 +4,10 @@ import './GenesisPathSelector.css';
 
 interface GenesisPathSelectorProps {
   agentId: string;
-  onStarted: (path: string, data?: { state?: string; prompt?: string; choices?: string[] }) => void;
+  onStarted: (
+    path: string,
+    data?: { state?: string; prompt?: string; choices?: string[] }
+  ) => void | Promise<void>;
   onError: (message: string) => void;
 }
 
@@ -37,7 +40,9 @@ export default function GenesisPathSelector({
     (async () => {
       try {
         const list = await fetchGenesisPaths();
-        if (!cancelled) setPaths(list);
+        // Filter out paths that don't have a working frontend yet
+        const working = list.filter((p) => p.id !== 'soul_crystallization');
+        if (!cancelled) setPaths(working);
       } catch {
         if (!cancelled) setPaths([]);
       } finally {
@@ -55,11 +60,13 @@ export default function GenesisPathSelector({
     try {
       setStarting(key);
       const data = await startGenesis(agentId, item.id, item.depth);
-      onStarted(data.path, {
-        state: data.state,
-        prompt: data.prompt,
-        choices: data.choices,
-      });
+      await Promise.resolve(
+        onStarted(data.path, {
+          state: data.state,
+          prompt: data.prompt,
+          choices: data.choices,
+        })
+      );
     } catch (e) {
       onError(e instanceof Error ? e.message : 'Failed to start Genesis');
     } finally {

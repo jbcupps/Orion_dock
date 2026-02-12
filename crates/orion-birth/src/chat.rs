@@ -2,7 +2,7 @@
 //! pulls stage prompts, invokes IdEgoRouter, and parses text-based tool requests.
 
 use crate::prompts::system_prompt_for_stage_with_context;
-use crate::stages::BirthOrchestrator;
+use crate::stages::{BirthOrchestrator, BirthStage};
 use orion_capabilities::cognitive::Message;
 use orion_core::{AppConfig, RoutingMode, SecretsVault, TrinityConfig};
 use orion_router::IdEgoRouter;
@@ -50,6 +50,19 @@ pub fn build_birth_messages(
         }
     }
 
+    messages
+}
+
+/// Build chat messages for Genesis stage from a conversation list (for API use without an orchestrator).
+pub fn build_genesis_messages(conversation: &[(String, String)]) -> Vec<Message> {
+    let system = match system_prompt_for_stage_with_context(BirthStage::Genesis, &[]) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mut messages = vec![Message::new("system", system)];
+    for (role, content) in conversation {
+        messages.push(Message::new(role.as_str(), content.as_str()));
+    }
     messages
 }
 
@@ -103,6 +116,44 @@ pub fn detect_provider_from_key(key: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Extract API keys from free text (e.g. user chat messages).
+/// Returns a list of (provider, full_key) pairs found in the text.
+/// Uses the same prefix patterns as `detect_provider_from_key` and `redact_api_keys`.
+/// Deduplicates: a key matched by `sk-ant-` (anthropic) won't also match `sk-` (openai).
+pub fn extract_api_keys_from_text(text: &str) -> Vec<(&'static str, String)> {
+    // Order matters: sk-ant- must come before sk- to avoid partial matches.
+    let prefixes: &[(&str, usize, &str)] = &[
+        ("sk-ant-", 7, "anthropic"),
+        ("sk-", 3, "openai"),
+        ("pplx-", 5, "perplexity"),
+        ("xai-", 4, "xai"),
+        ("AIza", 4, "google"),
+        ("tvly-", 5, "tavily"),
+    ];
+    let mut results: Vec<(&'static str, String)> = Vec::new();
+    for &(prefix, prefix_len, provider) in prefixes {
+        let mut remaining = text;
+        while let Some(pos) = remaining.find(prefix) {
+            let after_prefix = &remaining[pos + prefix_len..];
+            let key_chars: usize = after_prefix
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .count();
+            if key_chars >= 10 {
+                let full_key = &remaining[pos..pos + prefix_len + key_chars];
+                // Skip if this key was already captured by a more specific prefix
+                if !results.iter().any(|(_, k)| {
+                    k == full_key || full_key.starts_with(k.as_str()) || k.starts_with(full_key)
+                }) {
+                    results.push((provider, full_key.to_string()));
+                }
+            }
+            remaining = &remaining[pos + prefix_len + key_chars.max(1)..];
+        }
+    }
+    results
 }
 
 /// Execute the store_provider_key tool: resolve provider (including "auto"), store in vault, update config, save config.
@@ -173,6 +224,46 @@ pub async fn birth_chat_turn(
         assistant_content,
         tool_requests,
     })
+}
+
+/// Redact API keys from text to prevent them from being stored in conversation history.
+/// Replaces key-like patterns with their prefix + `***`.
+pub fn redact_api_keys(text: &str) -> String {
+    let mut result = text.to_string();
+    // Order matters: sk-ant- must come before sk- to avoid partial matches.
+    let prefixes: &[(&str, usize)] = &[
+        ("sk-ant-", 7),
+        ("sk-", 3),
+        ("pplx-", 5),
+        ("xai-", 4),
+        ("AIza", 4),
+        ("tvly-", 5),
+    ];
+    for &(prefix, prefix_len) in prefixes {
+        let mut output = String::with_capacity(result.len());
+        let mut remaining = result.as_str();
+        while let Some(pos) = remaining.find(prefix) {
+            output.push_str(&remaining[..pos]);
+            let after_prefix = &remaining[pos + prefix_len..];
+            // Count how many key-like chars follow the prefix
+            let key_chars = after_prefix
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .count();
+            if key_chars >= 10 {
+                output.push_str(prefix);
+                output.push_str("***");
+                remaining = &remaining[pos + prefix_len + key_chars..];
+            } else {
+                // Not a real key, keep original text
+                output.push_str(&remaining[pos..pos + prefix_len]);
+                remaining = &remaining[pos + prefix_len..];
+            }
+        }
+        output.push_str(remaining);
+        result = output;
+    }
+    result
 }
 
 /// Parse ```tool_request\n{...}``` blocks from assistant content.
@@ -292,5 +383,48 @@ mod tests {
 ``` More."#;
         let (_, tools) = parse_tool_requests(s);
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_redact_api_keys_openai() {
+        let text = "Here is my key: sk-abcdefghij1234567890";
+        let redacted = redact_api_keys(text);
+        assert_eq!(redacted, "Here is my key: sk-***");
+    }
+
+    #[test]
+    fn test_redact_api_keys_anthropic() {
+        let text = "My anthropic key is sk-ant-abcdefghij1234567890";
+        let redacted = redact_api_keys(text);
+        assert_eq!(redacted, "My anthropic key is sk-ant-***");
+    }
+
+    #[test]
+    fn test_redact_api_keys_multiple() {
+        let text = "openai: sk-AAAAAAAAAA1234567890 and anthropic: sk-ant-BBBBBBBBBB1234567890";
+        let redacted = redact_api_keys(text);
+        assert_eq!(redacted, "openai: sk-*** and anthropic: sk-ant-***");
+    }
+
+    #[test]
+    fn test_redact_api_keys_short_prefix_not_redacted() {
+        let text = "sk-short is not a key";
+        let redacted = redact_api_keys(text);
+        assert_eq!(redacted, "sk-short is not a key");
+    }
+
+    #[test]
+    fn test_redact_api_keys_no_keys() {
+        let text = "No keys here, just regular text.";
+        let redacted = redact_api_keys(text);
+        assert_eq!(redacted, text);
+    }
+
+    #[test]
+    fn test_redact_api_keys_all_providers() {
+        assert!(redact_api_keys("pplx-abcdefghij1234567890").contains("pplx-***"));
+        assert!(redact_api_keys("xai-abcdefghij1234567890").contains("xai-***"));
+        assert!(redact_api_keys("AIzaabcdefghij1234567890").contains("AIza***"));
+        assert!(redact_api_keys("tvly-abcdefghij1234567890").contains("tvly-***"));
     }
 }

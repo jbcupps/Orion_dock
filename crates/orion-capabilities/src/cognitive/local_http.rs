@@ -306,6 +306,16 @@ impl LlmProvider for LocalHttpProvider {
     async fn complete(&self, request: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         validate_local_llm_url(&self.base_url).map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        let msg_count = request.messages.len();
+        let has_tools = request.tools.is_some();
+        tracing::info!(
+            url = %self.base_url,
+            model = %self.model,
+            messages = msg_count,
+            tools = has_tools,
+            "LocalHttpProvider::complete starting"
+        );
+
         let chat_request = ChatRequest {
             model: self.model.clone(),
             messages: Self::build_messages(request),
@@ -319,17 +329,37 @@ impl LlmProvider for LocalHttpProvider {
             self.base_url.trim_end_matches('/')
         );
 
+        tracing::debug!(endpoint = %url, "POST to LLM");
+
         let response = self
             .client
             .post(&url)
             .json(&chat_request)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("LLM request failed: {}", e))?;
+            .map_err(|e| {
+                tracing::error!(url = %url, error = %e, "LLM connection failed");
+                anyhow::anyhow!("LLM request failed (connection): {}", e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            tracing::error!(
+                url = %url,
+                model = %self.model,
+                http_status = %status,
+                body = %body,
+                "LLM request returned error"
+            );
+            // Surface model-not-found as a clearer message
+            if status.as_u16() == 404 && body.contains("not found") {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found on LLM server at {}. Is the model pulled/available?",
+                    self.model,
+                    self.base_url
+                ));
+            }
             return Err(anyhow::anyhow!(
                 "LLM request failed: HTTP {} - {}",
                 status,
@@ -361,6 +391,14 @@ impl LlmProvider for LocalHttpProvider {
             })
             .filter(|v| !v.is_empty());
 
+        let tc_count = tool_calls.as_ref().map(|v| v.len()).unwrap_or(0);
+        tracing::info!(
+            model = %self.model,
+            content_len = content.len(),
+            tool_calls = tc_count,
+            "LocalHttpProvider::complete success"
+        );
+
         Ok(CompletionResponse {
             content,
             tool_calls,
@@ -373,6 +411,13 @@ impl LlmProvider for LocalHttpProvider {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> anyhow::Result<CompletionResponse> {
         validate_local_llm_url(&self.base_url).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        tracing::info!(
+            url = %self.base_url,
+            model = %self.model,
+            messages = request.messages.len(),
+            "LocalHttpProvider::stream starting"
+        );
 
         let chat_request = ChatRequest {
             model: self.model.clone(),
@@ -393,11 +438,28 @@ impl LlmProvider for LocalHttpProvider {
             .json(&chat_request)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("LLM request failed: {}", e))?;
+            .map_err(|e| {
+                tracing::error!(url = %url, error = %e, "LLM stream connection failed");
+                anyhow::anyhow!("LLM request failed (connection): {}", e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            tracing::error!(
+                url = %url,
+                model = %self.model,
+                http_status = %status,
+                body = %body,
+                "LLM stream request returned error"
+            );
+            if status.as_u16() == 404 && body.contains("not found") {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found on LLM server at {}. Is the model pulled/available?",
+                    self.model,
+                    self.base_url
+                ));
+            }
             return Err(anyhow::anyhow!(
                 "LLM request failed: HTTP {} - {}",
                 status,

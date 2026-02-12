@@ -1,6 +1,7 @@
 :root {
   --bg: #0f1419;
   --surface: #1a2332;
+  --card-bg: #1a2332;
   --border: #2d3a4d;
   --text: #e6edf3;
   --muted: #8b949e;
@@ -483,4 +484,30 @@ body {
 .hive-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Provider badges in status panel */
+.provider-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.provider-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.provider-badge-ok {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+.status-panel {
+  opacity: 0.85;
 }

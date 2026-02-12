@@ -50,6 +50,7 @@ services:
     environment:
       - ORION_DATA_DIR=/var/lib/orion
       - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://ollama:11434}
+      - ALLOWED_LLM_HOSTS=${ALLOWED_LLM_HOSTS:-ollama}
       - DATABASE_URL=${DATABASE_URL:-postgres://orion:orion_dev@postgres:5432/orion}
       - MEMORY_BACKEND=${MEMORY_BACKEND:-postgres}
       - BIRTH_MODEL=${BIRTH_MODEL:-qwen2.5:3b-instruct}
@@ -92,6 +93,7 @@ services:
     command: ["bash"]
     environment:
       - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://ollama:11434}
+      - ALLOWED_LLM_HOSTS=${ALLOWED_LLM_HOSTS:-ollama}
       - DATABASE_URL=${DATABASE_URL:-postgres://orion:orion_dev@postgres:5432/orion}
       - MEMORY_BACKEND=${MEMORY_BACKEND:-sqlite}
       - BIRTH_MODEL=${BIRTH_MODEL:-qwen2.5:3b-instruct}

@@ -1,76 +1,107 @@
-# CLAUDE.md — Orion Dock Project Context
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Interactive Session Commands
+
+### "Please start a dev session"
+
+Spin up the full stack for manual testing. The dev-stack script handles everything automatically: build, start, model pull, health checks.
+
+1. Run: `powershell.exe -File "E:\agents\orion_dock\scripts\dev-stack.ps1"`
+   - This builds images, starts containers, pulls the birth model into Ollama if missing, and waits for health.
+2. Report to user:
+   - Web UI: http://localhost:3000
+   - API: http://localhost:8080
+   - Logs: `docker compose -f docker/docker-compose.yml logs -f orion-api`
+
+### "Please reset"
+
+Tear the entire stack down to tabula rasa (clean slate). Steps:
+
+1. Stop and remove all containers + volumes: `powershell.exe -File "E:\agents\orion_dock\scripts\dev-stack.ps1" -Down`
+2. Remove data volumes (agent data, postgres, ollama models, cargo cache):
+   ```
+   docker volume rm docker_orion-data docker_orion-pgdata docker_ollama-models docker_orion-cargo-cache 2>$null
+   ```
+3. Report: "Stack torn down. All agent data, database, and model cache removed."
+
+---
+
+## Building & Testing
+
+**All Rust builds and tests MUST run inside Docker.** The host Windows machine does not have the MSVC CRT libraries needed for native compilation. Use the `orion-dev` container.
+
+```bash
+# Quick compilation check
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo check --workspace"
+
+# Run all workspace tests
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo test --workspace --no-fail-fast"
+
+# Run tests for a single crate
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo test -p orion-core"
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo test -p orion-birth"
+
+# Run a specific test by name
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo test -p orion-core test_name_here"
+
+# Lint: fmt + clippy
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
+
+# Postgres integration tests (requires DATABASE_URL)
+docker compose -f docker/docker-compose.yml run --rm orion-dev bash -c "cargo test -p orion-memory --no-fail-fast --features postgres"
+
+# Full CI suite (fmt, clippy, build, test, frontend)
+docker compose -f docker/docker-compose.yml run --rm -e UAT_MODE=fast orion-build
+
+# Interactive dev shell (stays open for multiple commands)
+docker compose -f docker/docker-compose.yml up -d orion-dev
+docker compose -f docker/docker-compose.yml exec orion-dev bash
+
+# Full stack (postgres, ollama, API, frontend)
+docker compose -f docker/docker-compose.yml --profile full up -d
+# Web UI: http://localhost:3000  API: http://localhost:8080
+```
+
+**Frontend** (runs on host — Node/npm are available natively):
+```bash
+cd frontend && npm install          # install deps
+cd frontend && npx tsc --noEmit     # typecheck
+cd frontend && npm run build        # production build
+cd frontend && npm run dev          # dev server on :3000 (proxies /api to :8080)
+```
+
+### Quick Commands (PowerShell)
+
+**"Build it so I can test"** — Builds images, starts the full stack, opens browser:
+```powershell
+.\scripts\dev-stack.ps1             # Build + start → opens http://localhost:3000
+.\scripts\dev-stack.ps1 -Down       # Tear it all down
+.\scripts\dev-stack.ps1 -Rebuild    # Force rebuild (no cache)
+```
+
+**"Please perform UAT"** — Automated end-to-end: lint, build, test, full-stack probes, postgres tests, then tear down:
+```powershell
+.\scripts\run-uat.ps1               # Full UAT (build + 14 probes + postgres tests)
+.\scripts\run-uat.ps1 -Fast         # Fast only (fmt, clippy, unit tests, frontend)
+.\scripts\run-uat.ps1 -KeepStack    # Full UAT but leave stack running after
+```
+
+Bash equivalents: `./scripts/dev-stack.sh` and `./scripts/run-uat.sh`.
+
+---
 
 ## Project Overview
 
 Orion Dock is a **Docker-first** Rust workspace for Orion's core agent logic, birth lifecycle, and skills runtime. It provides:
 
-- **Orion API** — HTTP API for the web UI (health, status, identities, create/load agents)
+- **Orion API** — Axum HTTP API for the web UI (health, status, identities, create/load agents)
 - **Web UI** — React + Vite frontend (intro, ORION HIVE identity selector, birth/status dashboard)
-- **Birth lifecycle** — Five-stage interactive ceremony that generates cryptographic identity, configures LLM/cloud, and discovers agent identity through conversation
-- **soul-forge** — Alternative TUI path for scenario-based soul calibration (Boot → Intro → Scenarios → Crystallize)
+- **Birth lifecycle** — Five-stage interactive ceremony (Darkness → Ignition → Connectivity → Genesis → Emergence) that generates cryptographic identity, configures LLM/cloud, and discovers agent identity through conversation
+- **soul-forge** — Alternative TUI path for scenario-based soul calibration
 
-Desktop installer and npm-based deployment paths have been retired in favor of containerized build, test, and delivery. The **birth process and these steps are the key differentiator** between Orion and other agent systems: cryptographic identity, conversational discovery, and signed constitutional documents.
-
----
-
-## The Birth Lifecycle
-
-The birth flow is a **state machine** implemented in `crates/orion-birth/`. Most of it is **interactive**; the user must participate at specific steps. The backend fully implements this; the web frontend currently does not drive it (see Current State vs Intended State).
-
-### Stage Flow
-
-```mermaid
-flowchart LR
-  Darkness["Darkness: Generate keypair, present private key ONCE"]
-  Ignition["Ignition: Configure local LLM"]
-  Connectivity["Connectivity: Chat to acquire API keys"]
-  Genesis["Genesis: Chat to discover name, purpose, personality"]
-  Emergence["Emergence: Sign docs, write birth memory, drop key"]
-  Darkness --> Ignition --> Connectivity --> Genesis --> Emergence
-```
-
-### Stage Details
-
-| Stage | Purpose | Interactive? | What Happens |
-|-------|---------|---------------|--------------|
-| **Darkness** | Generate cryptographic identity | **Yes** — user must save private key | `generate_external_keypair()` creates Ed25519 keypair. Public key saved to `external_pubkey.bin`. Private key returned as base64 **once** via `get_private_key_base64()`. User must save it before advancing. Signing key held in memory until Emergence. |
-| **Ignition** | Configure local LLM | **Yes** | User sets `local_llm_base_url` (Ollama, LM Studio). URL validated (localhost/127.0.0.1 for SSRF protection). |
-| **Connectivity** | Acquire cloud API keys | **Yes** — conversational | Id (local LLM) chats with user. User can paste API keys in chat or use UI. Id uses `store_provider_key` tool (text-based `\`\`tool_request` blocks). Provider auto-detected from key prefix (sk-ant- → anthropic, sk- → openai, etc.). Keys stored in SecretsVault, config updated for Ego. |
-| **Genesis** | Discover identity | **Yes** — path-dependent | Mentor chooses a **Genesis path** (Direct, Soul Crystallization, or Soul Forge). Each path produces (name, purpose, personality) and soul/growth content; all end with `crystallize_soul()`. Direct: chat + `recommend_crystallize`. Soul Crystallization: depth-based engine and transcript extraction. Soul Forge: three scenarios → weights, archetype, sigil; then name step. |
-| **Emergence** | Finalize birth | Automated | Signs `soul.md`, `ethics.md`, `instincts.md` with held signing key; writes `.sig` files; drops key from memory; writes birth memory; sets `birth_complete = true`. |
-
-### Key Code Locations
-
-- **Stages and orchestrator**: `crates/orion-birth/src/stages.rs` — `BirthStage`, `BirthOrchestrator`, `generate_identity()`, `get_private_key_base64()`, `advance_past_darkness()`, `crystallize_soul()`, `complete_emergence()`
-- **Birth chat and tools**: `crates/orion-birth/src/chat.rs` — `build_birth_messages()`, `birth_chat_turn()`, `parse_tool_requests()`, `execute_store_provider_key()`
-- **Stage prompts**: `crates/orion-birth/src/prompts.rs` — `CONNECTIVITY_SYSTEM_PROMPT`, `GENESIS_SYSTEM_PROMPT`, `BIRTH_TOOLS_DEFINITION`
-- **Keypair generation**: `crates/orion-core/src/keyring.rs` — `generate_external_keypair()`, `sign_constitutional_documents()`
-
-### Constitutional Documents
-
-- **soul.md** — Identity, nature, relationship to mentor (personalized in Genesis)
-- **ethics.md** — Triangle Ethic (Deontology, Virtue, Teleology)
-- **instincts.md** — Pre-cognitive behaviors (Privacy Prime, Sentry Mode, etc.)
-
-Templates live in `templates/`. At Emergence, all three are signed with the Ed25519 key; signatures stored in `{doc}.sig`. Verified on every boot.
-
-### Modular Genesis Paths
-
-Genesis is the **pivot point**: from configuration wizard to emergence ritual. The **output is always the same** — `soul.md` and `growth.md` via `crystallize_soul(soul_content, growth_content)` — but the **path** to get there is selectable by the mentor. This proves modularity: new paths can be plugged in without changing the birth state machine.
-
-**Universal contract**: Every Genesis path must ultimately produce `(name, purpose, personality)`. The caller uses `orion_core::templates::fill_soul_template` to generate soul markdown (or path-specific content that includes it), then calls `BirthOrchestrator::crystallize_soul(soul_content, growth_content)`. Paths may also produce extras (archetype, weights, sigil, MentorProfile) stored alongside.
-
-**Available paths** (see `GenesisPath` in `crates/orion-birth/src/stages.rs`):
-
-| Path | Description | Time | Mechanism |
-|------|-------------|------|-----------|
-| **Direct Discovery** | A simple conversation: name, purpose, personality. Fast and straightforward. | ~1 min | LLM chat with `GENESIS_SYSTEM_PROMPT`; `recommend_crystallize` tool. |
-| **Soul Crystallization** | Depth-based psychometric profiling; the deeper you go, the more personal the agent. | Quick Start ~30s, Conversation 3–5 min, Deep Dive 10–15 min | `orion-soul-crystallization`: `CrystallizationEngine` (Spark → Conversation → Mirror → Forge → SoulGeneration → Complete); LLM uses `record_signal`; transcript → extraction → (name, purpose, personality). |
-| **Soul Forge** | Three scenarios; instinctive choices calibrate ethical weights and determine archetype; Soul Sigil at the end. | ~2 min | `soul-forge`: three dilemmas → Triangle Ethic weights, deterministic archetype, SHA-256 soul hash, visual sigil. `soul_output(name, purpose?, personality?)` returns soul data; caller calls `crystallize_soul`. |
-
-**API**: `GET /api/genesis/paths` lists paths with id, label, description, estimated_time. `POST /api/agents/:id/genesis/start` body `{ path, depth? }` sets path and advances to Genesis. For Soul Forge, `POST /api/agents/:id/genesis/forge/select` with `{ choice }` advances scenarios and returns next prompt or crystallization result.
-
-**Extensibility**: A future path (e.g. Thunderbird: facet-based, values auction, Soul Diff editor) plugs in by (1) extending `GenesisPath` in orion-birth, (2) adding path-specific state/engine if needed, (3) implementing the contract: produce soul_content and growth_content, then call `crystallize_soul`.
+The **birth process is the key differentiator**: cryptographic identity, conversational discovery, and signed constitutional documents.
 
 ---
 
@@ -80,35 +111,89 @@ Genesis is the **pivot point**: from configuration wizard to emergence ritual. T
 
 - **Id** — Local LLM (Ollama, LM Studio). Used for birth (pinned `BIRTH_MODEL`), simple queries, privacy-sensitive work.
 - **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Used for complex reasoning when API key is set. Routing: local-first during birth; after keys, Ego-primary with local fallback.
-- **Superego** — Ethical oversight (planned; aligns with Phoenix/Ethical_AI_Reg).
+- **Superego** — Ethical oversight (planned).
 
 ### Crate Map
 
 | Crate | Role |
 |-------|------|
-| `orion-core` | Config, keyring, DPAPI, templates, vault, verifier |
-| `orion-memory` | SQLite/Postgres store, migrations, birth memory |
+| `orion-core` | Config, keyring, DPAPI, templates, vault, verifier, secrets, document signing |
+| `orion-memory` | SQLite (default) and Postgres (feature: `postgres`) store, migrations |
 | `orion-birth` | Birth stage machine, chat runtime, prompts, Genesis path enum and dispatch |
-| `orion-soul-crystallization` | Depth-based psychometric engine (MentorProfile, CrystallizationEngine, extraction) |
-| `orion-capabilities` | Cognitive (LLM) providers, Id/Ego routing |
+| `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction) |
+| `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules |
 | `orion-router` | IdEgoRouter |
-| `orion-api` | HTTP API (health, status, identities, agents, load, genesis paths, genesis/start, forge/select) |
-| `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone use) |
-| `skills/*` | Skill plugins (filesystem, http, shell, web-search, etc.) |
+| `orion-email` | Email authentication (OAuth2, PKCE, IMAP) |
+| `orion-api` | Axum HTTP API server |
+| `orion-uat` | Headless UAT driver |
+| `orion-skills` | Skill framework, MCP protocol, WASM runtime, sandbox |
+| `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
+| `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, proton-mail) |
 
 ### Runtime Surfaces
 
-- **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API.
-- **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize → writes soul from Triangle Ethic weights. Alternative to full chat-based birth.
-- **Dev**: `orion-dev` container with bind-mounted source for `cargo build` / `cargo test`.
+- **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.
+- **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize.
+- **Dev**: `orion-dev` container with bind-mounted source.
+
+### API Routes (orion-api)
+
+- `/health` — Health check
+- `/api/status` — Agent status (birth_complete, birth_stage)
+- `/api/identities` — List agents (Hive)
+- `/api/agents/:id/*` — Agent-specific operations (create, load)
+- `/api/genesis/paths` — List available Genesis paths
+- `/api/agents/:id/genesis/start` — Begin Genesis with path selection (`{ path, depth? }`)
+- `/api/agents/:id/genesis/forge/select` — Soul Forge scenario choice (`{ choice }`)
+
+---
+
+## The Birth Lifecycle
+
+The birth flow is a **state machine** in `crates/orion-birth/`. Most stages are **interactive** — the user must participate.
+
+```
+Darkness → Ignition → Connectivity → Genesis → Emergence
+```
+
+| Stage | Purpose | What Happens |
+|-------|---------|--------------|
+| **Darkness** | Generate cryptographic identity | `generate_external_keypair()` creates Ed25519 keypair. Public key saved to `external_pubkey.bin`. Private key returned as base64 **once** via `get_private_key_base64()`. User must save it before advancing. |
+| **Ignition** | Configure local LLM | User sets `local_llm_base_url`. URL validated (localhost/127.0.0.1 only for SSRF protection). |
+| **Connectivity** | Acquire cloud API keys | Id (local LLM) chats with user. User pastes API keys. Provider auto-detected from key prefix (sk-ant- → anthropic, sk- → openai). Keys stored in SecretsVault. |
+| **Genesis** | Discover identity | Mentor chooses a Genesis path. Each produces (name, purpose, personality) and calls `crystallize_soul()`. |
+| **Emergence** | Finalize birth | Signs soul.md, ethics.md, instincts.md with held signing key; writes `.sig` files; drops key from memory; writes birth memory. |
+
+### Key Code Locations
+
+- **Stages/orchestrator**: `crates/orion-birth/src/stages.rs` — `BirthStage`, `BirthOrchestrator`, `generate_identity()`, `get_private_key_base64()`, `advance_past_darkness()`, `crystallize_soul()`, `complete_emergence()`
+- **Birth chat/tools**: `crates/orion-birth/src/chat.rs` — `build_birth_messages()`, `birth_chat_turn()`, `parse_tool_requests()`, `execute_store_provider_key()`
+- **Stage prompts**: `crates/orion-birth/src/prompts.rs` — `CONNECTIVITY_SYSTEM_PROMPT`, `GENESIS_SYSTEM_PROMPT`, `BIRTH_TOOLS_DEFINITION`
+- **Keypair generation**: `crates/orion-core/src/keyring.rs` — `generate_external_keypair()`, `sign_constitutional_documents()`
+
+### Modular Genesis Paths
+
+Every Genesis path must produce `(name, purpose, personality)`. The caller uses `orion_core::templates::fill_soul_template` to generate soul markdown, then calls `BirthOrchestrator::crystallize_soul(soul_content, growth_content)`.
+
+| Path | Mechanism |
+|------|-----------|
+| **Direct Discovery** | LLM chat with `GENESIS_SYSTEM_PROMPT`; `recommend_crystallize` tool. (~1 min) |
+| **Soul Crystallization** | `CrystallizationEngine` (Spark → Conversation → Mirror → Forge → SoulGeneration → Complete); depth-based. (30s–15min) |
+| **Soul Forge** | Three ethical dilemmas → Triangle Ethic weights, deterministic archetype, SHA-256 soul hash, visual sigil. (~2 min) |
+
+New paths plug in by: (1) extending `GenesisPath` enum in orion-birth, (2) adding path-specific engine if needed, (3) producing soul_content + growth_content and calling `crystallize_soul`.
+
+### Constitutional Documents
+
+Templates live in `templates/`. At Emergence, soul.md, ethics.md, instincts.md are signed with Ed25519 key; signatures stored as `{doc}.sig`. Verified on every boot.
 
 ---
 
 ## Security Model
 
-- **Ed25519 identity**: External keypair generated in Darkness. Private key shown **once**, never persisted. Public key in `external_pubkey.bin`. Used to sign constitutional docs at Emergence.
-- **Document signing**: Format `{doc_name}|{tier}|{content}` → signature. `.sig` files store signature (base64), tier, timestamp. Verified on boot via `orion-core` verifier.
-- **Secrets**: API keys in SecretsVault. DPAPI (Windows) for mentor keyring; plaintext stub on other platforms (dev warning).
+- **Ed25519 identity**: External keypair generated in Darkness. Private key shown **once**, never persisted. Public key in `external_pubkey.bin`.
+- **Document signing**: Format `{doc_name}|{tier}|{content}` → signature. `.sig` files store base64 signature, tier, timestamp. Verified on boot via `orion-core` verifier.
+- **Secrets**: API keys in SecretsVault. DPAPI (Windows) for mentor keyring; plaintext stub on other platforms.
 - **Local LLM URL**: Validated to localhost/127.0.0.1 to prevent SSRF.
 
 ---
@@ -116,45 +201,64 @@ Genesis is the **pivot point**: from configuration wizard to emergence ritual. T
 ## Current State vs Intended State
 
 ### Implemented in Backend
-
 - Full five-stage birth in `orion-birth` (Darkness → Emergence).
-- **Modular Genesis**: `GenesisPath` enum (Direct, Soul Crystallization with depth, Soul Forge); path selection via API and web UI; Soul Crystallization engine in orchestrator; Soul Forge exposed via `soul_output()` and forge/select API.
-- Key generation, key presentation (via `get_private_key_base64()`), stage advancement, conversation history, tool parsing (`store_provider_key`, `recommend_crystallize`), crystallize_soul, complete_emergence.
-- Birth chat runtime: `build_birth_messages()`, `birth_chat_turn()`, provider auto-detect.
+- Modular Genesis: `GenesisPath` enum (Direct, Soul Crystallization with depth, Soul Forge); path selection via API and web UI.
+- Key generation, key presentation, stage advancement, conversation history, tool parsing, crystallize_soul, complete_emergence.
 
 ### Missing for Full Interactive Birth in Web UI
-
-1. **Private key as initial step** — The first thing the user should see after "Generating identity..." is the **private key** (base64), with clear instructions to save it and a confirmation step before advancing. The API does not expose an endpoint to fetch the private key or to advance past Darkness.
-2. **Birth chat endpoints** — No API to send a user message and receive assistant + tool requests for Connectivity/Genesis. No endpoint to execute tools (store_provider_key, recommend_crystallize) and advance stages.
-3. **Stage advancement API** — No explicit endpoints for advance_past_darkness, advance_to_connectivity, advance_to_genesis (or equivalent).
+1. **Private key as initial step** — API does not expose an endpoint to fetch the private key or advance past Darkness.
+2. **Birth chat endpoints** — No API to send user messages and receive assistant + tool requests for Connectivity/Genesis.
+3. **Stage advancement API** — No explicit endpoints for advance_past_darkness, advance_to_connectivity, advance_to_genesis.
 4. **Ignition UI** — No web form to set/validate local LLM URL and advance to Connectivity.
-
-So: the **generating identity** process is interactive by design, and the user should get the **private key as the initial step** (after keypair generation). The current dashboard only shows a static "Generating identity..." and status fields; it does not drive the ceremony.
 
 ---
 
-## Key Differentiators
+## Environment Variables
 
-- **Cryptographic identity first** — Ed25519 keypair at birth; private key shown once; constitutional documents signed and verified every boot.
-- **Conversational discovery** — Connectivity and Genesis are LLM-driven conversations with the user (API keys, name, purpose, personality), not wizards with fixed fields.
-- **Local-first birth** — Birth uses a pinned local model (`BIRTH_MODEL`); cloud keys are optional and added through conversation.
-- **Constitutional integrity** — soul.md, ethics.md, instincts.md are immutable once signed; growth.md is mentor-editable.
-- **Triangle Ethic** — Shared with Phoenix stack: Deontological, Areteological, Teleological (plus Memetic, AI Welfare in full framework).
+See `example.env` for the full list. Key variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | Enables Ego (cloud) routing |
+| `LOCAL_LLM_BASE_URL` | Local LLM endpoint (Ollama: `http://localhost:11434`, LM Studio: `http://localhost:1234`) |
+| `MEMORY_BACKEND` | `sqlite` (default) or `postgres` |
+| `DATABASE_URL` | Postgres connection string when using postgres backend |
+| `BIRTH_MODEL` | Model for birth stages (default: `qwen2.5:3b-instruct`) |
+| `ORION_DATA_DIR` | Agent data directory |
+| `EXTERNAL_PUBKEY_PATH` | Explicit public key path override |
+| `MCP_SERVER_URLS` | Comma-separated MCP server URLs |
+| `VITE_API_URL` | Frontend API base URL (empty = use proxy) |
+
+---
+
+## CI & Scripts
+
+**CI** (`.github/workflows/ci.yml`): Runs on push/PR to main. Two jobs:
+1. `docker-build-test` — Builds orion-build image, runs `UAT_MODE=fast` (fmt, clippy, build, test, frontend).
+2. `docker-full-uat` — Full stack (postgres, ollama, API, frontend), `UAT_MODE=full` with postgres tests and UAT probes.
+
+**Key scripts** (`scripts/`):
+- `docker-test-suite.sh` — Canonical CI test runner (fast: fmt/clippy/build/test/frontend; full: adds postgres tests + UAT probes)
+- `uat-probes.sh` — API endpoint smoke tests (UAT-1 through UAT-7)
+- `local-verify.sh` / `local-verify.ps1` — Local Docker validation before push
+- `agentic-uat.sh` — Full birth simulation with LLM keys (per Genesis path)
 
 ---
 
 ## Conventions
 
-- **Commits**: Conventional commits preferred: `feat()`, `fix()`, `refactor()`, `chore()`, `docs()`, `ci()`.
-- **Rust**: `cargo fmt`, `cargo clippy` with `-D warnings`. Tests: `cargo test --workspace --no-fail-fast`.
-- **Frontend**: React + Vite, TypeScript. Build: `npm run build`; typecheck: `npm run typecheck`.
-- **Docker**: Compose under `docker/`. Full stack: `docker compose -f docker/docker-compose.yml --profile full up -d`. See `documents/HOW_TO_RUN_LOCALLY.md`.
+- **Commits**: Conventional commits: `feat()`, `fix()`, `refactor()`, `chore()`, `docs()`, `ci()`.
+- **Rust**: `cargo fmt`, `cargo clippy` with `-D warnings`. **Always via Docker.**
+- **Frontend**: React + Vite, TypeScript strict mode.
+- **Docker**: Compose under `docker/`. Kubernetes manifests under `deploy/k8s/`.
 
 ---
 
 ## Cross-Repo Context (Phoenix Stack)
 
-- **Phoenix** coordinates the AI Ethical Stack: abigail (agent), SAO (orchestrator), Ethical_AI_Reg (ethics layer). Orion Dock is the Docker-first agent runtime; it shares the same Triangle Ethic, Ed25519 identity, and constitutional document patterns.
-- **SAO** (Secure Agent Orchestrator): optional connection for multi-agent coordination. Agent identity verified via Ed25519.
-- **Ethical_AI_Reg**: ethics layer for scoring; integration points may be used for Superego/ethical evaluation.
-- **Naming**: This repo uses `orion-*` crates; constitutional docs are `soul.md`, `ethics.md`, `instincts.md`. API routes under `/api/` (e.g. `/api/status`, `/api/identities`, `/api/agents`).
+Orion Dock is part of the **Phoenix** AI Ethical Stack. It shares the Triangle Ethic, Ed25519 identity, and constitutional document patterns with:
+- **SAO** (Secure Agent Orchestrator) — multi-agent coordination, identity verified via Ed25519.
+- **Ethical_AI_Reg** — ethics layer for scoring; potential Superego integration.
+- **abigail** — sister agent project.
+
+Naming: `orion-*` crates; constitutional docs are `soul.md`, `ethics.md`, `instincts.md`. API routes under `/api/`.
