@@ -4,6 +4,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrustTier {
+    /// First-party, mentor-signed skills (ships with repo or mentor-approved).
+    Verified,
+    /// Agent self-authored skills, signed by agent's Ed25519 key.
+    AgentBuilt,
+    /// External/unsigned skills from third-party sources.
+    #[default]
+    Untrusted,
+}
+
+impl std::fmt::Display for TrustTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustTier::Verified => write!(f, "Verified"),
+            TrustTier::AgentBuilt => write!(f, "AgentBuilt"),
+            TrustTier::Untrusted => write!(f, "Untrusted"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SkillId(pub String);
 

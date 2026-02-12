@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use orion_core::SecretsVault;
 
-use crate::manifest::{CapabilityDescriptor, SkillId, SkillManifest};
+use crate::manifest::{CapabilityDescriptor, SkillId, SkillManifest, TrustTier};
 use crate::skill::{Skill, SkillError, SkillResult};
 
 pub struct RegisteredSkill {
     pub skill: Arc<dyn Skill>,
     pub manifest: SkillManifest,
+    pub trust_tier: TrustTier,
 }
 
 /// Describes a secret that a skill requires but is not yet stored in the vault.
@@ -54,14 +55,31 @@ impl SkillRegistry {
         }
     }
 
-    /// Register a skill. Caller must initialize the skill before registering.
+    /// Register a skill with default Untrusted tier. Caller must initialize the skill before registering.
     pub fn register(&self, skill_id: SkillId, skill: Arc<dyn Skill>) -> SkillResult<()> {
+        self.register_with_tier(skill_id, skill, TrustTier::default())
+    }
+
+    /// Register a skill with an explicit trust tier.
+    pub fn register_with_tier(
+        &self,
+        skill_id: SkillId,
+        skill: Arc<dyn Skill>,
+        trust_tier: TrustTier,
+    ) -> SkillResult<()> {
         let manifest = skill.manifest().clone();
         let mut skills = self
             .skills
             .write()
             .map_err(|e| SkillError::InitFailed(e.to_string()))?;
-        skills.insert(skill_id, RegisteredSkill { skill, manifest });
+        skills.insert(
+            skill_id,
+            RegisteredSkill {
+                skill,
+                manifest,
+                trust_tier,
+            },
+        );
         Ok(())
     }
 
@@ -82,6 +100,18 @@ impl SkillRegistry {
         Ok(skills.values().map(|r| r.manifest.clone()).collect())
     }
 
+    /// List all registered skills with their trust tiers.
+    pub fn list_with_tiers(&self) -> SkillResult<Vec<(SkillManifest, TrustTier)>> {
+        let skills = self
+            .skills
+            .read()
+            .map_err(|e| SkillError::InitFailed(e.to_string()))?;
+        Ok(skills
+            .values()
+            .map(|r| (r.manifest.clone(), r.trust_tier))
+            .collect())
+    }
+
     pub fn find_by_capability(&self, capability: &str) -> Vec<SkillId> {
         let skills = match self.skills.read() {
             Ok(g) => g,
@@ -99,8 +129,11 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Get a clone of the skill Arc and its manifest for execution. Caller can then call execute_tool without holding the lock.
-    pub fn get_skill(&self, skill_id: &SkillId) -> SkillResult<(Arc<dyn Skill>, SkillManifest)> {
+    /// Get a clone of the skill Arc, its manifest, and trust tier for execution.
+    pub fn get_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> SkillResult<(Arc<dyn Skill>, SkillManifest, TrustTier)> {
         let skills = self
             .skills
             .read()
@@ -108,7 +141,7 @@ impl SkillRegistry {
         let reg = skills
             .get(skill_id)
             .ok_or_else(|| SkillError::NotFound(skill_id.clone()))?;
-        Ok((reg.skill.clone(), reg.manifest.clone()))
+        Ok((reg.skill.clone(), reg.manifest.clone(), reg.trust_tier))
     }
 
     /// Check which secrets a manifest requires that are missing from the vault.

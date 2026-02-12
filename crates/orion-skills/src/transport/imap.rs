@@ -19,6 +19,8 @@ pub struct ImapClient {
     port: u16,
     user: String,
     password: String,
+    /// Accept invalid/self-signed TLS certificates (needed for Proton Bridge).
+    accept_invalid_certs: bool,
 }
 
 type TlsStream = async_native_tls::TlsStream<tokio_util::compat::Compat<TcpStream>>;
@@ -30,6 +32,18 @@ impl ImapClient {
             port,
             user: user.to_string(),
             password: password.to_string(),
+            accept_invalid_certs: false,
+        }
+    }
+
+    /// Create a client that accepts self-signed TLS certificates (for Proton Bridge).
+    pub fn with_insecure_tls(host: &str, port: u16, user: &str, password: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+            password: password.to_string(),
+            accept_invalid_certs: true,
         }
     }
 
@@ -37,7 +51,14 @@ impl ImapClient {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr).await?;
         let stream = stream.compat();
-        let tls = TlsConnector::new().connect(&self.host, stream).await?;
+        let connector = if self.accept_invalid_certs {
+            TlsConnector::new()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+        } else {
+            TlsConnector::new()
+        };
+        let tls = connector.connect(&self.host, stream).await?;
         let mut client = async_imap::Client::new(tls);
         let _ = client.read_response().await;
         let session = client

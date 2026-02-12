@@ -28,13 +28,14 @@ pub use email_auth::{
 pub use error::{CoreError, Result};
 pub use global_config::{AgentEntry, GlobalConfig};
 pub use keyring::{
-    generate_external_keypair, generate_master_key, load_master_key, parse_private_key,
-    sign_agent_key, sign_constitutional_documents, sign_document, verify_agent_signature,
-    ExternalKeypairResult, Keyring, MasterKeyResult, SignatureMetadata,
+    delete_signing_key, generate_external_keypair, generate_master_key, load_master_key,
+    load_signing_key, parse_private_key, persist_signing_key, sign_agent_key,
+    sign_constitutional_documents, sign_document, verify_agent_signature, ExternalKeypairResult,
+    Keyring, MasterKeyResult, SignatureMetadata,
 };
 pub use local_llm_url::validate_local_llm_url;
 pub use sao_bridge::{AgentState, SaoBridgeClient, SaoBridgeError};
 pub use secrets::SecretsVault;
 pub use superego::{check_message, check_search_query, SuperegoVerdict};
 pub use vault::{ExternalVault, ReadOnlyFileVault};
-pub use verifier::{write_sig_file, Verifier};
+pub use verifier::{write_sig_file, SigMeta, Verifier};

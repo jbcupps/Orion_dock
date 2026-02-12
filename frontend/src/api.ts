@@ -13,6 +13,7 @@ export interface StatusResponse {
   birth_model: string | null;
   birth_complete: boolean;
   birth_stage: string | null;
+  agent_name?: string | null;
 }
 
 export interface AgentIdentityInfo {
@@ -66,6 +67,58 @@ export async function loadAgent(id: string): Promise<void> {
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Load failed: ${res.status}`);
+  }
+}
+
+export interface BirthStateResponse {
+  stage: string;
+  private_key_base64?: string | null;
+}
+
+export async function fetchBirthState(
+  agentId: string
+): Promise<BirthStateResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/state`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Birth state failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function advanceDarkness(agentId: string): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/advance-darkness`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Advance darkness failed: ${res.status}`);
+  }
+}
+
+export async function setIgnition(
+  agentId: string,
+  local_llm_base_url?: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/ignition`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        local_llm_base_url: local_llm_base_url || undefined,
+      }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Ignition failed: ${res.status}`);
   }
 }
 
@@ -126,6 +179,509 @@ export async function forgeSelect(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Forge select failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchGenesisState(
+  agentId: string
+): Promise<{ path: string | null; depth?: string | null }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/state`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Genesis state failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchForgeState(
+  agentId: string
+): Promise<{
+  active: boolean;
+  state?: string;
+  prompt?: string;
+  choices?: string[];
+  archetype?: string;
+  soul_hash?: string;
+  sigil_art?: string;
+  weights?: Record<string, number>;
+}> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/state`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Forge state failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface ForgeCrystallizeBody {
+  name: string;
+  purpose?: string;
+  personality?: string;
+}
+
+export async function forgeCrystallize(
+  agentId: string,
+  body: ForgeCrystallizeBody
+): Promise<{ ok: boolean }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/crystallize`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: body.name.trim(),
+        purpose: body.purpose?.trim() || undefined,
+        personality: body.personality?.trim() || undefined,
+      }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Forge crystallize failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function completeEmergence(agentId: string): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/complete-emergence`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Complete emergence failed: ${res.status}`);
+  }
+}
+
+export interface BirthChatMessageItem {
+  role: string;
+  content: string;
+}
+
+export async function fetchBirthChatHistory(
+  agentId: string
+): Promise<{ messages: BirthChatMessageItem[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat/history`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Birth chat history failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function sendBirthChat(
+  agentId: string,
+  message: string
+): Promise<{
+  assistant_content: string;
+  tool_requests: { name: string; arguments: unknown }[];
+  crystallized?: boolean;
+}> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: message.trim() }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Birth chat failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---- Connectivity API ----
+
+export interface ConnectivityChatResponse {
+  assistant_content: string;
+  tool_requests: { name: string; arguments: unknown }[];
+  stored_providers: string[];
+  key_stored?: { provider: string; validated: boolean };
+}
+
+export async function sendConnectivityChat(
+  agentId: string,
+  message: string
+): Promise<ConnectivityChatResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/chat`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: message.trim() }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Connectivity chat failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchConnectivityChatHistory(
+  agentId: string
+): Promise<{ messages: BirthChatMessageItem[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/chat/history`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Connectivity chat history failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface StoreKeyResponse {
+  ok: boolean;
+  provider: string;
+  validated: boolean;
+}
+
+export async function storeProviderKey(
+  agentId: string,
+  provider: string,
+  key: string,
+  validate = true
+): Promise<StoreKeyResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/keys`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key, validate }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Store key failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchStoredProviders(
+  agentId: string
+): Promise<{ providers: string[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/providers`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Providers failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---- Operational Chat API (post-birth) ----
+
+export async function fetchChatHistory(
+  agentId: string
+): Promise<{ messages: BirthChatMessageItem[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat/history`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Chat history failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface OperationalChatResponse {
+  assistant_content: string;
+  tool_executed?: { name: string; provider: string };
+  stored_providers?: string[];
+}
+
+export async function sendChat(
+  agentId: string,
+  message: string
+): Promise<OperationalChatResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: message.trim() }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Chat failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---- Agentic Loop API ----
+
+export interface AgenticRunRequest {
+  goal: string;
+  max_turns?: number;
+  auto_approve_safe_tools?: boolean;
+}
+
+export interface AgenticRunStartResponse {
+  task_id: string;
+  stream_url: string;
+}
+
+export interface AgenticEventThinking {
+  event: 'Thinking';
+  data: { turn: number; content: string };
+}
+
+export interface AgenticEventToolCall {
+  event: 'ToolCall';
+  data: { turn: number; tool_name: string; arguments: unknown };
+}
+
+export interface AgenticEventToolResult {
+  event: 'ToolResult';
+  data: { turn: number; tool_name: string; success: boolean; output: string };
+}
+
+export interface AgenticEventMentorNeeded {
+  event: 'MentorNeeded';
+  data: { turn: number; question: string };
+}
+
+export interface AgenticEventConfirmationNeeded {
+  event: 'ConfirmationNeeded';
+  data: { turn: number; tool_name: string; arguments: unknown };
+}
+
+export interface AgenticEventDone {
+  event: 'Done';
+  data: { summary: string; status: string; turns_used: number; tool_calls: number };
+}
+
+export interface AgenticEventError {
+  event: 'Error';
+  data: { message: string };
+}
+
+export type AgenticEvent =
+  | AgenticEventThinking
+  | AgenticEventToolCall
+  | AgenticEventToolResult
+  | AgenticEventMentorNeeded
+  | AgenticEventConfirmationNeeded
+  | AgenticEventDone
+  | AgenticEventError;
+
+export async function startAgenticRun(
+  agentId: string,
+  request: AgenticRunRequest
+): Promise<AgenticRunStartResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/run`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Start agentic run failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export function subscribeToAgenticStream(
+  agentId: string,
+  taskId: string,
+  onEvent: (eventName: string, data: unknown) => void,
+  onError?: (error: Event) => void
+): EventSource {
+  const base = getBaseUrl();
+  const url = `${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`;
+  const es = new EventSource(url);
+
+  const eventTypes = [
+    'thinking',
+    'tool_call',
+    'tool_result',
+    'mentor_needed',
+    'confirmation_needed',
+    'done',
+    'error',
+    'lagged',
+  ];
+
+  for (const eventType of eventTypes) {
+    es.addEventListener(eventType, (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        onEvent(eventType, data);
+      } catch {
+        onEvent(eventType, event.data);
+      }
+    });
+  }
+
+  if (onError) {
+    es.onerror = onError;
+  }
+
+  return es;
+}
+
+export async function respondToAgent(
+  agentId: string,
+  taskId: string,
+  response: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/respond`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, response }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Respond to agent failed: ${res.status}`);
+  }
+}
+
+export async function confirmAgentTool(
+  agentId: string,
+  taskId: string,
+  approved: boolean
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/confirm`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, approved }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Confirm tool failed: ${res.status}`);
+  }
+}
+
+export async function cancelAgenticRun(
+  agentId: string,
+  taskId: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/cancel`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Cancel agentic run failed: ${res.status}`);
+  }
+}
+
+// ---- External Verification API ----
+
+export interface AgentIdentityBundle {
+  agent_id: string;
+  name: string | null;
+  pubkey_base64: string;
+  birth_complete: boolean;
+  birth_date: string | null;
+}
+
+export async function fetchAgentIdentity(
+  agentId: string
+): Promise<AgentIdentityBundle> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/identity`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Agent identity failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface ConstitutionDocument {
+  name: string;
+  tier: string;
+  content: string;
+  signature: string;
+  signed_at: string;
+}
+
+export interface ConstitutionResponse {
+  agent_id: string;
+  pubkey_base64: string;
+  documents: ConstitutionDocument[];
+}
+
+export async function fetchConstitution(
+  agentId: string
+): Promise<ConstitutionResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/constitution`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Constitution failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface DocumentVerifyResult {
+  name: string;
+  valid: boolean;
+  error?: string;
+}
+
+export interface VerifyResponse {
+  agent_id: string;
+  all_valid: boolean;
+  results: DocumentVerifyResult[];
+}
+
+export async function verifyAgent(
+  agentId: string
+): Promise<VerifyResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/verify`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Verify failed: ${res.status}`);
   }
   return res.json();
 }

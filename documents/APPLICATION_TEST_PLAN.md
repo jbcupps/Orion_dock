@@ -72,7 +72,7 @@ Genesis can be exercised via three paths: **Direct**, **Soul Crystallization** (
 
 - **`UAT_GENESIS_PATH`** (env): Set to `direct` (default), `soul_forge`, or `soul_crystallization` when running the `orion-uat` binary or the agentic UAT scripts. The report table row for Genesis shows the path used (e.g. `| 4. Genesis (soul_forge) | [OK] |`).
 - **orion-uat binary**: Reads `UAT_GENESIS_PATH`, calls `advance_to_genesis_with_path(path)`, then produces soul content per path (Direct: template fill; Soul Crystallization: engine check + template; Soul Forge: run three scenarios, `soul_output()`, assert archetype/soul_hash/sigil_art). Asserts `soul.md` and `growth.md` exist and contain the agent name after crystallization.
-- **UAT probes** (`scripts/uat-probes.sh`): **UAT-4** — `GET /api/genesis/paths` returns at least 5 entries with `id`, `label`, `description`, `estimated_time`. **UAT-5** — Create agent, load, `POST /api/agents/:id/genesis/start` with `{"path":"soul_forge"}`; if 200, assert `state` scenario1 and `choices`. **UAT-6** — Three `POST /api/agents/:id/genesis/forge/select` with `{"choice":0}`; assert final response has `archetype` and `soul_hash`. (UAT-5/6 are skipped with a message if the agent is not in Connectivity.)
+- **UAT probes** (`scripts/uat-probes.sh`): **UAT-4** — `GET /api/genesis/paths` returns at least 5 entries with `id`, `label`, `description`, `estimated_time`. **UAT-5** — Create agent, load, then drive through birth stages (UAT-8/9/10) to reach Connectivity; `POST /api/agents/:id/genesis/start` with `{"path":"soul_forge"}`; assert `state` scenario1 and `choices`. **UAT-6** — Three `POST /api/agents/:id/genesis/forge/select` with `{"choice":0}`; assert final response has `archetype` and `soul_hash`. **UAT-8** — `GET /api/agents/:id/birth/state` returns 200 with `stage: "Darkness"` for a new agent; validates Postgres backend connectivity, spawn_blocking runtime isolation, migration availability in Docker. **UAT-9** — `POST /api/agents/:id/birth/advance-darkness` returns 200; validates stage transition from Darkness to Ignition. **UAT-10** — `POST /api/agents/:id/birth/ignition` with `{}` returns 200; validates stage transition from Ignition to Connectivity (required before Genesis can start).
 - **Full mode** (`docker-test-suite.sh`): When `TEST_LLM_KEY` and `TEST_SEARCH_KEY` are set, runs `orion-uat` once for each of `direct`, `soul_forge`, and `soul_crystallization` with a dedicated temp data dir per run.
 
 ## Agentic UAT (birth to usable operation)
@@ -91,6 +91,17 @@ A full automated UAT run drives the application from birth through early operati
 4. Output: `UAT_REPORT_YYYY-MM-DD.md` with sectional checks: each stage and "API status visible" are marked [OK] or [X], plus a log excerpt.
 
 The `orion-uat` binary (crate `crates/orion-uat`) drives `BirthOrchestrator` headlessly and injects the provided keys during Connectivity, then advances to Genesis with the selected path (`UAT_GENESIS_PATH`), crystallizes soul (path-aware: Direct template, Soul Crystallization engine check, or Soul Forge scenarios + `soul_output()`), and completes emergence. Early operation is verified by a quick router check.
+
+## Birth Flow Connectivity (Regression Coverage)
+
+The following issues were identified during interactive testing and are now covered by UAT-8/9/10:
+
+| Issue | Root Cause | Fix | UAT Coverage |
+|-------|-----------|-----|--------------|
+| 502 Bad Gateway on birth/state | `PostgresStore::connect()` creates a nested Tokio runtime inside async Axum handlers, causing a panic | Wrapped all `BirthOrchestrator` endpoints in `tokio::task::spawn_blocking()` | UAT-8: birth/state returns 200 with Postgres backend |
+| "postgres backend requires orion-memory with postgres feature" | `orion-birth/Cargo.toml` depended on `orion-memory` without the `postgres` feature flag | Added `features = ["postgres"]` to `orion-birth/Cargo.toml` | UAT-8: orchestrator creates successfully with Postgres |
+| "while resolving migrations: No such file or directory" | `Dockerfile.api` runtime stage only copied the binary; `env!("CARGO_MANIFEST_DIR")` migrations path was absent | Added `COPY crates/orion-memory/migrations` to `Dockerfile.api` runtime stage | UAT-8: migrations run on first connect in Docker |
+| Birth flow stuck at "Generating identity" | No API endpoints to drive Darkness → Ignition → Connectivity stages from the web UI | Added `GET birth/state`, `POST advance-darkness`, `POST ignition` endpoints and corresponding frontend UI | UAT-8/9/10: full birth stage progression |
 
 ## Failure Triage
 

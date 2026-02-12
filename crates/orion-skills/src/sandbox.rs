@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::manifest::{Permission, SkillId};
+use crate::manifest::{Permission, SkillId, TrustTier};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
@@ -34,6 +34,29 @@ impl Default for ResourceLimits {
             max_concurrency: 10,
             network_bandwidth: None,
             storage_quota: 100 * 1024 * 1024, // 100MB
+        }
+    }
+}
+
+impl ResourceLimits {
+    /// Return resource limits appropriate for a given trust tier.
+    pub fn for_tier(tier: TrustTier) -> Self {
+        match tier {
+            TrustTier::Verified => Self::default(), // 256MB / 30s / 10
+            TrustTier::AgentBuilt => Self {
+                max_memory_bytes: 128 * 1024 * 1024, // 128MB
+                max_cpu_ms: 15_000,                  // 15s
+                max_concurrency: 5,
+                network_bandwidth: None,
+                storage_quota: 50 * 1024 * 1024, // 50MB
+            },
+            TrustTier::Untrusted => Self {
+                max_memory_bytes: 64 * 1024 * 1024, // 64MB
+                max_cpu_ms: 10_000,                 // 10s
+                max_concurrency: 2,
+                network_bandwidth: None,
+                storage_quota: 10 * 1024 * 1024, // 10MB
+            },
         }
     }
 }
@@ -67,6 +90,31 @@ pub struct SkillSandbox {
 }
 
 impl SkillSandbox {
+    /// Filter permissions based on trust tier.
+    ///
+    /// - `Verified`: all permissions allowed.
+    /// - `AgentBuilt`: strip `ShellExecute`.
+    /// - `Untrusted`: only `Network` and `Memory(ReadOnly)` allowed.
+    pub fn filter_permissions(perms: Vec<Permission>, tier: TrustTier) -> Vec<Permission> {
+        match tier {
+            TrustTier::Verified => perms,
+            TrustTier::AgentBuilt => perms
+                .into_iter()
+                .filter(|p| !matches!(p, Permission::ShellExecute))
+                .collect(),
+            TrustTier::Untrusted => perms
+                .into_iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        Permission::Network(_)
+                            | Permission::Memory(crate::manifest::MemoryPermission::ReadOnly)
+                    )
+                })
+                .collect(),
+        }
+    }
+
     pub fn new(
         skill_id: SkillId,
         granted_permissions: Vec<Permission>,

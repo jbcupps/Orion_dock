@@ -70,7 +70,7 @@ if ! echo "$paths_body" | grep -q '"estimated_time"'; then
   fail "UAT-4: /api/genesis/paths missing estimated_time: $paths_body"
 fi
 # Expect at least 5 path entries (Direct + 3 Soul Crystallization depths + Soul Forge)
-path_count=$(echo "$paths_body" | grep -c '"id":' || true)
+path_count=$(echo "$paths_body" | grep -o '"id":' | wc -l)
 if [[ "${path_count:-0}" -lt 5 ]]; then
   fail "UAT-4: /api/genesis/paths expected at least 5 entries, got ${path_count:-0}"
 fi
@@ -85,7 +85,106 @@ if [[ -z "${agent_id:-}" ]]; then
   fail "UAT-5: create agent did not return id: $create_body"
 fi
 curl -sf --max-time 5 -X POST "${ORION_API_URL}/api/agents/${agent_id}/load" >/dev/null
-# Allow 4xx so we can read body and skip UAT-5/6 when agent is not in Connectivity
+echo "UAT-5 Create agent: OK (id=${agent_id})"
+
+# --- UAT-8: Birth state endpoint (Darkness) ---
+# Tests: Postgres feature enabled, runtime nested-runtime fix (spawn_blocking),
+#        migrations available in runtime image, keypair generation.
+birth_state_body=$(curl -s -w "\n%{http_code}" --max-time 30 \
+  "${ORION_API_URL}/api/agents/${agent_id}/birth/state")
+birth_state_http=$(echo "$birth_state_body" | tail -n1)
+birth_state_json=$(echo "$birth_state_body" | sed '$d')
+if [[ "$birth_state_http" != "200" ]]; then
+  fail "UAT-8: birth/state returned $birth_state_http (expected 200): $birth_state_json"
+fi
+if ! echo "$birth_state_json" | grep -q '"stage"'; then
+  fail "UAT-8: birth/state missing stage field: $birth_state_json"
+fi
+if ! echo "$birth_state_json" | grep -q '"Darkness"'; then
+  fail "UAT-8: birth/state stage not Darkness for new agent: $birth_state_json"
+fi
+echo "UAT-8 Birth state (Darkness + Postgres backend): OK"
+
+# --- UAT-9: Advance past Darkness ---
+advance_body=$(curl -s -w "\n%{http_code}" --max-time 15 -X POST \
+  "${ORION_API_URL}/api/agents/${agent_id}/birth/advance-darkness")
+advance_http=$(echo "$advance_body" | tail -n1)
+advance_json=$(echo "$advance_body" | sed '$d')
+if [[ "$advance_http" != "200" ]]; then
+  fail "UAT-9: advance-darkness returned $advance_http (expected 200): $advance_json"
+fi
+echo "UAT-9 Advance past Darkness: OK"
+
+# --- UAT-10: Ignition (advance to Connectivity) ---
+ignition_body=$(curl -s -w "\n%{http_code}" --max-time 15 -X POST \
+  "${ORION_API_URL}/api/agents/${agent_id}/birth/ignition" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+ignition_http=$(echo "$ignition_body" | tail -n1)
+ignition_json=$(echo "$ignition_body" | sed '$d')
+if [[ "$ignition_http" != "200" ]]; then
+  fail "UAT-10: ignition returned $ignition_http (expected 200): $ignition_json"
+fi
+echo "UAT-10 Ignition (advance to Connectivity): OK"
+
+# --- UAT-11: Connectivity providers (initially empty) ---
+providers_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/providers")
+providers_http=$(echo "$providers_body" | tail -n1)
+providers_json=$(echo "$providers_body" | sed '$d')
+if [[ "$providers_http" != "200" ]]; then
+  fail "UAT-11: connectivity/providers returned $providers_http (expected 200): $providers_json"
+fi
+if ! echo "$providers_json" | grep -q '"providers"'; then
+  fail "UAT-11: connectivity/providers missing providers field: $providers_json"
+fi
+echo "UAT-11 Connectivity providers (initial): OK"
+
+# --- UAT-12: Store a provider key (validation off — no real key) ---
+store_key_body=$(curl -s -w "\n%{http_code}" --max-time 15 -X POST \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/keys" \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"openai","key":"sk-test-uat-probe-dummy-key-1234567890","validate":false}')
+store_key_http=$(echo "$store_key_body" | tail -n1)
+store_key_json=$(echo "$store_key_body" | sed '$d')
+if [[ "$store_key_http" != "200" ]]; then
+  fail "UAT-12: connectivity/keys store returned $store_key_http (expected 200): $store_key_json"
+fi
+if ! echo "$store_key_json" | grep -q '"ok":true'; then
+  fail "UAT-12: connectivity/keys store missing ok:true: $store_key_json"
+fi
+if ! echo "$store_key_json" | grep -q '"provider":"openai"'; then
+  fail "UAT-12: connectivity/keys store wrong provider: $store_key_json"
+fi
+echo "UAT-12 Store provider key (no validation): OK"
+
+# --- UAT-13: Verify stored provider appears ---
+providers2_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/providers")
+providers2_http=$(echo "$providers2_body" | tail -n1)
+providers2_json=$(echo "$providers2_body" | sed '$d')
+if [[ "$providers2_http" != "200" ]]; then
+  fail "UAT-13: connectivity/providers returned $providers2_http after store: $providers2_json"
+fi
+if ! echo "$providers2_json" | grep -q '"openai"'; then
+  fail "UAT-13: connectivity/providers does not include openai after store: $providers2_json"
+fi
+echo "UAT-13 Connectivity providers (after store): OK"
+
+# --- UAT-14: Connectivity chat history (initially empty) ---
+chat_hist_body=$(curl -s -w "\n%{http_code}" --max-time 10 \
+  "${ORION_API_URL}/api/agents/${agent_id}/connectivity/chat/history")
+chat_hist_http=$(echo "$chat_hist_body" | tail -n1)
+chat_hist_json=$(echo "$chat_hist_body" | sed '$d')
+if [[ "$chat_hist_http" != "200" ]]; then
+  fail "UAT-14: connectivity/chat/history returned $chat_hist_http (expected 200): $chat_hist_json"
+fi
+if ! echo "$chat_hist_json" | grep -q '"messages"'; then
+  fail "UAT-14: connectivity/chat/history missing messages field: $chat_hist_json"
+fi
+echo "UAT-14 Connectivity chat history (initial): OK"
+
+# Now agent is in Connectivity — proceed with Genesis flow
 genesis_start_body=$(curl -s -w "\n%{http_code}" --max-time 10 -X POST \
   "${ORION_API_URL}/api/agents/${agent_id}/genesis/start" \
   -H "Content-Type: application/json" \
@@ -99,7 +198,7 @@ if [[ "$genesis_start_http" == "200" ]]; then
   if ! echo "$genesis_start_json" | grep -q '"choices"'; then
     fail "UAT-5: genesis/start 200 but missing choices: $genesis_start_json"
   fi
-  echo "UAT-5 Create agent and start Soul Forge Genesis: OK"
+  echo "UAT-5 Start Soul Forge Genesis: OK"
 
   # --- UAT-6: Soul Forge scenario progression ---
   for _ in 1 2 3; do
@@ -119,7 +218,7 @@ if [[ "$genesis_start_http" == "200" ]]; then
   fi
   echo "UAT-6 Soul Forge scenario progression: OK"
 else
-  echo "UAT-5/UAT-6 skipped (agent not in Connectivity; genesis/start returned $genesis_start_http)"
+  fail "UAT-5: genesis/start returned $genesis_start_http after advancing to Connectivity: $genesis_start_json"
 fi
 
 # --- UAT-7: Failure handling (ready endpoint) ---

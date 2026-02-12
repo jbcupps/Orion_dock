@@ -185,7 +185,7 @@ pub fn sign_document(
     content: &str,
     tier: DocumentTier,
 ) -> SignatureMetadata {
-    let signable = format!("{}|{:?}|{}", doc_name, tier, content);
+    let signable = format!("{}|{}|{}", doc_name, tier.as_str(), content);
     let signature = signing_key.sign(signable.as_bytes());
     SignatureMetadata {
         signature: BASE64.encode(signature.to_bytes()),
@@ -218,6 +218,38 @@ pub fn sign_constitutional_documents(signing_key: &SigningKey, docs_dir: &Path) 
     Ok(())
 }
 
+// ============================================================================
+// Signing Key Persistence (encrypted to disk for birth recovery across restarts)
+// ============================================================================
+
+const SIGNING_KEY_FILENAME: &str = "signing.key";
+
+/// Persist a signing key to disk (encrypted via DPAPI on Windows, plaintext on Linux/Docker).
+/// Used to survive server restarts during the birth process (Darkness → Emergence).
+pub fn persist_signing_key(data_dir: &Path, key_bytes: &[u8]) -> Result<()> {
+    let path = data_dir.join(SIGNING_KEY_FILENAME);
+    crate::encrypted_storage::write_encrypted(&path, key_bytes)
+}
+
+/// Load a persisted signing key from disk. Returns None if the file doesn't exist.
+pub fn load_signing_key(data_dir: &Path) -> Result<Option<Vec<u8>>> {
+    let path = data_dir.join(SIGNING_KEY_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = crate::encrypted_storage::read_encrypted(&path)?;
+    Ok(Some(bytes))
+}
+
+/// Delete the persisted signing key file (called after Emergence completes).
+pub fn delete_signing_key(data_dir: &Path) -> Result<()> {
+    let path = data_dir.join(SIGNING_KEY_FILENAME);
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 pub fn parse_private_key(base64_key: &str) -> Result<SigningKey> {
     let bytes = BASE64
         .decode(base64_key)
@@ -227,4 +259,41 @@ pub fn parse_private_key(base64_key: &str) -> Result<SigningKey> {
         .try_into()
         .map_err(|_| CoreError::Crypto("Private key must be exactly 32 bytes".into()))?;
     Ok(SigningKey::from_bytes(&key_bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_persist_load_delete_signing_key() {
+        let tmp = std::env::temp_dir().join("orion_keyring_persist_test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let key_bytes = [42u8; 32];
+        persist_signing_key(&tmp, &key_bytes).unwrap();
+        assert!(tmp.join(SIGNING_KEY_FILENAME).exists());
+
+        let loaded = load_signing_key(&tmp).unwrap();
+        assert_eq!(loaded.unwrap(), key_bytes.to_vec());
+
+        delete_signing_key(&tmp).unwrap();
+        assert!(!tmp.join(SIGNING_KEY_FILENAME).exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_signing_key_nonexistent() {
+        let tmp = std::env::temp_dir().join("orion_keyring_nokey_test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let loaded = load_signing_key(&tmp).unwrap();
+        assert!(loaded.is_none());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

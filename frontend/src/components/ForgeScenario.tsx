@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { forgeSelect } from '../api';
+import { forgeCrystallize, forgeSelect } from '../api';
 import './ForgeScenario.css';
 
 interface ForgeScenarioProps {
@@ -12,6 +12,7 @@ interface ForgeScenarioProps {
     soul_hash?: string;
     sigil_art?: string;
     weights?: Record<string, number>;
+    crystallized?: boolean;
   }) => void;
   onError: (message: string) => void;
 }
@@ -27,7 +28,7 @@ export default function ForgeScenario({
   const [state, setState] = useState(initialState ?? 'scenario1');
   const [prompt, setPrompt] = useState(initialPrompt ?? '');
   const [choices, setChoices] = useState<string[]>(initialChoices ?? []);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [, setSelected] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{
     archetype: string;
@@ -35,6 +36,10 @@ export default function ForgeScenario({
     sigil_art?: string;
     weights?: Record<string, number>;
   } | null>(null);
+  const [crystallizeName, setCrystallizeName] = useState('');
+  const [crystallizePurpose, setCrystallizePurpose] = useState('');
+  const [crystallizePersonality, setCrystallizePersonality] = useState('');
+  const [crystallizeBusy, setCrystallizeBusy] = useState(false);
 
   const handleChoice = async (index: number) => {
     if (busy) return;
@@ -44,13 +49,10 @@ export default function ForgeScenario({
       const data = await forgeSelect(agentId, index);
       setState(data.state);
       if (data.state === 'crystallize' || data.state === 'done') {
+        // Store result locally — the crystallize form will show.
+        // Do NOT call onComplete yet; that happens after the user submits
+        // the name/purpose/personality form (handleCrystallizeSubmit).
         setResult({
-          archetype: data.archetype ?? '',
-          soul_hash: data.soul_hash,
-          sigil_art: data.sigil_art,
-          weights: data.weights,
-        });
-        onComplete({
           archetype: data.archetype ?? '',
           soul_hash: data.soul_hash,
           sigil_art: data.sigil_art,
@@ -68,6 +70,28 @@ export default function ForgeScenario({
     }
   };
 
+  const handleCrystallizeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = crystallizeName.trim();
+    if (!name || crystallizeBusy) return;
+    setCrystallizeBusy(true);
+    try {
+      await forgeCrystallize(agentId, {
+        name,
+        purpose: crystallizePurpose.trim() || undefined,
+        personality: crystallizePersonality.trim() || undefined,
+      });
+      onComplete({
+        ...result!,
+        crystallized: true,
+      });
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Crystallize failed');
+    } finally {
+      setCrystallizeBusy(false);
+    }
+  };
+
   if (result) {
     return (
       <div className="forge-result">
@@ -81,9 +105,43 @@ export default function ForgeScenario({
             <small>Hash: {result.soul_hash.slice(0, 16)}…</small>
           </p>
         )}
-        <p className="forge-result-next">
-          Next: provide a name for your agent to crystallize the soul document.
-        </p>
+        <form onSubmit={handleCrystallizeSubmit} className="forge-result-form">
+          <label htmlFor="forge-name">Agent name (required)</label>
+          <input
+            id="forge-name"
+            type="text"
+            value={crystallizeName}
+            onChange={(e) => setCrystallizeName(e.target.value)}
+            placeholder="e.g. Orion"
+            className="forge-result-input"
+            required
+          />
+          <label htmlFor="forge-purpose">Purpose (optional)</label>
+          <input
+            id="forge-purpose"
+            type="text"
+            value={crystallizePurpose}
+            onChange={(e) => setCrystallizePurpose(e.target.value)}
+            placeholder="What your agent is for"
+            className="forge-result-input"
+          />
+          <label htmlFor="forge-personality">Personality (optional)</label>
+          <input
+            id="forge-personality"
+            type="text"
+            value={crystallizePersonality}
+            onChange={(e) => setCrystallizePersonality(e.target.value)}
+            placeholder="Tone and style"
+            className="forge-result-input"
+          />
+          <button
+            type="submit"
+            className="button-primary forge-result-submit"
+            disabled={crystallizeBusy || !crystallizeName.trim()}
+          >
+            {crystallizeBusy ? 'Crystallizing…' : 'Crystallize soul'}
+          </button>
+        </form>
       </div>
     );
   }

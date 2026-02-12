@@ -2,7 +2,11 @@
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
-use orion_core::{generate_external_keypair, sign_constitutional_documents, AppConfig};
+use orion_core::{
+    generate_external_keypair, sign_constitutional_documents,
+    templates::{ETHICS_MD, INSTINCTS_MD},
+    AppConfig,
+};
 use orion_memory::{Memory, MemoryStore};
 use orion_soul_crystallization::{CrystallizationEngine, DepthLevel};
 use std::path::Path;
@@ -52,6 +56,19 @@ impl BirthStage {
             BirthStage::Emergence => None,
         }
     }
+
+    /// Parse a stage name (as persisted in config.birth_stage) back to enum.
+    /// Returns None for unrecognized strings.
+    pub fn from_name(s: &str) -> Option<BirthStage> {
+        match s {
+            "Darkness" => Some(BirthStage::Darkness),
+            "Ignition" => Some(BirthStage::Ignition),
+            "Connectivity" => Some(BirthStage::Connectivity),
+            "Genesis" => Some(BirthStage::Genesis),
+            "Emergence" => Some(BirthStage::Emergence),
+            _ => None,
+        }
+    }
 }
 
 /// Depth level for Soul Crystallization path (abigail-style).
@@ -90,9 +107,7 @@ pub enum GenesisPath {
     /// Existing chat with recommend_crystallize tool
     Direct,
     /// Abigail-style depth-based psychometric profiling
-    SoulCrystallization {
-        depth: SoulCrystallizationDepth,
-    },
+    SoulCrystallization { depth: SoulCrystallizationDepth },
     /// Scenario-based calibration ritual (archetypes, sigil)
     SoulForge,
 }
@@ -203,10 +218,16 @@ impl BirthOrchestrator {
         if store.has_birth()? {
             return Err(BirthError::AlreadyBorn.into());
         }
+        // Restore persisted stage from config (if any), otherwise start at Darkness.
+        let stage = config
+            .birth_stage
+            .as_deref()
+            .and_then(BirthStage::from_name)
+            .unwrap_or(BirthStage::Darkness);
         Ok(Self {
             config,
             store,
-            stage: BirthStage::Darkness,
+            stage,
             signing_key: None,
             private_key_base64: None,
             conversation_history: Vec::new(),
@@ -375,6 +396,16 @@ impl BirthOrchestrator {
         // Write growth.md (MentorEditable, not part of constitutional signing set)
         std::fs::write(docs_dir.join("growth.md"), growth_content)?;
 
+        // Write ethics.md and instincts.md from templates if they don't exist yet
+        let ethics_path = docs_dir.join("ethics.md");
+        if !ethics_path.exists() {
+            std::fs::write(&ethics_path, ETHICS_MD)?;
+        }
+        let instincts_path = docs_dir.join("instincts.md");
+        if !instincts_path.exists() {
+            std::fs::write(&instincts_path, INSTINCTS_MD)?;
+        }
+
         self.stage = BirthStage::Emergence;
         self.persist_stage()?;
         Ok(())
@@ -473,6 +504,20 @@ impl BirthOrchestrator {
 
     pub fn config_mut(&mut self) -> &mut AppConfig {
         &mut self.config
+    }
+
+    /// Store a signing key from external bytes (used to reconstruct state across API calls).
+    pub fn set_signing_key_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| BirthError::Config("Invalid signing key length".to_string()))?;
+        self.signing_key = Some(SigningKey::from_bytes(&key_bytes));
+        Ok(())
+    }
+
+    /// Extract the signing key bytes (moves it out of the orchestrator).
+    pub fn take_signing_key_bytes(&mut self) -> Option<Vec<u8>> {
+        self.signing_key.take().map(|k| k.to_bytes().to_vec())
     }
 }
 
@@ -799,6 +844,94 @@ mod tests {
         // In Darkness stage, complete_emergence should fail
         let result = orch.complete_emergence();
         assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_stage_from_name() {
+        assert_eq!(
+            BirthStage::from_name("Darkness"),
+            Some(BirthStage::Darkness)
+        );
+        assert_eq!(
+            BirthStage::from_name("Ignition"),
+            Some(BirthStage::Ignition)
+        );
+        assert_eq!(
+            BirthStage::from_name("Connectivity"),
+            Some(BirthStage::Connectivity)
+        );
+        assert_eq!(BirthStage::from_name("Genesis"), Some(BirthStage::Genesis));
+        assert_eq!(
+            BirthStage::from_name("Emergence"),
+            Some(BirthStage::Emergence)
+        );
+        assert_eq!(BirthStage::from_name("bogus"), None);
+        assert_eq!(BirthStage::from_name(""), None);
+    }
+
+    #[test]
+    fn test_new_restores_persisted_stage() {
+        let tmp = std::env::temp_dir().join("orion_birth_restore_stage");
+        let _ = fs::remove_dir_all(&tmp);
+
+        // Fresh config — should default to Darkness
+        let config = test_config(&tmp);
+        let orch = BirthOrchestrator::new(config).unwrap();
+        assert_eq!(orch.current_stage(), BirthStage::Darkness);
+        drop(orch);
+
+        // Config with persisted Ignition stage — should restore to Ignition
+        let mut config2 = test_config(&tmp);
+        config2.birth_stage = Some("Ignition".to_string());
+        let orch2 = BirthOrchestrator::new(config2).unwrap();
+        assert_eq!(orch2.current_stage(), BirthStage::Ignition);
+        drop(orch2);
+
+        // Config with persisted Connectivity stage — should restore to Connectivity
+        let mut config3 = test_config(&tmp);
+        config3.birth_stage = Some("Connectivity".to_string());
+        let orch3 = BirthOrchestrator::new(config3).unwrap();
+        assert_eq!(orch3.current_stage(), BirthStage::Connectivity);
+        drop(orch3);
+
+        // Config with unknown stage string — should fall back to Darkness
+        let mut config4 = test_config(&tmp);
+        config4.birth_stage = Some("unknown_stage".to_string());
+        let orch4 = BirthOrchestrator::new(config4).unwrap();
+        assert_eq!(orch4.current_stage(), BirthStage::Darkness);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_signing_key_bytes_roundtrip() {
+        let tmp = std::env::temp_dir().join("orion_birth_key_bytes");
+        let _ = fs::remove_dir_all(&tmp);
+        let config = test_config(&tmp);
+        let docs_dir = config.docs_dir.clone();
+
+        let mut orch = BirthOrchestrator::new(config.clone()).unwrap();
+        orch.generate_identity(&docs_dir).unwrap();
+
+        // Extract key bytes
+        let bytes = orch.take_signing_key_bytes();
+        assert!(bytes.is_some());
+        let bytes = bytes.unwrap();
+        assert_eq!(bytes.len(), 32);
+
+        // Key should be gone now
+        assert!(orch.signing_key.is_none());
+
+        // Inject key bytes into a new orchestrator
+        let mut config2 = test_config(&tmp);
+        config2.birth_stage = Some("Emergence".to_string());
+        // Need to allow creating a new orch; delete the birth record first
+        drop(orch);
+        let mut orch2 = BirthOrchestrator::new(config2).unwrap();
+        orch2.set_signing_key_bytes(&bytes).unwrap();
+        assert!(orch2.signing_key.is_some());
 
         let _ = fs::remove_dir_all(&tmp);
     }
