@@ -2909,8 +2909,7 @@ async fn api_list_agentic_runs(
                             turns: v.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                             tool_calls: v.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
                                 as u32,
-                            summary: v.get("summary").and_then(|v| v.as_str())
-                                .map(String::from),
+                            summary: v.get("summary").and_then(|v| v.as_str()).map(String::from),
                             started_at: v
                                 .get("started_at")
                                 .and_then(|v| v.as_str())
