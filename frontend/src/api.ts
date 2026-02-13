@@ -432,6 +432,33 @@ export async function sendChat(
   return res.json();
 }
 
+// ---- Agentic Runs (Jobs) API ----
+
+export interface AgenticRunInfo {
+  task_id: string;
+  goal: string;
+  status: string;
+  turns: number;
+  tool_calls: number;
+  summary?: string;
+  started_at: string;
+  completed_at?: string;
+}
+
+export async function fetchAgenticRuns(
+  agentId: string
+): Promise<AgenticRunInfo[]> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/runs`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch agentic runs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ---- Agentic Loop API ----
 
 export interface AgenticRunRequest {

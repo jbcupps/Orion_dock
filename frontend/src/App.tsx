@@ -21,6 +21,7 @@ import GenesisChat from './components/GenesisChat';
 import ConnectivityPanel from './components/ConnectivityPanel';
 import OperationalChat from './components/OperationalChat';
 import AgenticPanel from './components/AgenticPanel';
+import JobsTable from './components/JobsTable';
 import './App.css';
 
 type AppState = 'splash' | 'hive' | 'dashboard';
@@ -578,6 +579,11 @@ function App() {
                 onError={setError}
               />
             )}
+          </section>
+        )}
+        {status?.birth_complete && currentAgentId && (
+          <section className="panel jobs-panel-section">
+            <JobsTable agentId={currentAgentId} />
           </section>
         )}
         <section className="panel status-panel">
