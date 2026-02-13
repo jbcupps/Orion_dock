@@ -1,4 +1,11 @@
 //! Id/Ego router: classifies with Id (local), routes COMPLEX to Ego (cloud) when configured.
+//!
+//! Routing contract:
+//! - Superego pre-check runs before every route/stream path.
+//! - `route_with_tools` and `route_stream_with_tools` prefer Ego for stronger tool calling,
+//!   then fall back to Id on failure.
+//! - Self-improvement or skill execution policy is enforced by the skills executor/sandbox,
+//!   not by this router layer.
 
 use orion_capabilities::cognitive::{
     stub_heartbeat, AnthropicProvider, CandleProvider, CompatibleProvider, CompletionRequest,

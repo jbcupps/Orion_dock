@@ -1,0 +1,47 @@
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  margin-top: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+}
+
+.status-bar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.status-bar-sep {
+  color: var(--border);
+  user-select: none;
+}
+
+.status-bar-ok {
+  color: var(--ok);
+}
+
+.status-bar-pending {
+  color: var(--muted);
+}
+
+.status-bar-error {
+  color: var(--err);
+}
+
+.status-bar-ready {
+  color: var(--ok);
+}
+
+.status-bar-unavailable {
+  color: var(--warn);
+}
+
+.status-bar-not_configured {
+  color: var(--muted);
+}

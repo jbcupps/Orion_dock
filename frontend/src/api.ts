@@ -11,6 +11,7 @@ export interface StatusResponse {
   memory_backend: string;
   local_llm_configured: boolean;
   birth_model: string | null;
+  birth_model_ready?: boolean | null;
   birth_complete: boolean;
   birth_stage: string | null;
   agent_name?: string | null;
@@ -410,19 +411,30 @@ export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
   stored_providers?: string[];
+  tool_log?: {
+    tool_name: string;
+    skill_name?: string;
+    success: boolean;
+    output: string;
+  }[];
 }
 
 export async function sendChat(
   agentId: string,
-  message: string
+  message: string,
+  routerMode?: 'auto' | 'think_hard' | 'think_harder'
 ): Promise<OperationalChatResponse> {
   const base = getBaseUrl();
+  const payload: Record<string, unknown> = { message: message.trim() };
+  if (routerMode) {
+    payload.router_mode = routerMode;
+  }
   const res = await fetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: message.trim() }),
+      body: JSON.stringify(payload),
     }
   );
   if (!res.ok) {
@@ -440,6 +452,7 @@ export interface AgenticRunInfo {
   status: string;
   turns: number;
   tool_calls: number;
+  source?: string;
   summary?: string;
   started_at: string;
   completed_at?: string;
@@ -459,12 +472,201 @@ export async function fetchAgenticRuns(
   return res.json();
 }
 
+// ---- Orchestration Jobs API ----
+
+export type OrchestrationJobMode = 'id_check' | 'agentic_run';
+export type SignificanceLevel = 'low' | 'medium' | 'high';
+export type OrchestrationDecision = 'silent_log' | 'spawn_agentic' | 'flag_mentor';
+
+export interface SignificancePolicy {
+  medium_keywords?: string[];
+  high_keywords?: string[];
+  escalate_medium?: boolean;
+  flag_high_to_mentor?: boolean;
+}
+
+export interface OrchestrationJob {
+  job_id: string;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  mode: OrchestrationJobMode;
+  goal_template: string;
+  significance_policy: SignificancePolicy;
+  created_at: string;
+  updated_at: string;
+  last_run_at?: string;
+  next_run_at?: string;
+  last_status?: string;
+  last_significance?: SignificanceLevel;
+}
+
+export interface OrchestrationJobLogEntry {
+  entry_id: string;
+  job_id: string;
+  job_name: string;
+  mode: OrchestrationJobMode;
+  started_at: string;
+  completed_at: string;
+  significance: SignificanceLevel;
+  decision: OrchestrationDecision;
+  status: string;
+  summary: string;
+  task_id?: string;
+}
+
+export interface JobRunNowResponse {
+  job_id: string;
+  status: string;
+  decision: OrchestrationDecision;
+  significance: SignificanceLevel;
+  task_id?: string;
+  summary: string;
+}
+
+export async function fetchOrchestrationJobs(
+  agentId: string
+): Promise<{ jobs: OrchestrationJob[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch orchestration jobs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createOrchestrationJob(
+  agentId: string,
+  payload: {
+    name: string;
+    cron: string;
+    mode: OrchestrationJobMode;
+    goal_template: string;
+    enabled?: boolean;
+    significance_policy?: SignificancePolicy;
+  }
+): Promise<OrchestrationJob> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Create orchestration job failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateOrchestrationJob(
+  agentId: string,
+  jobId: string,
+  payload: {
+    name?: string;
+    cron?: string;
+    mode?: OrchestrationJobMode;
+    goal_template?: string;
+    enabled?: boolean;
+    significance_policy?: SignificancePolicy;
+  }
+): Promise<OrchestrationJob> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Update orchestration job failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function setOrchestrationJobEnabled(
+  agentId: string,
+  jobId: string,
+  enabled: boolean
+): Promise<OrchestrationJob> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/enable`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Enable orchestration job failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteOrchestrationJob(
+  agentId: string,
+  jobId: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/delete`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Delete orchestration job failed: ${res.status}`);
+  }
+}
+
+export async function runOrchestrationJobNow(
+  agentId: string,
+  jobId: string
+): Promise<JobRunNowResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/run`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Run orchestration job failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchOrchestrationLogs(
+  agentId: string,
+  limit = 25
+): Promise<{ logs: OrchestrationJobLogEntry[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/logs?limit=${encodeURIComponent(String(limit))}`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch orchestration logs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ---- Agentic Loop API ----
 
 export interface AgenticRunRequest {
   goal: string;
   max_turns?: number;
   auto_approve_safe_tools?: boolean;
+  router_mode?: 'auto' | 'think_hard' | 'think_harder';
 }
 
 export interface AgenticRunStartResponse {
@@ -715,10 +917,24 @@ export async function verifyAgent(
 
 // ---- Agent Export API ----
 
-export async function exportAgent(agentId: string, agentName?: string): Promise<void> {
+export async function exportAgent(
+  agentId: string,
+  privateKeyBase64: string,
+  agentName?: string
+): Promise<void> {
+  const trimmedKey = privateKeyBase64.trim();
+  if (!trimmedKey) {
+    throw new Error('Private key is required for export');
+  }
+
   const base = getBaseUrl();
   const res = await fetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/export`
+    `${base}/api/agents/${encodeURIComponent(agentId)}/export`,
+    {
+      headers: {
+        'x-orion-private-key': trimmedKey,
+      },
+    }
   );
   if (!res.ok) {
     const err = await res.text();

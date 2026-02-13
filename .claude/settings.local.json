@@ -15,7 +15,13 @@
       "Bash(git -C E:Agentsabigail ls-files)",
       "Bash(npm install:*)",
       "Bash(git push:*)",
-      "Bash(gh run list:*)"
+      "Bash(gh run list:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(gh pr close:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(git fetch:*)"
     ]
   }
 }

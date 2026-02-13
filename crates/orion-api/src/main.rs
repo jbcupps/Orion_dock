@@ -1,4 +1,5 @@
 mod agentic;
+mod orchestration;
 
 use axum::{
     extract::{Path, Query, State},
@@ -39,6 +40,14 @@ use agentic::{
     AgenticTask, AgenticTaskStatus, CancelRequest, ConfirmationResponseRequest,
     MentorResponseRequest,
 };
+use orchestration::{
+    assess_significance, append_log_entry, build_id_check_prompt, create_job, decide_action,
+    delete_job, is_job_due, list_jobs, load_logs, make_mentor_attention_message, save_jobs,
+    set_job_enabled, update_job, update_job_after_execution, CreateOrchestrationJobRequest,
+    JobLogsQuery, JobRunNowResponse, OrchestrationDecision, OrchestrationJob,
+    OrchestrationJobLogEntry, OrchestrationJobsResponse, OrchestrationLogsResponse,
+    SetOrchestrationJobEnabledRequest, SignificanceLevel, UpdateOrchestrationJobRequest,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -56,6 +65,8 @@ struct AppState {
     skill_executor: Arc<SkillExecutor>,
     /// Active agentic tasks keyed by task_id.
     agentic_tasks: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<AgenticTask>>>>>,
+    /// Scheduler interval for orchestration periodic jobs.
+    orchestration_tick_seconds: u64,
 }
 
 fn data_root() -> Option<PathBuf> {
@@ -159,6 +170,9 @@ struct StatusResponse {
     memory_backend: String,
     local_llm_configured: bool,
     birth_model: Option<String>,
+    /// When local LLM is configured and birth_model is set: true if model is available on Ollama, false otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    birth_model_ready: Option<bool>,
     birth_complete: bool,
     birth_stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,6 +354,7 @@ struct AgentExport {
     exported_at: String,
     agent: serde_json::Value,
     identity: serde_json::Value,
+    keychain: serde_json::Value,
     constitution: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     genesis_path: Option<serde_json::Value>,
@@ -355,12 +370,51 @@ async fn ready(State(_state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Check if the birth model is available on the local LLM (Ollama /api/tags).
+async fn check_birth_model_ready(base_url: &str, birth_model: &str) -> bool {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let res = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    if !res.status().is_success() {
+        return false;
+    }
+    let body: serde_json::Value = match res.json().await {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let models = match body.get("models").and_then(|m| m.as_array()) {
+        Some(m) => m,
+        None => return false,
+    };
+    for m in models {
+        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name == birth_model || name.starts_with(&format!("{}:", birth_model)) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
     let (birth_complete, birth_stage, agent_name) = read_birth_status();
+    let birth_model_ready = match (&state.local_llm_base_url, &state.birth_model) {
+        (Some(base), Some(model)) => Some(check_birth_model_ready(base, model).await),
+        _ => None,
+    };
     Json(StatusResponse {
         memory_backend: state.memory_backend.as_str().to_string(),
         local_llm_configured: state.local_llm_base_url.is_some(),
         birth_model: state.birth_model.clone(),
+        birth_model_ready,
         birth_complete,
         birth_stage,
         agent_name,
@@ -1871,6 +1925,8 @@ async fn api_birth_complete_emergence(
 #[derive(Deserialize)]
 struct OperationalChatRequest {
     message: String,
+    #[serde(default)]
+    router_mode: Option<agentic::AgenticRouterMode>,
 }
 
 #[derive(Serialize)]
@@ -1880,12 +1936,30 @@ struct OperationalChatResponseBody {
     tool_executed: Option<OperationalToolResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stored_providers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_log: Option<Vec<OperationalToolLogEntry>>,
 }
 
 #[derive(Serialize)]
 struct OperationalToolResult {
     name: String,
     provider: String,
+}
+
+#[derive(Serialize)]
+struct OperationalToolLogEntry {
+    tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_name: Option<String>,
+    success: bool,
+    output: String,
+}
+
+fn strip_tool_result_block(content: &str) -> String {
+    content
+        .split_once("\n\n[Tool Result]\n")
+        .map(|(clean, _)| clean.to_string())
+        .unwrap_or_else(|| content.to_string())
 }
 
 /// GET /api/agents/:id/chat/history — return persisted operational chat messages.
@@ -1909,7 +1983,16 @@ async fn api_operational_chat_history(
         )
     })?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
-    Ok(Json(serde_json::json!({ "messages": messages })))
+    let display_messages: Vec<BirthChatMessage> = messages
+        .into_iter()
+        .map(|mut m| {
+            if m.role == "assistant" {
+                m.content = strip_tool_result_block(&m.content);
+            }
+            m
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "messages": display_messages })))
 }
 
 /// Build SkillToolEntry list from the skill registry for system prompt injection.
@@ -2071,11 +2154,16 @@ async fn api_operational_chat(
         (found_name, found_key)
     };
 
+    // Orchestration policy: mentor-facing chat is Ego-primary.
+    // Router still preserves built-in Id fallback when Ego is unavailable or fails.
+    let effective_routing_mode = orion_core::RoutingMode::EgoPrimary;
+
     tracing::info!(
         agent = %id,
         local_llm = ?config.local_llm_base_url,
         ego_provider = ?ego_name,
-        routing_mode = ?config.routing_mode,
+        routing_mode = ?effective_routing_mode,
+        requested_router_mode = ?body.router_mode,
         message_count = messages.len(),
         "operational_chat: building router"
     );
@@ -2084,7 +2172,7 @@ async fn api_operational_chat(
         config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
-        config.routing_mode,
+        effective_routing_mode,
     )
     .await;
 
@@ -2114,6 +2202,7 @@ async fn api_operational_chat(
     // Supports multiple tool calls per turn for autonomous multi-step actions.
     let mut skill_tool_results: Vec<OperationalToolResult> = Vec::new();
     let mut skill_tool_outputs: Vec<String> = Vec::new();
+    let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
     for tr in &tool_requests {
         if tr.name == "store_secret" || tr.name == "store_provider_key" {
             continue; // handled in the blocking section below
@@ -2146,12 +2235,35 @@ async fn api_operational_chat(
                     );
                     skill_tool_results.push(OperationalToolResult {
                         name: tr.name.clone(),
-                        provider: skill_name,
+                        provider: skill_name.clone(),
                     });
                     if let Some(data) = &output.data {
-                        let formatted =
+                        let formatted_raw =
                             serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                        let formatted = redact_api_keys(&formatted_raw);
                         skill_tool_outputs.push(format!("[{}] {}", tr.name, formatted));
+                        skill_tool_log.push(OperationalToolLogEntry {
+                            tool_name: tr.name.clone(),
+                            skill_name: Some(skill_name.clone()),
+                            success: true,
+                            output: formatted,
+                        });
+                    } else if let Some(err) = &output.error {
+                        let err_text = redact_api_keys(&format!("Error: {}", err));
+                        skill_tool_outputs.push(format!("[{}] {}", tr.name, err_text));
+                        skill_tool_log.push(OperationalToolLogEntry {
+                            tool_name: tr.name.clone(),
+                            skill_name: Some(skill_name.clone()),
+                            success: false,
+                            output: err_text,
+                        });
+                    } else {
+                        skill_tool_log.push(OperationalToolLogEntry {
+                            tool_name: tr.name.clone(),
+                            skill_name: Some(skill_name.clone()),
+                            success: true,
+                            output: "OK".to_string(),
+                        });
                     }
                 }
                 Err(e) => {
@@ -2161,7 +2273,14 @@ async fn api_operational_chat(
                         error = %e,
                         "operational_chat: skill tool execution failed"
                     );
-                    skill_tool_outputs.push(format!("[{}] Error: {}", tr.name, e));
+                    let err_text = redact_api_keys(&format!("Error: {}", e));
+                    skill_tool_outputs.push(format!("[{}] {}", tr.name, err_text));
+                    skill_tool_log.push(OperationalToolLogEntry {
+                        tool_name: tr.name.clone(),
+                        skill_name: Some(skill_name.clone()),
+                        success: false,
+                        output: err_text,
+                    });
                 }
             }
         }
@@ -2288,13 +2407,9 @@ async fn api_operational_chat(
     })?
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Redact any credentials in the clean content sent back to the frontend
-    let mut redacted_response = redact_api_keys(&clean_content_clone);
-
-    // Append skill tool output to the response if present
-    if let Some(ref output) = skill_tool_output_text {
-        redacted_response.push_str(&format!("\n\n[Tool Result]\n{}", output));
-    }
+    // Redact any credentials in the clean content sent back to the frontend.
+    // Keep tool output out of chat bubbles and expose it via structured tool_log.
+    let redacted_response = redact_api_keys(&clean_content_clone);
 
     // Prefer skill tool result over credential tool result
     let final_tool_result = skill_tool_result.or(tool_result);
@@ -2306,6 +2421,11 @@ async fn api_operational_chat(
             None
         } else {
             Some(final_providers)
+        },
+        tool_log: if skill_tool_log.is_empty() {
+            None
+        } else {
+            Some(skill_tool_log)
         },
     }))
 }
@@ -2580,6 +2700,7 @@ async fn api_agent_verify(
 
 /// GET /api/agents/:id/export — export portable agent identity bundle as JSON download.
 async fn api_export_agent(
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<
     (
@@ -2625,6 +2746,18 @@ async fn api_export_agent(
         ));
     }
 
+    let private_key_base64 = headers
+        .get("x-orion-private-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    if private_key_base64.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "x-orion-private-key header is required to unlock keychain export".to_string(),
+        ));
+    }
+
     // Build sanitized agent metadata (exclude secrets, local_llm_base_url, API keys)
     let agent_meta = serde_json::json!({
         "id": id,
@@ -2635,19 +2768,64 @@ async fn api_export_agent(
         "routing_mode": config_val.get("routing_mode"),
     });
 
-    // ---- Identity (public key) ----
+    // ---- Identity (public key) + private key gate for keychain unlock ----
     let pubkey_path = dir.join("external_pubkey.bin");
-    let identity = if pubkey_path.exists() {
-        let bytes = std::fs::read(&pubkey_path).map_err(|e| {
+    let pubkey_bytes = std::fs::read(&pubkey_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Cannot export agent — external public key is missing".to_string(),
+            )
+        } else {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to read public key: {}", e),
             )
-        })?;
-        serde_json::json!({ "pubkey_base64": BASE64.encode(&bytes) })
-    } else {
-        serde_json::json!({ "pubkey_base64": null })
-    };
+        }
+    })?;
+    if pubkey_bytes.len() != 32 {
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Invalid external public key length".to_string(),
+        ));
+    }
+
+    let private_signing_key = orion_core::parse_private_key(private_key_base64).map_err(|e| {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            format!("Invalid private key: {}", e),
+        )
+    })?;
+    let derived_pubkey = private_signing_key.verifying_key().to_bytes();
+    if derived_pubkey.as_slice() != pubkey_bytes.as_slice() {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Private key does not match this agent identity".to_string(),
+        ));
+    }
+
+    let identity = serde_json::json!({ "pubkey_base64": BASE64.encode(&pubkey_bytes) });
+
+    // ---- Keychain (requires private key unlock) ----
+    let vault = SecretsVault::load(dir.clone()).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load secrets vault: {}", e),
+        )
+    })?;
+    let mut provider_secrets = serde_json::Map::new();
+    for provider in vault.list_providers() {
+        if let Some(secret) = vault.get_secret(provider) {
+            provider_secrets.insert(
+                provider.to_string(),
+                serde_json::Value::String(secret.to_string()),
+            );
+        }
+    }
+    let keychain = serde_json::json!({
+        "unlocked_with_private_key": true,
+        "provider_secrets": provider_secrets,
+    });
 
     // ---- Constitutional documents + signatures ----
     let docs_dir = dir.join("docs");
@@ -2745,10 +2923,11 @@ async fn api_export_agent(
     let filename = format!("orion-agent-{}-{}.json", safe_name, date_str);
 
     let export = AgentExport {
-        export_version: 1,
+        export_version: 2,
         exported_at: now,
         agent: agent_meta,
         identity,
+        keychain,
         constitution: serde_json::Value::Object(constitution),
         genesis_path,
         chat_history,
@@ -3017,6 +3196,363 @@ fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
     Arc::new(registry)
 }
 
+async fn has_active_agentic_task(state: &AppState, agent_id: &str) -> bool {
+    let tasks = state.agentic_tasks.lock().await;
+    for task_arc in tasks.values() {
+        let task = task_arc.lock().await;
+        if task.agent_id == agent_id
+            && matches!(
+                task.status,
+                AgenticTaskStatus::Running
+                    | AgenticTaskStatus::WaitingForMentor
+                    | AgenticTaskStatus::WaitingForConfirmation
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
+async fn launch_agentic_task_internal(
+    state: &AppState,
+    agent_id: &str,
+    body: AgenticRunRequest,
+    run_source: String,
+) -> Result<AgenticRunResponse, String> {
+    let dir = agent_dir(agent_id).ok_or_else(|| "Agent not found".to_string())?;
+    let config_path = agent_config_path(agent_id).ok_or_else(|| "Agent not found".to_string())?;
+    let config = AppConfig::load(&config_path).map_err(|e| format!("Load config: {}", e))?;
+    if !config.birth_complete {
+        return Err("Agent birth must be complete before agentic mode".to_string());
+    }
+
+    let goal = body.goal.trim().to_string();
+    if goal.is_empty() {
+        return Err("goal is required".to_string());
+    }
+
+    let max_turns = body.max_turns.clamp(1, 50);
+
+    if has_active_agentic_task(state, agent_id).await {
+        return Err("Agent already has a running agentic task".to_string());
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let (event_tx, _) = tokio::sync::broadcast::channel::<AgenticEvent>(256);
+    let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let started_at = chrono::Utc::now();
+
+    let task = AgenticTask {
+        id: task_id.clone(),
+        agent_id: agent_id.to_string(),
+        goal: goal.clone(),
+        status: AgenticTaskStatus::Running,
+        event_tx: event_tx.clone(),
+        mentor_response_tx: None,
+        confirmation_tx: None,
+        steps: Vec::new(),
+        turn: 0,
+        cancel_tx,
+        started_at,
+    };
+
+    let task_arc = Arc::new(TokioMutex::new(task));
+    {
+        let mut tasks = state.agentic_tasks.lock().await;
+        tasks.insert(task_id.clone(), Arc::clone(&task_arc));
+    }
+
+    let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
+    let stored_providers: Vec<String> = {
+        let vault = SecretsVault::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        vault
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    };
+
+    let loop_config = AgenticLoopConfig {
+        task_id: task_id.clone(),
+        goal,
+        max_turns,
+        auto_approve_safe_tools: body.auto_approve_safe_tools,
+        router_mode: body.router_mode,
+        agent_dir: dir,
+        config,
+        skill_registry: Arc::clone(&state.skill_registry),
+        skill_executor: Arc::clone(&state.skill_executor),
+        skill_tool_entries,
+        stored_providers,
+        event_tx,
+        cancel_rx,
+        task_handle: task_arc,
+        started_at,
+        run_source,
+    };
+
+    tokio::spawn(agentic::run_agentic_loop(loop_config));
+    let stream_url = format!("/api/agents/{}/agent/stream?task={}", agent_id, task_id);
+    Ok(AgenticRunResponse {
+        task_id,
+        stream_url,
+    })
+}
+
+fn append_operational_notice(agent_dir: &std::path::Path, content: &str) -> Result<(), String> {
+    let chat_path = agent_dir.join("operational_chat.json");
+    let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
+        let existing = std::fs::read_to_string(&chat_path).map_err(|e| format!("Read: {}", e))?;
+        serde_json::from_str(&existing).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    updated.push(BirthChatMessage {
+        role: "assistant".to_string(),
+        content: content.to_string(),
+    });
+    std::fs::write(&chat_path, serde_json::to_string_pretty(&updated).unwrap())
+        .map_err(|e| format!("Write operational_chat: {}", e))
+}
+
+async fn run_id_check_for_job(config: &AppConfig, job: &OrchestrationJob) -> Result<String, String> {
+    let router = orion_router::IdEgoRouter::with_provider_auto_detect(
+        config.local_llm_base_url.clone(),
+        None,
+        None,
+        RoutingMode::IdPrimary,
+    )
+    .await;
+    let prompt = build_id_check_prompt(job);
+    let response = router
+        .id_only(vec![orion_capabilities::cognitive::Message::new(
+            "user", &prompt,
+        )])
+        .await
+        .map_err(|e| format!("Id check failed: {}", e))?;
+    Ok(redact_api_keys(&response.content))
+}
+
+async fn run_orchestration_job_once(
+    state: &AppState,
+    agent_id: &str,
+    agent_dir: &std::path::Path,
+    job: &mut OrchestrationJob,
+    trigger: &str,
+) -> Result<JobRunNowResponse, String> {
+    let started_at = chrono::Utc::now();
+    let config_path = agent_config_path(agent_id).ok_or_else(|| "Agent not found".to_string())?;
+    let config = AppConfig::load(&config_path).map_err(|e| format!("Load config: {}", e))?;
+
+    let mut summary = String::new();
+    let mut significance = SignificanceLevel::Low;
+    let mut decision = OrchestrationDecision::SilentLog;
+    let mut status = "ok".to_string();
+    let mut task_id: Option<String> = None;
+
+    match job.mode {
+        orchestration::OrchestrationJobMode::AgenticRun => {
+            significance = SignificanceLevel::Medium;
+            decision = OrchestrationDecision::SpawnAgentic;
+            if has_active_agentic_task(state, agent_id).await {
+                status = "skipped_active_task".to_string();
+                summary = "Agent already has a running task; skipped scheduled run.".to_string();
+            } else {
+                match launch_agentic_task_internal(
+                    state,
+                    agent_id,
+                    AgenticRunRequest {
+                        goal: job.goal_template.clone(),
+                        max_turns: 12,
+                        auto_approve_safe_tools: false,
+                        router_mode: agentic::AgenticRouterMode::Auto,
+                    },
+                    format!("scheduled:{}", job.job_id),
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        task_id = Some(resp.task_id.clone());
+                        summary = format!(
+                            "Scheduled job launched agentic task from trigger '{}' ({})",
+                            trigger, resp.task_id
+                        );
+                    }
+                    Err(e) => {
+                        status = "error".to_string();
+                        summary = e;
+                    }
+                }
+            }
+        }
+        orchestration::OrchestrationJobMode::IdCheck => {
+            let id_output = match run_id_check_for_job(&config, job).await {
+                Ok(output) => output,
+                Err(e) => {
+                    status = "error".to_string();
+                    summary = e;
+                    String::new()
+                }
+            };
+            if status == "ok" {
+                summary = id_output.clone();
+                significance = assess_significance(&id_output, &job.significance_policy);
+                decision = decide_action(job.mode, significance, &job.significance_policy);
+                match decision {
+                    OrchestrationDecision::SilentLog => {}
+                    OrchestrationDecision::SpawnAgentic => {
+                        if has_active_agentic_task(state, agent_id).await {
+                            status = "skipped_active_task".to_string();
+                        } else {
+                            match launch_agentic_task_internal(
+                                state,
+                                agent_id,
+                                AgenticRunRequest {
+                                    goal: format!(
+                                        "Investigate scheduled finding from '{}':\n\n{}",
+                                        job.name, id_output
+                                    ),
+                                    max_turns: 10,
+                                    auto_approve_safe_tools: false,
+                                    router_mode: agentic::AgenticRouterMode::Auto,
+                                },
+                                format!("scheduled:{}", job.job_id),
+                            )
+                            .await
+                            {
+                                Ok(resp) => task_id = Some(resp.task_id),
+                                Err(e) => {
+                                    status = "error".to_string();
+                                    summary = format!(
+                                        "{}\n\nEscalation launch failed: {}",
+                                        summary, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    OrchestrationDecision::FlagMentor => {
+                        let attention = make_mentor_attention_message(job, significance, &id_output);
+                        let _ = append_operational_notice(agent_dir, &attention);
+                    }
+                }
+            }
+        }
+    }
+
+    let finished_at = chrono::Utc::now();
+    update_job_after_execution(job, finished_at, significance, status.clone());
+    let log_entry = OrchestrationJobLogEntry {
+        entry_id: Uuid::new_v4().to_string(),
+        job_id: job.job_id.clone(),
+        job_name: job.name.clone(),
+        mode: job.mode,
+        started_at,
+        completed_at: finished_at,
+        significance,
+        decision,
+        status: status.clone(),
+        summary: summary.clone(),
+        task_id: task_id.clone(),
+    };
+    append_log_entry(agent_dir, log_entry, 200)?;
+
+    Ok(JobRunNowResponse {
+        job_id: job.job_id.clone(),
+        status,
+        decision,
+        significance,
+        task_id,
+        summary,
+    })
+}
+
+async fn run_orchestration_scheduler_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        state.orchestration_tick_seconds,
+    ));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let Some(root) = data_root() else {
+            continue;
+        };
+        let identities_dir = root.join("identities");
+        let Ok(entries) = std::fs::read_dir(&identities_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let agent_dir = entry.path();
+            if !agent_dir.is_dir() {
+                continue;
+            }
+            let agent_id = entry.file_name().to_string_lossy().to_string();
+            let mut jobs = match list_jobs(&agent_dir) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(agent = %agent_id, error = %e, "scheduler: failed to load jobs");
+                    continue;
+                }
+            };
+            if jobs.is_empty() {
+                continue;
+            }
+            let now = chrono::Utc::now();
+            let mut changed = false;
+            for job in jobs.iter_mut().filter(|j| j.enabled) {
+                let due = match is_job_due(job, now) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %agent_id,
+                            job = %job.job_id,
+                            error = %e,
+                            "scheduler: invalid cron expression"
+                        );
+                        continue;
+                    }
+                };
+                if !due {
+                    continue;
+                }
+                match run_orchestration_job_once(&state, &agent_id, &agent_dir, job, "scheduled").await {
+                    Ok(resp) => {
+                        tracing::info!(
+                            agent = %agent_id,
+                            job = %job.job_id,
+                            decision = ?resp.decision,
+                            significance = ?resp.significance,
+                            status = %resp.status,
+                            "scheduler: job executed"
+                        );
+                        changed = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %agent_id,
+                            job = %job.job_id,
+                            error = %e,
+                            "scheduler: job execution failed"
+                        );
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                if let Err(e) = save_jobs(&agent_dir, &jobs) {
+                    tracing::warn!(
+                        agent = %agent_id,
+                        error = %e,
+                        "scheduler: failed to persist jobs"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Agentic Loop Endpoints
 // ============================================================================
@@ -3034,6 +3570,8 @@ struct AgenticRunInfo {
     status: String,
     turns: u32,
     tool_calls: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
     started_at: String,
@@ -3075,6 +3613,7 @@ async fn api_list_agentic_runs(
                     status: status_str.to_string(),
                     turns: task.turn,
                     tool_calls: 0,
+                    source: None,
                     summary: None,
                     started_at: task.started_at.to_rfc3339(),
                     completed_at: None,
@@ -3118,6 +3657,7 @@ async fn api_list_agentic_runs(
                             turns: v.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                             tool_calls: v.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
                                 as u32,
+                            source: v.get("source").and_then(|v| v.as_str()).map(String::from),
                             summary: v.get("summary").and_then(|v| v.as_str()).map(String::from),
                             started_at: v
                                 .get("started_at")
@@ -3147,128 +3687,23 @@ async fn api_agentic_run(
     Path(id): Path<String>,
     Json(body): Json<AgenticRunRequest>,
 ) -> Result<Json<AgenticRunResponse>, (axum::http::StatusCode, String)> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "Agent not found".to_string(),
-        )
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "Agent not found".to_string(),
-        )
-    })?;
-    let config = AppConfig::load(&config_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Load config: {}", e),
-        )
-    })?;
-    if !config.birth_complete {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Agent birth must be complete before agentic mode".to_string(),
-        ));
-    }
+    let response = launch_agentic_task_internal(&state, &id, body, "manual".to_string())
+        .await
+        .map_err(|e| {
+            let status = if e.contains("not found") || e.contains("Agent not found") {
+                axum::http::StatusCode::NOT_FOUND
+            } else if e.contains("running agentic task") {
+                axum::http::StatusCode::CONFLICT
+            } else if e.contains("goal is required") || e.contains("birth must be complete") {
+                axum::http::StatusCode::BAD_REQUEST
+            } else {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, e)
+        })?;
 
-    let goal = body.goal.trim().to_string();
-    if goal.is_empty() {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "goal is required".to_string(),
-        ));
-    }
-
-    let max_turns = body.max_turns.clamp(1, 50);
-
-    // Check for existing running task for this agent
-    {
-        let tasks = state.agentic_tasks.lock().await;
-        for task_arc in tasks.values() {
-            let task = task_arc.lock().await;
-            if task.agent_id == id
-                && matches!(
-                    task.status,
-                    AgenticTaskStatus::Running
-                        | AgenticTaskStatus::WaitingForMentor
-                        | AgenticTaskStatus::WaitingForConfirmation
-                )
-            {
-                return Err((
-                    axum::http::StatusCode::CONFLICT,
-                    format!("Agent already has a running agentic task: {}", task.id),
-                ));
-            }
-        }
-    }
-
-    let task_id = Uuid::new_v4().to_string();
-    let (event_tx, _) = tokio::sync::broadcast::channel::<AgenticEvent>(256);
-    let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let started_at = chrono::Utc::now();
-
-    let task = AgenticTask {
-        id: task_id.clone(),
-        agent_id: id.clone(),
-        goal: goal.clone(),
-        status: AgenticTaskStatus::Running,
-        event_tx: event_tx.clone(),
-        mentor_response_tx: None,
-        confirmation_tx: None,
-        steps: Vec::new(),
-        turn: 0,
-        cancel_tx,
-        started_at,
-    };
-
-    let task_arc = Arc::new(TokioMutex::new(task));
-
-    {
-        let mut tasks = state.agentic_tasks.lock().await;
-        tasks.insert(task_id.clone(), Arc::clone(&task_arc));
-    }
-
-    let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
-
-    // Load vault provider names for system prompt awareness
-    let stored_providers: Vec<String> = {
-        let vault = SecretsVault::load(config.data_dir.clone())
-            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault
-            .list_providers()
-            .into_iter()
-            .map(String::from)
-            .collect()
-    };
-
-    let loop_config = AgenticLoopConfig {
-        task_id: task_id.clone(),
-        goal,
-        max_turns,
-        auto_approve_safe_tools: body.auto_approve_safe_tools,
-        agent_dir: dir,
-        config,
-        skill_registry: Arc::clone(&state.skill_registry),
-        skill_executor: Arc::clone(&state.skill_executor),
-        skill_tool_entries,
-        stored_providers,
-        event_tx,
-        cancel_rx,
-        task_handle: task_arc,
-        started_at,
-    };
-
-    tokio::spawn(agentic::run_agentic_loop(loop_config));
-
-    let stream_url = format!("/api/agents/{}/agent/stream?task={}", id, task_id);
-
-    tracing::info!(agent = %id, task = %task_id, "Started agentic task");
-
-    Ok(Json(AgenticRunResponse {
-        task_id,
-        stream_url,
-    }))
+    tracing::info!(agent = %id, task = %response.task_id, "Started agentic task");
+    Ok(Json(response))
 }
 
 /// GET /api/agents/:id/agent/stream?task=<id> — SSE event stream for an agentic task.
@@ -3469,6 +3904,160 @@ async fn api_agentic_status(
     }))
 }
 
+// ============================================================================
+// Orchestration Jobs Endpoints
+// ============================================================================
+
+/// GET /api/agents/:id/orchestration/jobs — list scheduled orchestration jobs.
+async fn api_orchestration_jobs(
+    Path(id): Path<String>,
+) -> Result<Json<OrchestrationJobsResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    jobs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(OrchestrationJobsResponse { jobs }))
+}
+
+/// POST /api/agents/:id/orchestration/jobs — create a scheduled orchestration job.
+async fn api_orchestration_job_create(
+    Path(id): Path<String>,
+    Json(body): Json<CreateOrchestrationJobRequest>,
+) -> Result<Json<OrchestrationJob>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let job = create_job(&mut jobs, body, chrono::Utc::now())
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(job))
+}
+
+/// POST /api/agents/:id/orchestration/jobs/:job_id — update an orchestration job.
+async fn api_orchestration_job_update(
+    Path((id, job_id)): Path<(String, String)>,
+    Json(body): Json<UpdateOrchestrationJobRequest>,
+) -> Result<Json<OrchestrationJob>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let updated = update_job(&mut jobs, &job_id, body, chrono::Utc::now()).map_err(|e| {
+        let status = if e.contains("not found") {
+            axum::http::StatusCode::NOT_FOUND
+        } else {
+            axum::http::StatusCode::BAD_REQUEST
+        };
+        (status, e)
+    })?;
+    save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(updated))
+}
+
+/// POST /api/agents/:id/orchestration/jobs/:job_id/enable — enable/disable a job.
+async fn api_orchestration_job_enable(
+    Path((id, job_id)): Path<(String, String)>,
+    Json(body): Json<SetOrchestrationJobEnabledRequest>,
+) -> Result<Json<OrchestrationJob>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let updated = set_job_enabled(&mut jobs, &job_id, body.enabled, chrono::Utc::now()).map_err(
+        |e| {
+            let status = if e.contains("not found") {
+                axum::http::StatusCode::NOT_FOUND
+            } else {
+                axum::http::StatusCode::BAD_REQUEST
+            };
+            (status, e)
+        },
+    )?;
+    save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(updated))
+}
+
+/// POST /api/agents/:id/orchestration/jobs/:job_id/delete — delete an orchestration job.
+async fn api_orchestration_job_delete(
+    Path((id, job_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !delete_job(&mut jobs, &job_id) {
+        return Err((axum::http::StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
+    save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/agents/:id/orchestration/jobs/:job_id/run — run one job immediately.
+async fn api_orchestration_job_run_now(
+    State(state): State<AppState>,
+    Path((id, job_id)): Path<(String, String)>,
+) -> Result<Json<JobRunNowResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let mut jobs =
+        list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let idx = jobs
+        .iter()
+        .position(|j| j.job_id == job_id)
+        .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    let mut job = jobs.remove(idx);
+    let run_result = run_orchestration_job_once(&state, &id, &dir, &mut job, "manual")
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    jobs.insert(idx, job);
+    save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(run_result))
+}
+
+/// GET /api/agents/:id/orchestration/logs — fetch recent orchestration logs.
+async fn api_orchestration_logs(
+    Path(id): Path<String>,
+    Query(query): Query<JobLogsQuery>,
+) -> Result<Json<OrchestrationLogsResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let limit = query.limit.or(Some(50));
+    let logs =
+        load_logs(&dir, limit).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(OrchestrationLogsResponse { logs }))
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
@@ -3530,7 +4119,11 @@ async fn main() -> std::io::Result<()> {
         skill_registry,
         skill_executor,
         agentic_tasks: Arc::new(TokioMutex::new(HashMap::new())),
+        orchestration_tick_seconds: 30,
     };
+
+    // Start orchestration scheduler for periodic jobs (UTC cron semantics).
+    tokio::spawn(run_orchestration_scheduler_loop(state.clone()));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -3611,6 +4204,30 @@ async fn main() -> std::io::Result<()> {
         .route("/api/agents/:id/agent/confirm", post(api_agentic_confirm))
         .route("/api/agents/:id/agent/cancel", post(api_agentic_cancel))
         .route("/api/agents/:id/agent/status", get(api_agentic_status))
+        .route(
+            "/api/agents/:id/orchestration/jobs",
+            get(api_orchestration_jobs).post(api_orchestration_job_create),
+        )
+        .route(
+            "/api/agents/:id/orchestration/jobs/:job_id",
+            post(api_orchestration_job_update),
+        )
+        .route(
+            "/api/agents/:id/orchestration/jobs/:job_id/enable",
+            post(api_orchestration_job_enable),
+        )
+        .route(
+            "/api/agents/:id/orchestration/jobs/:job_id/delete",
+            post(api_orchestration_job_delete),
+        )
+        .route(
+            "/api/agents/:id/orchestration/jobs/:job_id/run",
+            post(api_orchestration_job_run_now),
+        )
+        .route(
+            "/api/agents/:id/orchestration/logs",
+            get(api_orchestration_logs),
+        )
         .route("/api/agents/:id/identity", get(api_agent_identity))
         .route("/api/agents/:id/constitution", get(api_agent_constitution))
         .route("/api/agents/:id/verify", post(api_agent_verify))

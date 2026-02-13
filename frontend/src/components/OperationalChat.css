@@ -54,6 +54,72 @@
   word-break: break-word;
 }
 
+.operational-chat-activity {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  padding: 0.4rem 0.65rem;
+}
+
+.operational-chat-activity > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--muted, #666);
+  user-select: none;
+}
+
+.operational-chat-activity-empty {
+  margin: 0.6rem 0 0.2rem;
+  color: var(--muted, #666);
+  font-size: 0.85rem;
+}
+
+.operational-chat-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.operational-chat-activity-item {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  background: var(--card-bg, #f8f8f8);
+}
+
+.operational-chat-activity-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.operational-chat-activity-skill {
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted, #666);
+}
+
+.status-ok {
+  color: var(--ok, #2f8f46);
+}
+
+.status-error {
+  color: var(--error, #b23a3a);
+}
+
+.operational-chat-activity-output {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
 .operational-chat-form {
   display: flex;
   gap: 0.5rem;
