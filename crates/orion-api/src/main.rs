@@ -2733,7 +2733,13 @@ async fn api_export_agent(
     let now = chrono::Utc::now().to_rfc3339();
     let safe_name = agent_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     let date_str = chrono::Utc::now().format("%Y%m%d").to_string();
     let filename = format!("orion-agent-{}-{}.json", safe_name, date_str);
