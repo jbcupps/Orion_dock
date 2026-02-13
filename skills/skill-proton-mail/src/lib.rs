@@ -74,11 +74,18 @@ impl ProtonMailSkill {
                 "mail.proton.me".into(),
                 "smtp.proton.me".into(),
             ]))],
-            secrets: vec![orion_skills::SecretDescriptor {
-                name: "imap_password".to_string(),
-                description: "App password for IMAP".to_string(),
-                required: true,
-            }],
+            secrets: vec![
+                orion_skills::SecretDescriptor {
+                    name: "protonmail".to_string(),
+                    description: "App password for IMAP".to_string(),
+                    required: true,
+                },
+                orion_skills::SecretDescriptor {
+                    name: "protonmail_user".to_string(),
+                    description: "Email address for IMAP login".to_string(),
+                    required: true,
+                },
+            ],
             config_defaults: HashMap::new(),
         }
     }
@@ -188,6 +195,7 @@ impl ProtonMailSkill {
         }
     }
 
+    #[allow(dead_code)]
     fn tool_send_email() -> ToolDescriptor {
         ToolDescriptor {
             name: "send_email".to_string(),
@@ -211,6 +219,7 @@ impl ProtonMailSkill {
         }
     }
 
+    #[allow(dead_code)]
     fn tool_classify_importance() -> ToolDescriptor {
         ToolDescriptor {
             name: "classify_importance".to_string(),
@@ -227,6 +236,7 @@ impl ProtonMailSkill {
         }
     }
 
+    #[allow(dead_code)]
     fn tool_create_filter() -> ToolDescriptor {
         ToolDescriptor {
             name: "create_filter".to_string(),
@@ -315,12 +325,7 @@ impl Skill for ProtonMailSkill {
     }
 
     fn tools(&self) -> Vec<ToolDescriptor> {
-        vec![
-            Self::tool_fetch_emails(),
-            Self::tool_send_email(),
-            Self::tool_classify_importance(),
-            Self::tool_create_filter(),
-        ]
+        vec![Self::tool_fetch_emails()]
     }
 
     async fn execute_tool(

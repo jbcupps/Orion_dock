@@ -708,6 +708,37 @@ body {
   font-weight: 600;
 }
 
+/* Dashboard tab bar */
+.dashboard-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+
+.dashboard-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.dashboard-tab:hover:not(.dashboard-tab-active) {
+  color: var(--text);
+}
+
+.dashboard-tab-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
 .status-panel {
   opacity: 0.85;
 }

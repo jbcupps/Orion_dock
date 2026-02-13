@@ -16,7 +16,7 @@ pub async fn fetch_page_html(url: &str) -> Result<String, String> {
         .build()
         .map_err(|e| format!("Browser config: {}", e))?;
 
-    let (browser, mut handler) = Browser::launch(config).await.map_err(|e| {
+    let (mut browser, mut handler) = Browser::launch(config).await.map_err(|e| {
         format!(
             "Launch Chrome failed (is Chromium/Chrome installed?): {}",
             e
@@ -27,18 +27,17 @@ pub async fn fetch_page_html(url: &str) -> Result<String, String> {
 
     let result = async {
         let page = browser
-            .new_page(url)
+            .new_page("about:blank")
             .await
             .map_err(|e| format!("New page failed: {}", e))?;
 
-        page.set_default_navigation_timeout(Duration::from_secs(NAVIGATION_TIMEOUT_SECS))
-            .await;
+        let nav =
+            tokio::time::timeout(Duration::from_secs(NAVIGATION_TIMEOUT_SECS), page.goto(url))
+                .await
+                .map_err(|_| format!("Navigation timed out after {}s", NAVIGATION_TIMEOUT_SECS))?
+                .map_err(|e| format!("Navigation failed: {}", e))?;
 
-        page.goto(url)
-            .await
-            .map_err(|e| format!("Navigation failed: {}", e))?;
-
-        page.wait_for_navigation()
+        nav.wait_for_navigation()
             .await
             .map_err(|e| format!("Wait for load failed: {}", e))?;
 

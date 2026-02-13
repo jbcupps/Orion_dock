@@ -683,11 +683,7 @@ fn truncate_output(s: &str, max_len: usize) -> String {
             .last()
             .map(|(i, _)| i)
             .unwrap_or(0);
-        format!(
-            "{}... [truncated, {} total chars]",
-            &s[..boundary],
-            s.len()
-        )
+        format!("{}... [truncated, {} total chars]", &s[..boundary], s.len())
     }
 }
 

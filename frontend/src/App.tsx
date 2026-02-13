@@ -48,6 +48,7 @@ function App() {
   const [connectivityDone, setConnectivityDone] = useState(false);
   const [storedProviders, setStoredProviders] = useState<string[]>([]);
   const [showChat, setShowChat] = useState(false);
+  const [dashboardTab, setDashboardTab] = useState<'chat' | 'agent' | 'jobs'>('chat');
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
   const [routerMode, setRouterMode] = useState<'auto' | 'think_hard' | 'think_harder'>('auto');
   const [chatBusy, setChatBusy] = useState(false);
@@ -108,7 +109,7 @@ function App() {
       }
     };
     load();
-    const interval = setInterval(load, 5000);
+    const interval = setInterval(load, 30000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -240,6 +241,7 @@ function App() {
     setConnectivityDone(false);
     setStoredProviders([]);
     setShowChat(false);
+    setDashboardTab('chat');
   };
 
   const handleGenesisStarted = useCallback(
@@ -564,7 +566,7 @@ function App() {
               <button
                 type="button"
                 className="button-primary"
-                onClick={() => setShowChat(true)}
+                onClick={() => { setShowChat(true); setDashboardTab('chat'); }}
                 style={{ marginTop: '1rem' }}
               >
                 Talk to {status.agent_name || 'agent'}
@@ -573,110 +575,144 @@ function App() {
           </section>
         )}
         {showChat && status?.birth_complete && currentAgentId && (
-          <section className="panel operational-chat-panel">
-            <div className="chat-panel-header">
-              <h2 style={{ margin: 0 }}>
-                {chatMode === 'chat' ? `Chat with ${status.agent_name || 'agent'}` : 'Agentic Task'}
-              </h2>
-              <div className="chat-panel-controls">
-                <div className="router-mode-selector">
-                  {(['auto', 'think_hard', 'think_harder'] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      className={`router-mode-pill${routerMode === mode ? ' router-mode-pill-active' : ''}`}
-                      onClick={() => setRouterMode(mode)}
-                    >
-                      {mode === 'auto' ? 'auto' : mode === 'think_hard' ? 'think hard' : 'think harder'}
-                    </button>
-                  ))}
+          <>
+            <nav className="dashboard-tabs">
+              {(['chat', 'agent', 'jobs'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  className={`dashboard-tab${dashboardTab === tab ? ' dashboard-tab-active' : ''}`}
+                  onClick={() => setDashboardTab(tab)}
+                >
+                  {tab === 'chat' ? 'Chat' : tab === 'agent' ? 'Agent' : 'Jobs'}
+                </button>
+              ))}
+            </nav>
+            {dashboardTab === 'chat' && (
+              <section className="panel operational-chat-panel">
+                <div className="chat-panel-header">
+                  <h2 style={{ margin: 0 }}>
+                    {chatMode === 'chat' ? `Chat with ${status.agent_name || 'agent'}` : 'Agentic Task'}
+                  </h2>
+                  <div className="chat-panel-controls">
+                    <div className="router-mode-selector">
+                      {(['auto', 'think_hard', 'think_harder'] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          className={`router-mode-pill${routerMode === mode ? ' router-mode-pill-active' : ''}`}
+                          onClick={() => setRouterMode(mode)}
+                        >
+                          {mode === 'auto' ? 'auto' : mode === 'think_hard' ? 'think hard' : 'think harder'}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="chat-mode-toggle">
+                      <button
+                        className={chatMode === 'chat' ? 'button-primary' : 'button-secondary'}
+                        onClick={() => setChatMode('chat')}
+                        style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                      >
+                        Chat
+                      </button>
+                      <button
+                        className={chatMode === 'agentic' ? 'button-primary' : 'button-secondary'}
+                        onClick={() => setChatMode('agentic')}
+                        style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                      >
+                        Agentic
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <div className="chat-mode-toggle">
-                  <button
-                    className={chatMode === 'chat' ? 'button-primary' : 'button-secondary'}
-                    onClick={() => setChatMode('chat')}
-                    style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
-                  >
-                    Chat
-                  </button>
-                  <button
-                    className={chatMode === 'agentic' ? 'button-primary' : 'button-secondary'}
-                    onClick={() => setChatMode('agentic')}
-                    style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
-                  >
-                    Agentic
-                  </button>
-                </div>
-              </div>
-            </div>
-            {chatMode === 'chat' ? (
-              <OperationalChat
-                agentId={currentAgentId}
-                agentName={status.agent_name ?? undefined}
-                routerMode={routerMode}
-                onError={setError}
-                onBusyChange={setChatBusy}
-              />
+                {chatMode === 'chat' ? (
+                  <OperationalChat
+                    agentId={currentAgentId}
+                    agentName={status.agent_name ?? undefined}
+                    routerMode={routerMode}
+                    onError={setError}
+                    onBusyChange={setChatBusy}
+                  />
+                ) : (
+                  <AgenticPanel
+                    agentId={currentAgentId}
+                    agentName={status.agent_name ?? undefined}
+                    routerMode={routerMode}
+                    onRouterModeChange={setRouterMode}
+                    onError={setError}
+                    onBusyChange={setAgenticBusy}
+                  />
+                )}
+              </section>
+            )}
+            {dashboardTab === 'jobs' && (
+              <>
+                <section className="panel jobs-panel-section">
+                  <JobsTable agentId={currentAgentId} />
+                </section>
+                <section className="panel orchestration-panel-section">
+                  <OrchestrationJobsPanel agentId={currentAgentId} onError={setError} />
+                </section>
+              </>
+            )}
+            {dashboardTab === 'agent' && (
+              <section className="panel status-panel">
+                <h2>Agent Info</h2>
+                {status ? (
+                  <dl className="status">
+                    <dt>Memory backend</dt>
+                    <dd>{status.memory_backend}</dd>
+                    <dt>Local LLM</dt>
+                    <dd>{status.local_llm_configured ? 'Configured' : 'Not configured'}</dd>
+                    <dt>Birth model</dt>
+                    <dd>{status.birth_model ?? '—'}</dd>
+                    <dt>Cloud providers</dt>
+                    <dd>
+                      {storedProviders.length > 0 ? (
+                        <span className="provider-badges">
+                          {storedProviders.map((p) => (
+                            <span
+                              key={p}
+                              className={`provider-badge provider-badge-ok${cloudBusy ? ' provider-badge-active' : ''}`}
+                            >
+                              {p}
+                              {cloudBusy && (
+                                <span className="provider-dots">
+                                  <span />
+                                  <span />
+                                  <span />
+                                </span>
+                              )}
+                            </span>
+                          ))}
+                        </span>
+                      ) : (
+                        <span className="muted">None configured</span>
+                      )}
+                    </dd>
+                  </dl>
+                ) : (
+                  <p className="muted">Loading…</p>
+                )}
+              </section>
+            )}
+          </>
+        )}
+        {(!showChat || !status?.birth_complete) && (
+          <section className="panel status-panel">
+            <h2>Status</h2>
+            {status ? (
+              <dl className="status">
+                <dt>Memory backend</dt>
+                <dd>{status.memory_backend}</dd>
+                <dt>Local LLM</dt>
+                <dd>{status.local_llm_configured ? 'Configured' : 'Not configured'}</dd>
+                <dt>Birth model</dt>
+                <dd>{status.birth_model ?? '—'}</dd>
+              </dl>
             ) : (
-              <AgenticPanel
-                agentId={currentAgentId}
-                agentName={status.agent_name ?? undefined}
-                routerMode={routerMode}
-                onRouterModeChange={setRouterMode}
-                onError={setError}
-                onBusyChange={setAgenticBusy}
-              />
+              <p className="muted">Loading…</p>
             )}
           </section>
         )}
-        {status?.birth_complete && currentAgentId && (
-          <section className="panel jobs-panel-section">
-            <JobsTable agentId={currentAgentId} />
-          </section>
-        )}
-        {status?.birth_complete && currentAgentId && (
-          <section className="panel orchestration-panel-section">
-            <OrchestrationJobsPanel agentId={currentAgentId} onError={setError} />
-          </section>
-        )}
-        <section className="panel status-panel">
-          <h2>Status</h2>
-          {status ? (
-            <dl className="status">
-              <dt>Memory backend</dt>
-              <dd>{status.memory_backend}</dd>
-              <dt>Local LLM</dt>
-              <dd>{status.local_llm_configured ? 'Configured' : 'Not configured'}</dd>
-              <dt>Birth model</dt>
-              <dd>{status.birth_model ?? '—'}</dd>
-              <dt>Cloud providers</dt>
-              <dd>
-                {storedProviders.length > 0 ? (
-                  <span className="provider-badges">
-                    {storedProviders.map((p) => (
-                      <span
-                        key={p}
-                        className={`provider-badge provider-badge-ok${cloudBusy ? ' provider-badge-active' : ''}`}
-                      >
-                        {p}
-                        {cloudBusy && (
-                          <span className="provider-dots">
-                            <span />
-                            <span />
-                            <span />
-                          </span>
-                        )}
-                      </span>
-                    ))}
-                  </span>
-                ) : (
-                  <span className="muted">None configured</span>
-                )}
-              </dd>
-            </dl>
-          ) : (
-            <p className="muted">Loading…</p>
-          )}
-        </section>
       </main>
       <StatusBar
         health={health}
