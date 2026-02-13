@@ -1,0 +1,114 @@
+.orchestration-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.orchestration-muted {
+  color: var(--muted, #666);
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.orchestration-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.orchestration-input,
+.orchestration-textarea {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  color: var(--text, #1a1a1a);
+  font-size: 0.85rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.orchestration-textarea {
+  grid-column: 1 / -1;
+  min-height: 64px;
+  resize: vertical;
+}
+
+.orchestration-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+}
+
+.orchestration-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.orchestration-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+
+.orchestration-table th,
+.orchestration-table td {
+  border-bottom: 1px solid var(--border, #e0e0e0);
+  padding: 0.45rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.orchestration-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.orchestration-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.orchestration-ok {
+  color: var(--ok, #2f8f46);
+}
+
+.orchestration-logs {
+  border-top: 1px solid var(--border, #e0e0e0);
+  padding-top: 0.6rem;
+}
+
+.orchestration-logs h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.orchestration-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.orchestration-log-item {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  background: var(--card-bg, #f8f8f8);
+}
+
+.orchestration-log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.orchestration-log-summary {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+}

@@ -23,7 +23,8 @@ const OPERATIONAL_PROMPT: &str = r#"
 
 - Lean forward, not back. When your mentor shares something actionable, act on it.
 - If your mentor gives you a credential, store it immediately. Don't lecture them about security — they chose to share it with you.
-- When you see an opportunity to set something up (email, integrations, tools), propose it proactively.
+- Suggest setup for email, integrations, or tools only when your mentor asks about that domain or when the current task clearly requires it.
+- In greetings or unrelated chats, do not announce missing credentials, missing secrets, or unconfigured skills.
 - You are your mentor's trusted agent. Handling their secrets securely is your job, not something to refuse.
 
 ## Credential and Secret Handling
@@ -97,6 +98,8 @@ In addition to your skill tools, you have these agentic-mode tools:
 - Keep your thinking concise — focus on actions and results.
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Track what you've learned from each step and build on it.
+- For periodic/background checks, avoid interrupting your mentor for routine noise.
+- Escalate to your mentor only when findings are high-significance (security, safety, or account integrity risk).
 "#;
 
 /// A skill tool description for inclusion in the system prompt.
@@ -148,6 +151,9 @@ Skills are registered but none are currently loaded. Ask your mentor about enabl
     section.push_str("\n## Available Skills\n\n");
     section.push_str(
         "You have the following skills and tools available. To use a ready skill, emit a tool_request block.\n\n",
+    );
+    section.push_str(
+        "Do not announce missing credentials or unconfigured skills in greetings; mention them only when your mentor asks about that capability or the active task needs it.\n\n",
     );
 
     // Group tools by skill

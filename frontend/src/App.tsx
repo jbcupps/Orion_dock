@@ -22,6 +22,9 @@ import ConnectivityPanel from './components/ConnectivityPanel';
 import OperationalChat from './components/OperationalChat';
 import AgenticPanel from './components/AgenticPanel';
 import JobsTable from './components/JobsTable';
+import OrchestrationJobsPanel from './components/OrchestrationJobsPanel';
+import StatusBar from './components/StatusBar';
+import type { HealthState } from './components/StatusBar';
 import './App.css';
 
 type AppState = 'splash' | 'hive' | 'dashboard';
@@ -29,7 +32,7 @@ type AppState = 'splash' | 'hive' | 'dashboard';
 function App() {
   const [appState, setAppState] = useState<AppState>('splash');
   const [currentAgentId, setCurrentAgentId] = useState<string | null>(null);
-  const [health, setHealth] = useState<string>('pending');
+  const [health, setHealth] = useState<HealthState>('pending');
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [genesisPathStarted, setGenesisPathStarted] = useState<string | null>(null);
@@ -46,13 +49,17 @@ function App() {
   const [storedProviders, setStoredProviders] = useState<string[]>([]);
   const [showChat, setShowChat] = useState(false);
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
+  const [routerMode, setRouterMode] = useState<'auto' | 'think_hard' | 'think_harder'>('auto');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [agenticBusy, setAgenticBusy] = useState(false);
+  const cloudBusy = (chatBusy || agenticBusy) && storedProviders.length > 0;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const h = await fetchHealth();
-        if (!cancelled) setHealth(h.status);
+        if (!cancelled) setHealth((h.status as HealthState) || 'pending');
       } catch {
         if (!cancelled) {
           setHealth('error');
@@ -64,7 +71,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (appState !== 'dashboard') return;
+    if (appState !== 'dashboard' && appState !== 'hive') return;
     let cancelled = false;
     (async () => {
       try {
@@ -81,7 +88,7 @@ function App() {
       } catch {
         if (!cancelled) setStatus(null);
       }
-    }, 3000);
+    }, appState === 'dashboard' ? 3000 : 5000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -294,16 +301,38 @@ function App() {
   }, [currentAgentId]);
 
   if (appState === 'splash') {
-    return <SplashScreen onComplete={handleSplashComplete} />;
+    return (
+      <div className="app">
+        <main className="main">
+          <SplashScreen onComplete={handleSplashComplete} />
+        </main>
+        <StatusBar
+          health={health}
+          birthModelReady={null}
+          localLlmConfigured={false}
+          birthModelName={null}
+        />
+      </div>
+    );
   }
 
   if (appState === 'hive') {
     return (
-      <HiveScreen
-        onAgentSelected={handleAgentSelected}
-        onCreateAgent={handleCreateAgent}
-        onViewIntro={() => setAppState('splash')}
-      />
+      <div className="app">
+        <main className="main">
+          <HiveScreen
+            onAgentSelected={handleAgentSelected}
+            onCreateAgent={handleCreateAgent}
+            onViewIntro={() => setAppState('splash')}
+          />
+        </main>
+        <StatusBar
+          health={health}
+          birthModelReady={status?.birth_model_ready ?? null}
+          localLlmConfigured={status?.local_llm_configured ?? false}
+          birthModelName={status?.birth_model ?? null}
+        />
+      </div>
     );
   }
 
@@ -545,38 +574,56 @@ function App() {
         )}
         {showChat && status?.birth_complete && currentAgentId && (
           <section className="panel operational-chat-panel">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div className="chat-panel-header">
               <h2 style={{ margin: 0 }}>
                 {chatMode === 'chat' ? `Chat with ${status.agent_name || 'agent'}` : 'Agentic Task'}
               </h2>
-              <div style={{ display: 'flex', gap: '0.25rem' }}>
-                <button
-                  className={chatMode === 'chat' ? 'button-primary' : 'button-secondary'}
-                  onClick={() => setChatMode('chat')}
-                  style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
-                >
-                  Chat
-                </button>
-                <button
-                  className={chatMode === 'agentic' ? 'button-primary' : 'button-secondary'}
-                  onClick={() => setChatMode('agentic')}
-                  style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
-                >
-                  Agentic
-                </button>
+              <div className="chat-panel-controls">
+                <div className="router-mode-selector">
+                  {(['auto', 'think_hard', 'think_harder'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      className={`router-mode-pill${routerMode === mode ? ' router-mode-pill-active' : ''}`}
+                      onClick={() => setRouterMode(mode)}
+                    >
+                      {mode === 'auto' ? 'auto' : mode === 'think_hard' ? 'think hard' : 'think harder'}
+                    </button>
+                  ))}
+                </div>
+                <div className="chat-mode-toggle">
+                  <button
+                    className={chatMode === 'chat' ? 'button-primary' : 'button-secondary'}
+                    onClick={() => setChatMode('chat')}
+                    style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                  >
+                    Chat
+                  </button>
+                  <button
+                    className={chatMode === 'agentic' ? 'button-primary' : 'button-secondary'}
+                    onClick={() => setChatMode('agentic')}
+                    style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                  >
+                    Agentic
+                  </button>
+                </div>
               </div>
             </div>
             {chatMode === 'chat' ? (
               <OperationalChat
                 agentId={currentAgentId}
                 agentName={status.agent_name ?? undefined}
+                routerMode={routerMode}
                 onError={setError}
+                onBusyChange={setChatBusy}
               />
             ) : (
               <AgenticPanel
                 agentId={currentAgentId}
                 agentName={status.agent_name ?? undefined}
+                routerMode={routerMode}
+                onRouterModeChange={setRouterMode}
                 onError={setError}
+                onBusyChange={setAgenticBusy}
               />
             )}
           </section>
@@ -584,6 +631,11 @@ function App() {
         {status?.birth_complete && currentAgentId && (
           <section className="panel jobs-panel-section">
             <JobsTable agentId={currentAgentId} />
+          </section>
+        )}
+        {status?.birth_complete && currentAgentId && (
+          <section className="panel orchestration-panel-section">
+            <OrchestrationJobsPanel agentId={currentAgentId} onError={setError} />
           </section>
         )}
         <section className="panel status-panel">
@@ -601,8 +653,18 @@ function App() {
                 {storedProviders.length > 0 ? (
                   <span className="provider-badges">
                     {storedProviders.map((p) => (
-                      <span key={p} className="provider-badge provider-badge-ok">
+                      <span
+                        key={p}
+                        className={`provider-badge provider-badge-ok${cloudBusy ? ' provider-badge-active' : ''}`}
+                      >
                         {p}
+                        {cloudBusy && (
+                          <span className="provider-dots">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        )}
                       </span>
                     ))}
                   </span>
@@ -616,6 +678,12 @@ function App() {
           )}
         </section>
       </main>
+      <StatusBar
+        health={health}
+        birthModelReady={status?.birth_model_ready ?? null}
+        localLlmConfigured={status?.local_llm_configured ?? false}
+        birthModelName={status?.birth_model ?? null}
+      />
     </div>
   );
 }

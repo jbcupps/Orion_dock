@@ -11,7 +11,10 @@ import './AgenticPanel.css';
 interface AgenticPanelProps {
   agentId: string;
   agentName?: string;
+  routerMode?: AgenticRouterMode;
+  onRouterModeChange?: (mode: AgenticRouterMode) => void;
   onError: (message: string) => void;
+  onBusyChange?: (busy: boolean) => void;
 }
 
 interface TimelineStep {
@@ -33,14 +36,26 @@ type RunStatus =
   | 'failed'
   | 'cancelled';
 
+type AgenticRouterMode = 'auto' | 'think_hard' | 'think_harder';
+
+const ROUTER_MAX_TURN_DEFAULTS: Record<AgenticRouterMode, number> = {
+  auto: 15,
+  think_hard: 24,
+  think_harder: 36,
+};
+
 export default function AgenticPanel({
   agentId,
   agentName,
+  routerMode: routerModeProp,
+  onRouterModeChange,
   onError,
+  onBusyChange,
 }: AgenticPanelProps) {
   const [goal, setGoal] = useState('');
   const [autoApprove, setAutoApprove] = useState(false);
-  const [maxTurns, setMaxTurns] = useState(15);
+  const routerMode = routerModeProp ?? 'auto';
+  const [maxTurns, setMaxTurns] = useState(ROUTER_MAX_TURN_DEFAULTS[routerMode]);
   const [status, setStatus] = useState<RunStatus>('idle');
   const [taskId, setTaskId] = useState<string | null>(null);
   const [turn, setTurn] = useState(0);
@@ -63,6 +78,15 @@ export default function AgenticPanel({
     };
   }, []);
 
+  // Propagate busy state to parent for provider activity indicators
+  useEffect(() => {
+    const busy =
+      status === 'running' ||
+      status === 'waiting_for_mentor' ||
+      status === 'waiting_for_confirmation';
+    onBusyChange?.(busy);
+  }, [status, onBusyChange]);
+
   const addStep = useCallback(
     (type: string, turnNum: number, content: string, extra?: Partial<TimelineStep>) => {
       const id = ++stepIdRef.current;
@@ -81,6 +105,16 @@ export default function AgenticPanel({
     []
   );
 
+  // Sync maxTurns when parent changes routerMode
+  useEffect(() => {
+    setMaxTurns(ROUTER_MAX_TURN_DEFAULTS[routerMode]);
+  }, [routerMode]);
+
+  const handleRouterModeChange = useCallback((nextMode: AgenticRouterMode) => {
+    onRouterModeChange?.(nextMode);
+    setMaxTurns(ROUTER_MAX_TURN_DEFAULTS[nextMode]);
+  }, [onRouterModeChange]);
+
   const handleStart = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -97,6 +131,7 @@ export default function AgenticPanel({
           goal: text,
           max_turns: maxTurns,
           auto_approve_safe_tools: autoApprove,
+          router_mode: routerMode,
         });
         setTaskId(result.task_id);
         setStatus('running');
@@ -164,7 +199,7 @@ export default function AgenticPanel({
         setStarting(false);
       }
     },
-    [agentId, goal, maxTurns, autoApprove, starting, onError, addStep]
+    [agentId, goal, maxTurns, autoApprove, routerMode, starting, onError, addStep]
   );
 
   const handleMentorRespond = useCallback(async () => {
@@ -236,12 +271,28 @@ export default function AgenticPanel({
               <input
                 type="number"
                 value={maxTurns}
-                onChange={(e) => setMaxTurns(Math.min(50, Math.max(1, Number(e.target.value))))}
+                onChange={(e) =>
+                  setMaxTurns(Math.min(50, Math.max(1, Number(e.target.value) || 1)))
+                }
                 style={{ width: '3rem' }}
                 min={1}
                 max={50}
               />
               max turns
+            </label>
+            <label>
+              router
+              <select
+                value={routerMode}
+                onChange={(e) =>
+                  handleRouterModeChange(e.target.value as AgenticRouterMode)
+                }
+                className="agentic-router-select"
+              >
+                <option value="auto">auto</option>
+                <option value="think_hard">think hard</option>
+                <option value="think_harder">think harder</option>
+              </select>
             </label>
             <label>
               <input

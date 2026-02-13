@@ -99,6 +99,7 @@ Orion Dock is a **Docker-first** Rust workspace for Orion's core agent logic, bi
 - **Orion API** — Axum HTTP API for the web UI (health, status, identities, create/load agents)
 - **Web UI** — React + Vite frontend (intro, ORION HIVE identity selector, birth/status dashboard)
 - **Birth lifecycle** — Five-stage interactive ceremony (Darkness → Ignition → Connectivity → Genesis → Emergence) that generates cryptographic identity, configures LLM/cloud, and discovers agent identity through conversation
+- **Orchestration layer (MVP)** — Scheduled UTC cron jobs, significance scoring, escalation to agentic runs, and mentor-facing attention flags
 - **soul-forge** — Alternative TUI path for scenario-based soul calibration
 
 The **birth process is the key differentiator**: cryptographic identity, conversational discovery, and signed constitutional documents.
@@ -107,11 +108,12 @@ The **birth process is the key differentiator**: cryptographic identity, convers
 
 ## Architecture
 
-### Bicameral Model
+### Runtime Cognition Model
 
-- **Id** — Local LLM (Ollama, LM Studio). Used for birth (pinned `BIRTH_MODEL`), simple queries, privacy-sensitive work.
-- **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Used for complex reasoning when API key is set. Routing: local-first during birth; after keys, Ego-primary with local fallback.
-- **Superego** — Ethical oversight (planned).
+- **Id** — Local LLM (Ollama, LM Studio). Used for birth, lightweight periodic checks, simple/low-latency work, and privacy-sensitive flows.
+- **Orchestration** — In `orion-api` (MVP module): evaluates job significance, applies escalation policy, and controls scheduled/background execution.
+- **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Primary path for mentor-facing operational chat and deep reasoning, with Id fallback.
+- **Superego** — Safety pre-check support exists in router; dedicated ethical oversight model remains planned.
 
 ### Crate Map
 
@@ -130,21 +132,27 @@ The **birth process is the key differentiator**: cryptographic identity, convers
 | `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
 | `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, proton-mail) |
 
+Orchestration is currently implemented as an MVP module at `crates/orion-api/src/orchestration.rs` (not yet split into a dedicated crate).
+
 ### Runtime Surfaces
 
 - **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.
+- **Orchestration**: In-process scheduler loop in API (UTC cron semantics), scanning per-agent jobs and triggering Id checks or agentic runs.
 - **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize.
 - **Dev**: `orion-dev` container with bind-mounted source.
 
 ### API Routes (orion-api)
 
 - `/health` — Health check
+- `/ready` — Readiness check
 - `/api/status` — Agent status (birth_complete, birth_stage)
 - `/api/identities` — List agents (Hive)
-- `/api/agents/:id/*` — Agent-specific operations (create, load)
-- `/api/genesis/paths` — List available Genesis paths
-- `/api/agents/:id/genesis/start` — Begin Genesis with path selection (`{ path, depth? }`)
-- `/api/agents/:id/genesis/forge/select` — Soul Forge scenario choice (`{ choice }`)
+- `/api/agents/:id/*` — Agent-specific operations (create, load, identity/constitution/verify/export)
+- `/api/agents/:id/chat` and `/api/agents/:id/chat/history` — Operational mentor chat
+- `/api/agents/:id/skills*` — Skill listing, missing secrets, direct execution
+- `/api/agents/:id/agent/*` — Agentic runs (start, stream, status, respond, confirm, cancel, list)
+- `/api/agents/:id/orchestration/*` — Scheduled jobs CRUD, run-now, and orchestration logs
+- `/api/genesis/paths` + `/api/agents/:id/genesis/*` — Genesis path selection and progression
 
 ---
 
@@ -189,6 +197,29 @@ Templates live in `templates/`. At Emergence, soul.md, ethics.md, instincts.md a
 
 ---
 
+## Orchestration Layer (MVP)
+
+The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs` and integrated into API startup.
+
+- **Persistence (per agent)**:
+  - `orchestration_jobs.json` — Job definitions (cron, mode, goal template, policy)
+  - `orchestration_job_logs.json` — Execution log entries (decision, significance, status, summary)
+- **Modes**:
+  - `id_check` — Lightweight local check via Id (`id_only`)
+  - `agentic_run` — Directly launches an autonomous task
+- **Significance**:
+  - Levels: `low`, `medium`, `high`
+  - Decisions: `silent_log`, `spawn_agentic`, `flag_mentor`
+  - Policy toggles per job: `escalate_medium`, `flag_high_to_mentor`
+- **Scheduler behavior**:
+  - UTC cron interpretation
+  - Background loop scans jobs on a fixed interval
+  - Does not launch overlapping agentic runs for the same agent
+- **Run provenance**:
+  - Agentic run summaries include `source` (`manual` or `scheduled:<job_id>`)
+
+---
+
 ## Security Model
 
 - **Ed25519 identity**: External keypair generated in Darkness. Private key shown **once**, never persisted. Public key in `external_pubkey.bin`.
@@ -200,16 +231,17 @@ Templates live in `templates/`. At Emergence, soul.md, ethics.md, instincts.md a
 
 ## Current State vs Intended State
 
-### Implemented in Backend
-- Full five-stage birth in `orion-birth` (Darkness → Emergence).
-- Modular Genesis: `GenesisPath` enum (Direct, Soul Crystallization with depth, Soul Forge); path selection via API and web UI.
-- Key generation, key presentation, stage advancement, conversation history, tool parsing, crystallize_soul, complete_emergence.
+### Implemented now
+- Full five-stage birth flow (Darkness → Emergence) with web UI progression and API support.
+- Modular Genesis paths (Direct Discovery, Soul Crystallization depth option, Soul Forge).
+- Operational mentor chat with skill tool execution and separate activity logging.
+- Agentic loop with SSE timeline, mentor ask/confirm controls, run history, and cancellation.
+- Orchestration MVP: scheduled jobs, significance policy, escalation decisions, and job logs.
 
-### Missing for Full Interactive Birth in Web UI
-1. **Private key as initial step** — API does not expose an endpoint to fetch the private key or advance past Darkness.
-2. **Birth chat endpoints** — No API to send user messages and receive assistant + tool requests for Connectivity/Genesis.
-3. **Stage advancement API** — No explicit endpoints for advance_past_darkness, advance_to_connectivity, advance_to_genesis.
-4. **Ignition UI** — No web form to set/validate local LLM URL and advance to Connectivity.
+### Near-term evolution areas
+- Promote orchestration from API module to dedicated crate when interfaces stabilize.
+- Persist active agentic task state beyond in-memory process lifetime.
+- Expand orchestration UI ergonomics (filters, richer per-job analytics, trend views).
 
 ---
 

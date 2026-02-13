@@ -24,6 +24,8 @@ export default function HiveScreen({
   const [creating, setCreating] = useState(false);
   const [newAgentName, setNewAgentName] = useState('');
   const [exportingId, setExportingId] = useState<string | null>(null);
+  const [exportModalAgent, setExportModalAgent] = useState<AgentIdentityInfo | null>(null);
+  const [exportPrivateKey, setExportPrivateKey] = useState('');
 
   const fetchAgents = async () => {
     try {
@@ -68,11 +70,29 @@ export default function HiveScreen({
     }
   };
 
-  const handleExport = async (e: React.MouseEvent, agent: AgentIdentityInfo) => {
+  const closeExportModal = () => {
+    setExportModalAgent(null);
+    setExportPrivateKey('');
+  };
+
+  const handleExport = (e: React.MouseEvent, agent: AgentIdentityInfo) => {
     e.stopPropagation(); // prevent row click navigation
+    setExportModalAgent(agent);
+    setExportPrivateKey('');
+  };
+
+  const handleConfirmExport = async () => {
+    if (!exportModalAgent) return;
+    const privateKey = exportPrivateKey.trim();
+    if (!privateKey) {
+      setError('Private key is required to unlock keychain export');
+      return;
+    }
+
     try {
-      setExportingId(agent.id);
-      await exportAgent(agent.id, agent.name);
+      setExportingId(exportModalAgent.id);
+      await exportAgent(exportModalAgent.id, privateKey, exportModalAgent.name);
+      closeExportModal();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Export failed');
     } finally {
@@ -230,6 +250,52 @@ export default function HiveScreen({
           </button>
         </div>
       </section>
+
+      {exportModalAgent && (
+        <div
+          className="hive-modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && exportingId !== exportModalAgent.id) {
+              closeExportModal();
+            }
+          }}
+        >
+          <div className="hive-modal-card" role="dialog" aria-modal="true" aria-labelledby="hive-export-title">
+            <h3 id="hive-export-title">Unlock keychain for export</h3>
+            <p className="hive-modal-text">
+              Enter the external private key for <strong>{exportModalAgent.name}</strong>.
+            </p>
+            <input
+              type="password"
+              value={exportPrivateKey}
+              onChange={(e) => setExportPrivateKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleConfirmExport()}
+              className="hive-input"
+              placeholder="Private key (base64)"
+              autoFocus
+              disabled={exportingId === exportModalAgent.id}
+            />
+            <div className="hive-modal-actions">
+              <button
+                type="button"
+                className="hive-btn-secondary"
+                onClick={closeExportModal}
+                disabled={exportingId === exportModalAgent.id}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="hive-btn"
+                onClick={handleConfirmExport}
+                disabled={exportingId === exportModalAgent.id || !exportPrivateKey.trim()}
+              >
+                {exportingId === exportModalAgent.id ? 'Exporting...' : 'Export'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

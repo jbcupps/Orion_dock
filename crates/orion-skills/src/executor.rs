@@ -2,6 +2,8 @@
 //!
 //! Enforces per-call timeouts and global concurrency limits from `ResourceLimits`. File/network
 //! I/O must go through capability layers that call `SkillSandbox::check_permission`.
+//! Any agent-authored/self-improvement tool path should execute through this engine so trust-tier
+//! limits and sandbox filtering cannot be bypassed.
 
 use std::sync::Arc;
 use std::time::Duration;

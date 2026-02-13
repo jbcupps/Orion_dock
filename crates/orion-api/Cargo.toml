@@ -27,6 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-core = "0.3"
+reqwest = { version = "0.11", features = ["json"], default-features = false }
 
 # Skill plugins (compiled in, registered at startup as Verified)
 skill-filesystem = { path = "../../skills/skill-filesystem" }
@@ -36,3 +37,4 @@ skill-web-search = { path = "../../skills/skill-web-search" }
 skill-web-browse = { path = "../../skills/skill-web-browse" }
 skill-perplexity-search = { path = "../../skills/skill-perplexity-search" }
 skill-proton-mail = { path = "../../skills/skill-proton-mail" }
+cron = "0.15.0"

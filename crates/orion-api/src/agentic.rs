@@ -29,10 +29,21 @@ pub struct AgenticRunRequest {
     pub max_turns: u32,
     #[serde(default)]
     pub auto_approve_safe_tools: bool,
+    #[serde(default)]
+    pub router_mode: AgenticRouterMode,
 }
 
 fn default_max_turns() -> u32 {
     15
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgenticRouterMode {
+    #[default]
+    Auto,
+    ThinkHard,
+    ThinkHarder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +190,7 @@ pub struct AgenticLoopConfig {
     pub goal: String,
     pub max_turns: u32,
     pub auto_approve_safe_tools: bool,
+    pub router_mode: AgenticRouterMode,
     pub agent_dir: PathBuf,
     pub config: AppConfig,
     pub skill_registry: Arc<SkillRegistry>,
@@ -189,6 +201,7 @@ pub struct AgenticLoopConfig {
     pub cancel_rx: mpsc::Receiver<()>,
     pub task_handle: Arc<Mutex<AgenticTask>>,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    pub run_source: String,
 }
 
 /// Run the autonomous agentic loop. Call from `tokio::spawn`.
@@ -204,20 +217,24 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         Message::new("system", &system_prompt),
         Message::new(
             "user",
-            format!(
-                "## Your Goal\n\n{}\n\nBegin by assessing your environment and planning your approach.",
-                cfg.goal
-            ),
+            build_goal_kickoff_prompt(&cfg.goal, cfg.router_mode, &cfg.run_source),
         ),
     ];
 
     // Build router
     let (ego_name, ego_key) = resolve_ego_credentials(&cfg.config);
+    let routing_mode = match cfg.router_mode {
+        AgenticRouterMode::Auto => cfg.config.routing_mode,
+        AgenticRouterMode::ThinkHard | AgenticRouterMode::ThinkHarder => {
+            // Thinking presets prioritize Ego for deeper reasoning while preserving Id fallback.
+            orion_core::RoutingMode::EgoPrimary
+        }
+    };
     let router = orion_router::IdEgoRouter::with_provider_auto_detect(
         cfg.config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
-        cfg.config.routing_mode,
+        routing_mode,
     )
     .await;
 
@@ -241,6 +258,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 &cfg.agent_dir,
                 &cfg.task_id,
                 &cfg.goal,
+                &cfg.run_source,
                 &summary,
                 "partial",
                 turn,
@@ -263,6 +281,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 &cfg.agent_dir,
                 &cfg.task_id,
                 &cfg.goal,
+                &cfg.run_source,
                 "Task cancelled by mentor.",
                 "cancelled",
                 turn,
@@ -275,7 +294,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         turn += 1;
 
         // Trim context if conversation is getting long
-        trim_context(&mut messages, 20);
+        trim_context(&mut messages, context_window_pairs(cfg.router_mode));
 
         // LLM call
         let response = match router.route(messages.clone()).await {
@@ -290,6 +309,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                     &cfg.agent_dir,
                     &cfg.task_id,
                     &cfg.goal,
+                    &cfg.run_source,
                     &err_msg,
                     "failed",
                     turn,
@@ -342,6 +362,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 &cfg.agent_dir,
                 &cfg.task_id,
                 &cfg.goal,
+                &cfg.run_source,
                 &summary,
                 &status,
                 turn,
@@ -403,6 +424,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                                 &cfg.agent_dir,
                                 &cfg.task_id,
                                 &cfg.goal,
+                                &cfg.run_source,
                                 "Task cancelled (mentor channel closed).",
                                 "cancelled",
                                 turn,
@@ -425,6 +447,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                         &cfg.agent_dir,
                         &cfg.task_id,
                         &cfg.goal,
+                        &cfg.run_source,
                         "Task cancelled by mentor.",
                         "cancelled",
                         turn,
@@ -512,6 +535,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                             &cfg.agent_dir,
                             &cfg.task_id,
                             &cfg.goal,
+                            &cfg.run_source,
                             "Task cancelled by mentor.",
                             "cancelled",
                             turn,
@@ -695,6 +719,46 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     (found_name, found_key)
 }
 
+fn context_window_pairs(mode: AgenticRouterMode) -> usize {
+    match mode {
+        AgenticRouterMode::Auto => 20,
+        AgenticRouterMode::ThinkHard => 28,
+        AgenticRouterMode::ThinkHarder => 36,
+    }
+}
+
+fn build_goal_kickoff_prompt(goal: &str, mode: AgenticRouterMode, run_source: &str) -> String {
+    let source_context = if run_source.starts_with("scheduled:") {
+        "Run source: scheduled orchestration job.\n\
+         Disturb the mentor only for high-significance findings."
+    } else {
+        "Run source: mentor-initiated task."
+    };
+
+    match mode {
+        AgenticRouterMode::Auto => format!(
+            "## Your Goal\n\n{}\n\n{}\n\nBegin by assessing your environment and planning your approach.",
+            goal, source_context
+        ),
+        AgenticRouterMode::ThinkHard => format!(
+            "## Your Goal\n\n{}\n\nReasoning profile: THINK HARD.\n\
+             Break the task into phases, compare at least two viable approaches when choices matter, \
+             and verify key outputs before moving on.\n\n\
+             {}\n\n\
+             Begin by assessing your environment and drafting your plan.",
+            goal, source_context
+        ),
+        AgenticRouterMode::ThinkHarder => format!(
+            "## Your Goal\n\n{}\n\nReasoning profile: THINK HARDER.\n\
+             Use deliberate multi-step decomposition, stress-test assumptions, and run secondary checks \
+             before claiming completion. Favor correctness and evidence over speed.\n\n\
+             {}\n\n\
+             Begin by assessing your environment, then produce a robust execution plan.",
+            goal, source_context
+        ),
+    }
+}
+
 async fn update_status(task: &Arc<Mutex<AgenticTask>>, status: AgenticTaskStatus, turn: u32) {
     let mut t = task.lock().await;
     t.status = status;
@@ -717,6 +781,7 @@ fn persist_run_summary(
     agent_dir: &Path,
     task_id: &str,
     goal: &str,
+    run_source: &str,
     summary: &str,
     status: &str,
     turns: u32,
@@ -729,6 +794,7 @@ fn persist_run_summary(
     let run_data = serde_json::json!({
         "task_id": task_id,
         "goal": goal,
+        "source": run_source,
         "summary": summary,
         "status": status,
         "turns": turns,

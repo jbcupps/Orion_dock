@@ -11,6 +11,12 @@
 //! `executor.rs`): each tool call is bounded by `ResourceLimits::max_cpu_ms` and global
 //! concurrency by `max_concurrency`. Memory and storage caps (max_memory_bytes, storage_quota)
 //! are intended to be enforced by capability layers and/or a future WASM runtime for untrusted skills.
+//!
+//! Trust-tier best practice:
+//! - First-party reviewed skills should use `Verified`.
+//! - Agent-generated or mentor-added skills should run as `AgentBuilt` or `Untrusted`.
+//! - Any self-improvement execution path must route through `SkillExecutor` + `SkillSandbox`
+//!   so tier filtering, permission checks, and limits are consistently applied.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
