@@ -65,6 +65,8 @@ struct AppState {
     skill_executor: Arc<SkillExecutor>,
     /// Active agentic tasks keyed by task_id.
     agentic_tasks: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<AgenticTask>>>>>,
+    /// Shared secrets vault for skill plugins — synced per-request from agent vault.
+    skill_vault: Arc<Mutex<SecretsVault>>,
     /// Scheduler interval for orchestration periodic jobs.
     orchestration_tick_seconds: u64,
 }
@@ -2096,6 +2098,9 @@ async fn api_operational_chat(
             .collect()
     };
 
+    // Sync agent secrets into the shared skill vault so plugins can see them.
+    sync_agent_vault_to_skills(&config.data_dir, &state.skill_vault);
+
     let system_prompt = if skill_tool_entries.is_empty() {
         build_system_prompt(&config.docs_dir, &config.agent_name)
     } else {
@@ -3167,6 +3172,47 @@ async fn api_skills_missing_secrets(
     Ok(Json(missing))
 }
 
+/// Copy all secrets from the agent's vault into the shared skill vault.
+/// This ensures skills see the agent's actual API keys at execution time.
+fn sync_agent_vault_to_skills(
+    agent_data_dir: &std::path::Path,
+    skill_vault: &Arc<Mutex<SecretsVault>>,
+) {
+    let agent_vault = match SecretsVault::load(agent_data_dir.to_path_buf()) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to load agent vault for skill sync: {}", e);
+            return;
+        }
+    };
+    let entries: Vec<(String, String)> = agent_vault
+        .list_providers()
+        .into_iter()
+        .filter_map(|name| {
+            agent_vault
+                .get_secret(name)
+                .map(|val| (name.to_string(), val.to_string()))
+        })
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    let mut shared = match skill_vault.lock() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to lock skill vault for sync: {}", e);
+            return;
+        }
+    };
+    for (name, val) in &entries {
+        shared.set_secret(name, val);
+    }
+    tracing::debug!(
+        count = entries.len(),
+        "Synced agent vault secrets to skill vault"
+    );
+}
+
 /// Initialize the skill registry: instantiate all built-in skill plugins
 /// and register them as Verified (first-party, shipped with the repo).
 fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
@@ -3320,6 +3366,9 @@ async fn launch_agentic_task_internal(
         let mut tasks = state.agentic_tasks.lock().await;
         tasks.insert(task_id.clone(), Arc::clone(&task_arc));
     }
+
+    // Sync agent secrets into the shared skill vault so plugins can see them.
+    sync_agent_vault_to_skills(&config.data_dir, &state.skill_vault);
 
     let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
     let stored_providers: Vec<String> = {
@@ -4188,6 +4237,7 @@ async fn main() -> std::io::Result<()> {
         skill_registry,
         skill_executor,
         agentic_tasks: Arc::new(TokioMutex::new(HashMap::new())),
+        skill_vault,
         orchestration_tick_seconds: 30,
     };
 
