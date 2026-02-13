@@ -417,6 +417,31 @@ body {
   font-size: 0.75rem;
 }
 
+.hive-cell-actions {
+  text-align: center;
+}
+
+.hive-export-btn {
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.hive-export-btn:hover:not(:disabled) {
+  background: var(--glow);
+}
+
+.hive-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .hive-init {
   max-width: 32rem;
 }

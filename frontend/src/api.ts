@@ -712,3 +712,28 @@ export async function verifyAgent(
   }
   return res.json();
 }
+
+// ---- Agent Export API ----
+
+export async function exportAgent(agentId: string, agentName?: string): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/export`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Export failed: ${res.status}`);
+  }
+  const blob = await res.blob();
+  const safeName = (agentName || 'agent').replace(/[^a-zA-Z0-9_-]/g, '-');
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const filename = `orion-agent-${safeName}-${date}.json`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
