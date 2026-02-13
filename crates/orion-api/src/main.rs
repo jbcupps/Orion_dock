@@ -1906,7 +1906,8 @@ fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
         for (manifest, tier) in skills {
             let missing = registry.check_missing_secrets(&manifest);
             let has_required_missing = missing.iter().any(|m| m.required);
-            let missing_names: Vec<String> = missing.iter().map(|m| m.secret_name.clone()).collect();
+            let missing_names: Vec<String> =
+                missing.iter().map(|m| m.secret_name.clone()).collect();
             let ready = !has_required_missing;
             if let Ok((skill, _, _)) = registry.get_skill(&manifest.id) {
                 for tool in skill.tools() {
@@ -1992,7 +1993,11 @@ async fn api_operational_chat(
     let vault_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault.list_providers().into_iter().map(String::from).collect()
+        vault
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect()
     };
 
     let system_prompt = if skill_tool_entries.is_empty() {
@@ -2901,18 +2906,10 @@ async fn api_list_agentic_runs(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("completed")
                                 .to_string(),
-                            turns: v
-                                .get("turns")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
-                            tool_calls: v
-                                .get("tool_calls")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0)
+                            turns: v.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            tool_calls: v.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
                                 as u32,
-                            summary: v
-                                .get("summary")
-                                .and_then(|v| v.as_str())
+                            summary: v.get("summary").and_then(|v| v.as_str())
                                 .map(String::from),
                             started_at: v
                                 .get("started_at")
@@ -3030,7 +3027,11 @@ async fn api_agentic_run(
     let stored_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault.list_providers().into_iter().map(String::from).collect()
+        vault
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect()
     };
 
     let loop_config = AgenticLoopConfig {
