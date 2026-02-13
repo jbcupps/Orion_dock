@@ -334,6 +334,19 @@ struct VerifyResponse {
     results: Vec<DocumentVerifyResult>,
 }
 
+#[derive(Serialize)]
+struct AgentExport {
+    export_version: u32,
+    exported_at: String,
+    agent: serde_json::Value,
+    identity: serde_json::Value,
+    constitution: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    genesis_path: Option<serde_json::Value>,
+    chat_history: serde_json::Value,
+    agentic_runs: Vec<serde_json::Value>,
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
@@ -2562,6 +2575,196 @@ async fn api_agent_verify(
 }
 
 // ============================================================================
+// Agent Export API
+// ============================================================================
+
+/// GET /api/agents/:id/export — export portable agent identity bundle as JSON download.
+async fn api_export_agent(
+    Path(id): Path<String>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, String); 2],
+        Json<AgentExport>,
+    ),
+    (axum::http::StatusCode, String),
+> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    // ---- Agent metadata from config.json ----
+    let config_path = dir.join("config.json");
+    let config_val: serde_json::Value = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read config: {}", e),
+            )
+        })?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        serde_json::Value::Null
+    };
+
+    let agent_name = config_val
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let birth_complete = config_val
+        .get("birth_complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Cannot export agent — birth not yet complete".to_string(),
+        ));
+    }
+
+    // Build sanitized agent metadata (exclude secrets, local_llm_base_url, API keys)
+    let agent_meta = serde_json::json!({
+        "id": id,
+        "name": agent_name,
+        "birth_complete": birth_complete,
+        "birth_stage": config_val.get("birth_stage"),
+        "birth_timestamp": config_val.get("birth_timestamp"),
+        "routing_mode": config_val.get("routing_mode"),
+    });
+
+    // ---- Identity (public key) ----
+    let pubkey_path = dir.join("external_pubkey.bin");
+    let identity = if pubkey_path.exists() {
+        let bytes = std::fs::read(&pubkey_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read public key: {}", e),
+            )
+        })?;
+        serde_json::json!({ "pubkey_base64": BASE64.encode(&bytes) })
+    } else {
+        serde_json::json!({ "pubkey_base64": null })
+    };
+
+    // ---- Constitutional documents + signatures ----
+    let docs_dir = dir.join("docs");
+    let doc_names = ["soul.md", "ethics.md", "instincts.md"];
+    let mut constitution = serde_json::Map::new();
+    for doc_name in &doc_names {
+        let doc_path = docs_dir.join(doc_name);
+        let sig_path = docs_dir.join(format!("{}.sig", doc_name));
+        let key = doc_name.trim_end_matches(".md");
+
+        let content = if doc_path.exists() {
+            std::fs::read_to_string(&doc_path).ok()
+        } else {
+            None
+        };
+        let signature: Option<serde_json::Value> = if sig_path.exists() {
+            std::fs::read_to_string(&sig_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        };
+
+        if let Some(c) = content {
+            constitution.insert(
+                key.to_string(),
+                serde_json::json!({
+                    "content": c,
+                    "signature": signature,
+                }),
+            );
+        }
+    }
+
+    // ---- Genesis path ----
+    let genesis_path_file = dir.join("genesis_path.json");
+    let genesis_path: Option<serde_json::Value> = if genesis_path_file.exists() {
+        std::fs::read_to_string(&genesis_path_file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+
+    // ---- Chat history ----
+    let read_json_file = |name: &str| -> serde_json::Value {
+        let p = dir.join(name);
+        if p.exists() {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        }
+    };
+
+    let chat_history = serde_json::json!({
+        "birth": read_json_file("birth_chat.json"),
+        "connectivity": read_json_file("connectivity_chat.json"),
+        "operational": read_json_file("operational_chat.json"),
+    });
+
+    // ---- Agentic runs ----
+    let mut agentic_runs: Vec<serde_json::Value> = Vec::new();
+    let runs_dir = dir.join("agentic_runs");
+    if runs_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        agentic_runs.push(v);
+                    }
+                }
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let safe_name = agent_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>();
+    let date_str = chrono::Utc::now().format("%Y%m%d").to_string();
+    let filename = format!("orion-agent-{}-{}.json", safe_name, date_str);
+
+    let export = AgentExport {
+        export_version: 1,
+        exported_at: now,
+        agent: agent_meta,
+        identity,
+        constitution: serde_json::Value::Object(constitution),
+        genesis_path,
+        chat_history,
+        agentic_runs,
+    };
+
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        Json(export),
+    ))
+}
+
+// ============================================================================
 // Skills API
 // ============================================================================
 
@@ -3375,6 +3578,7 @@ async fn main() -> std::io::Result<()> {
         .route("/api/agents/:id/identity", get(api_agent_identity))
         .route("/api/agents/:id/constitution", get(api_agent_constitution))
         .route("/api/agents/:id/verify", post(api_agent_verify))
+        .route("/api/agents/:id/export", get(api_export_agent))
         .layer(cors)
         .with_state(state);
 

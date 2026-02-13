@@ -3,6 +3,7 @@ import {
   fetchIdentities,
   createAgent,
   loadAgent,
+  exportAgent,
   type AgentIdentityInfo,
 } from '../api';
 
@@ -22,6 +23,7 @@ export default function HiveScreen({
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newAgentName, setNewAgentName] = useState('');
+  const [exportingId, setExportingId] = useState<string | null>(null);
 
   const fetchAgents = async () => {
     try {
@@ -63,6 +65,18 @@ export default function HiveScreen({
       onAgentSelected(agentId);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load agent');
+    }
+  };
+
+  const handleExport = async (e: React.MouseEvent, agent: AgentIdentityInfo) => {
+    e.stopPropagation(); // prevent row click navigation
+    try {
+      setExportingId(agent.id);
+      await exportAgent(agent.id, agent.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExportingId(null);
     }
   };
 
@@ -152,6 +166,7 @@ export default function HiveScreen({
               <th>UUID</th>
               <th>Status</th>
               <th>Birth Date</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -174,6 +189,18 @@ export default function HiveScreen({
                 </td>
                 <td className="hive-cell-date">
                   {agent.birth_date ?? '\u2014'}
+                </td>
+                <td className="hive-cell-actions">
+                  {agent.birth_complete && (
+                    <button
+                      type="button"
+                      className="hive-export-btn"
+                      onClick={(e) => handleExport(e, agent)}
+                      disabled={exportingId === agent.id}
+                    >
+                      {exportingId === agent.id ? 'Exporting...' : 'Export'}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
