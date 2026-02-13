@@ -3,9 +3,9 @@
 ## Key Management
 
 ### External Signing Keypair (Ed25519)
-- **Generated at first run** by the user's Abigail instance
+- **Generated at first run** by the user's Orion instance
 - **Private key is shown ONCE** during initial setup - user MUST save it securely
-- **Private key is NEVER stored** by Abigail - only the public key is retained
+- **Private key is NEVER stored** by Orion - only the public key is retained
 - **Public key location:** `{data_dir}/external_pubkey.bin` (auto-detected)
 - **Purpose:** Signs constitutional documents (soul.md, ethics.md, instincts.md)
 
@@ -23,6 +23,7 @@
 ## Secrets Handling
 
 - **No secrets in repo:** API keys, passwords never committed
+- **If any local config was ever committed or exposed** (e.g. `.claude/settings.local.json`), rotate all credentials referenced there (email, API keys, passwords) immediately.
 - **Environment:** Use `example.env` as template; `.env` is gitignored
 - **Email passwords:** Encrypted via DPAPI before storage in config
 - **Secret key namespace:** `store_secret` / `check_secret` / `remove_secret` accept only (1) reserved provider names: `openai`, `anthropic`, `xai`, `google`, `tavily`, or (2) secret names declared in a skill’s `skill.toml` (under `secrets[].name`). Other keys are rejected to avoid overwriting provider keys or polluting the vault.
@@ -32,13 +33,13 @@
 
 - **Signed at first run:** soul.md, ethics.md, instincts.md are signed when keypair is generated
 - **Verified at every boot:** Signatures checked against the stored public key
-- **Immutable:** Abigail refuses requests to modify constitutional docs
+- **Immutable:** Orion refuses requests to modify constitutional docs
 - **Recovery:** If user loses private key, they cannot re-sign after reinstall
 
 ## First Run Security Flow
 
 1. User clicks "Start" in boot sequence
-2. Abigail generates Ed25519 keypair
+2. Orion generates Ed25519 keypair
 3. Constitutional documents are signed with the private key
 4. **CRITICAL:** Private key is displayed with security warnings
 5. User must acknowledge they've saved the key before proceeding
@@ -52,12 +53,11 @@
 
 ## Dependency and CI Security
 
-- **CI:** `.github/workflows/security-audit.yml` runs `cargo audit` and `npm audit --audit-level=high` on push to main and on pull requests. The build fails on high/critical advisories (with an option to document exceptions if needed).
-- **Dependabot:** `.github/dependabot.yml` is configured for Cargo, npm (tauri-app/src-ui), and GitHub Actions with weekly checks and PRs for updates.
+- **CI and Dependabot:** See CONTRIBUTING.md and the repository for current status. When CI is enabled, run `cargo audit` and `npm audit` as part of your workflow; document any exceptions for known advisories.
 
-## Content Security Policy (CSP)
+## Frontend Security
 
-- A strict CSP is set in `tauri.conf.json` under `app.security.csp`: `default-src 'self'`, `script-src 'self'`, `style-src 'self' 'unsafe-inline'` (Tailwind/inline styles), `connect-src 'self'` and localhost for dev/LLM, `img-src`/`font-src` as needed. This reduces XSS and content-injection risk. If you add new script or style sources, document them here.
+- The web frontend is a Vite/React SPA. Ensure no secrets or sensitive data are exposed in client bundles. Use `example.env` for variable names and keep real values in `.env` (gitignored).
 
 ## Path Validation
 
@@ -66,7 +66,7 @@
 ## Skill Sandbox
 
 - **Network:** The executor checks the sandbox for network permission before running a tool that declares a network permission (domain allowlist). Other resource access (file, memory) uses the same sandbox logic but must be invoked by the code path that performs the I/O (e.g. a capability layer). Skill code that performs raw file or network I/O should go through a layer that calls the sandbox.
-- **Resource limits:** Timeouts and concurrency are enforced at runtime: each tool call is bounded by `ResourceLimits::max_cpu_ms` (default 30s), and global concurrency by `max_concurrency` (default 10). Memory and storage caps are intended for capability layers and/or a future WASM runtime (see `crates/abigail-skills/src/runtime/wasm.rs`).
+- **Resource limits:** Timeouts and concurrency are enforced at runtime: each tool call is bounded by `ResourceLimits::max_cpu_ms` (default 30s), and global concurrency by `max_concurrency` (default 10). Memory and storage caps are intended for capability layers and/or a future WASM runtime (see `crates/orion-skills`).
 
 ## Skill Packaging and Approval
 
