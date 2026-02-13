@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check docs/index.html: link format, OS detection script, required elements.
+# Check docs/index.html: repo link, title, required elements for Orion Dock.
 set -euo pipefail
 REPO_ROOT="${1:-.}"
 HTML="${REPO_ROOT}/docs/index.html"
@@ -10,35 +10,21 @@ fi
 
 fail=0
 
-# Required element ids and structure
-if ! grep -q 'id="main-download"' "$HTML"; then
-  echo "FAIL: main-download link id missing"
+# Orion Dock title
+if ! grep -q 'Orion Dock' "$HTML"; then
+  echo "FAIL: Orion Dock title/heading missing"
   fail=1
 fi
 
-# Other downloads section with expected base URL
-if ! grep -q 'github.com/jbcupps/abigail/releases' "$HTML"; then
-  echo "FAIL: expected download base URL not found"
+# Repo link
+if ! grep -q 'github.com/jbcupps/Orion_dock' "$HTML"; then
+  echo "FAIL: expected repo URL (Orion_dock) not found"
   fail=1
 fi
 
-# OS detection script branches (windows, macos, linux)
-if ! grep -q "os = 'windows'" "$HTML" || ! grep -q "os = 'macos'" "$HTML" || ! grep -q "os = 'linux'" "$HTML"; then
-  echo "FAIL: OS detection branches (windows/macos/linux) missing"
-  fail=1
-fi
-
-# Link format: .exe, .dmg, .deb for the three platforms
-if ! grep -q 'Abigail-windows-x64-setup.exe' "$HTML"; then
-  echo "FAIL: Windows .exe link missing"
-  fail=1
-fi
-if ! grep -q 'Abigail-macos-x64.dmg' "$HTML"; then
-  echo "FAIL: macOS .dmg link missing"
-  fail=1
-fi
-if ! grep -q 'Abigail-linux-x64.deb' "$HTML"; then
-  echo "FAIL: Linux .deb link missing"
+# README or getting started link
+if ! grep -q 'readme\|HOW_TO_RUN\|Getting started' "$HTML"; then
+  echo "FAIL: README or getting started link missing"
   fail=1
 fi
 

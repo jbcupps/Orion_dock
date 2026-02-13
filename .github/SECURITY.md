@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Abigail, please report it responsibly.
+If you discover a security vulnerability in Orion Dock, please report it responsibly.
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
@@ -32,7 +32,7 @@ If you discover a security vulnerability in Abigail, please report it responsibl
 
 The following are in scope for security reports:
 
-- Abigail desktop application (Tauri backend and React frontend)
+- Orion Dock (Rust API, React frontend, Docker-first; no desktop installers)
 - Ed25519 signature verification and key management
 - DPAPI secrets handling (Windows)
 - Skill sandbox escape or permission bypass
@@ -40,7 +40,7 @@ The following are in scope for security reports:
 
 ### Out of Scope
 
-- Vulnerabilities in third-party dependencies (report these upstream; we monitor via Dependabot and `cargo audit`)
+- Vulnerabilities in third-party dependencies (report these upstream)
 - Social engineering
 - Denial of service on local-only interfaces
 
@@ -51,4 +51,4 @@ The following are in scope for security reports:
 - Skills run in a permission-checked sandbox with declared manifests
 - Local LLM URLs are validated to prevent SSRF (localhost/loopback only)
 - GitHub Actions use pinned commit SHAs to prevent supply chain attacks
-- Dependency audits run automatically via `cargo audit` and `npm audit` in CI
+- Run `cargo audit` and `npm audit` locally or in CI when enabled; see CONTRIBUTING for current automation status

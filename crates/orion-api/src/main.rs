@@ -334,6 +334,19 @@ struct VerifyResponse {
     results: Vec<DocumentVerifyResult>,
 }
 
+#[derive(Serialize)]
+struct AgentExport {
+    export_version: u32,
+    exported_at: String,
+    agent: serde_json::Value,
+    identity: serde_json::Value,
+    constitution: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    genesis_path: Option<serde_json::Value>,
+    chat_history: serde_json::Value,
+    agentic_runs: Vec<serde_json::Value>,
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
@@ -1904,6 +1917,11 @@ fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
     let mut entries = Vec::new();
     if let Ok(skills) = registry.list_with_tiers() {
         for (manifest, tier) in skills {
+            let missing = registry.check_missing_secrets(&manifest);
+            let has_required_missing = missing.iter().any(|m| m.required);
+            let missing_names: Vec<String> =
+                missing.iter().map(|m| m.secret_name.clone()).collect();
+            let ready = !has_required_missing;
             if let Ok((skill, _, _)) = registry.get_skill(&manifest.id) {
                 for tool in skill.tools() {
                     entries.push(SkillToolEntry {
@@ -1913,6 +1931,8 @@ fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
                         tool_name: tool.name,
                         tool_description: tool.description,
                         parameters: tool.parameters,
+                        ready,
+                        missing_secrets: missing_names.clone(),
                     });
                 }
             }
@@ -1981,10 +2001,27 @@ async fn api_operational_chat(
 
     // Build system prompt from constitutional docs with dynamic skill tools
     let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
+
+    // Load vault provider names for system prompt awareness
+    let vault_providers: Vec<String> = {
+        let vault = SecretsVault::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        vault
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    };
+
     let system_prompt = if skill_tool_entries.is_empty() {
         build_system_prompt(&config.docs_dir, &config.agent_name)
     } else {
-        build_system_prompt_with_skills(&config.docs_dir, &config.agent_name, &skill_tool_entries)
+        build_system_prompt_with_skills(
+            &config.docs_dir,
+            &config.agent_name,
+            &skill_tool_entries,
+            &vault_providers,
+        )
     };
 
     // Build message list: system + history + user
@@ -2538,6 +2575,202 @@ async fn api_agent_verify(
 }
 
 // ============================================================================
+// Agent Export API
+// ============================================================================
+
+/// GET /api/agents/:id/export — export portable agent identity bundle as JSON download.
+async fn api_export_agent(
+    Path(id): Path<String>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, String); 2],
+        Json<AgentExport>,
+    ),
+    (axum::http::StatusCode, String),
+> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    // ---- Agent metadata from config.json ----
+    let config_path = dir.join("config.json");
+    let config_val: serde_json::Value = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read config: {}", e),
+            )
+        })?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        serde_json::Value::Null
+    };
+
+    let agent_name = config_val
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let birth_complete = config_val
+        .get("birth_complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !birth_complete {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Cannot export agent — birth not yet complete".to_string(),
+        ));
+    }
+
+    // Build sanitized agent metadata (exclude secrets, local_llm_base_url, API keys)
+    let agent_meta = serde_json::json!({
+        "id": id,
+        "name": agent_name,
+        "birth_complete": birth_complete,
+        "birth_stage": config_val.get("birth_stage"),
+        "birth_timestamp": config_val.get("birth_timestamp"),
+        "routing_mode": config_val.get("routing_mode"),
+    });
+
+    // ---- Identity (public key) ----
+    let pubkey_path = dir.join("external_pubkey.bin");
+    let identity = if pubkey_path.exists() {
+        let bytes = std::fs::read(&pubkey_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read public key: {}", e),
+            )
+        })?;
+        serde_json::json!({ "pubkey_base64": BASE64.encode(&bytes) })
+    } else {
+        serde_json::json!({ "pubkey_base64": null })
+    };
+
+    // ---- Constitutional documents + signatures ----
+    let docs_dir = dir.join("docs");
+    let doc_names = ["soul.md", "ethics.md", "instincts.md"];
+    let mut constitution = serde_json::Map::new();
+    for doc_name in &doc_names {
+        let doc_path = docs_dir.join(doc_name);
+        let sig_path = docs_dir.join(format!("{}.sig", doc_name));
+        let key = doc_name.trim_end_matches(".md");
+
+        let content = if doc_path.exists() {
+            std::fs::read_to_string(&doc_path).ok()
+        } else {
+            None
+        };
+        let signature: Option<serde_json::Value> = if sig_path.exists() {
+            std::fs::read_to_string(&sig_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        };
+
+        if let Some(c) = content {
+            constitution.insert(
+                key.to_string(),
+                serde_json::json!({
+                    "content": c,
+                    "signature": signature,
+                }),
+            );
+        }
+    }
+
+    // ---- Genesis path ----
+    let genesis_path_file = dir.join("genesis_path.json");
+    let genesis_path: Option<serde_json::Value> = if genesis_path_file.exists() {
+        std::fs::read_to_string(&genesis_path_file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+
+    // ---- Chat history ----
+    let read_json_file = |name: &str| -> serde_json::Value {
+        let p = dir.join(name);
+        if p.exists() {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        }
+    };
+
+    let chat_history = serde_json::json!({
+        "birth": read_json_file("birth_chat.json"),
+        "connectivity": read_json_file("connectivity_chat.json"),
+        "operational": read_json_file("operational_chat.json"),
+    });
+
+    // ---- Agentic runs ----
+    let mut agentic_runs: Vec<serde_json::Value> = Vec::new();
+    let runs_dir = dir.join("agentic_runs");
+    if runs_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        agentic_runs.push(v);
+                    }
+                }
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let safe_name = agent_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let date_str = chrono::Utc::now().format("%Y%m%d").to_string();
+    let filename = format!("orion-agent-{}-{}.json", safe_name, date_str);
+
+    let export = AgentExport {
+        export_version: 1,
+        exported_at: now,
+        agent: agent_meta,
+        identity,
+        constitution: serde_json::Value::Object(constitution),
+        genesis_path,
+        chat_history,
+        agentic_runs,
+    };
+
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        Json(export),
+    ))
+}
+
+// ============================================================================
 // Skills API
 // ============================================================================
 
@@ -2793,6 +3026,121 @@ struct AgenticStreamQuery {
     task: String,
 }
 
+/// Info about a single agentic run (active or historical).
+#[derive(Debug, Serialize)]
+struct AgenticRunInfo {
+    task_id: String,
+    goal: String,
+    status: String,
+    turns: u32,
+    tool_calls: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+}
+
+/// GET /api/agents/:id/agent/runs — list agentic runs (active + historical).
+async fn api_list_agentic_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AgenticRunInfo>>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let mut runs: Vec<AgenticRunInfo> = Vec::new();
+
+    // Collect in-memory active tasks for this agent
+    {
+        let tasks = state.agentic_tasks.lock().await;
+        for task_arc in tasks.values() {
+            let task = task_arc.lock().await;
+            if task.agent_id == id {
+                let status_str = match task.status {
+                    AgenticTaskStatus::Running => "running",
+                    AgenticTaskStatus::WaitingForMentor => "running",
+                    AgenticTaskStatus::WaitingForConfirmation => "running",
+                    AgenticTaskStatus::Completed => "completed",
+                    AgenticTaskStatus::Failed => "failed",
+                    AgenticTaskStatus::Cancelled => "cancelled",
+                };
+                runs.push(AgenticRunInfo {
+                    task_id: task.id.clone(),
+                    goal: task.goal.clone(),
+                    status: status_str.to_string(),
+                    turns: task.turn,
+                    tool_calls: 0,
+                    summary: None,
+                    started_at: task.started_at.to_rfc3339(),
+                    completed_at: None,
+                });
+            }
+        }
+    }
+
+    // Collect historical runs from disk
+    let runs_dir = dir.join("agentic_runs");
+    if runs_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let task_id = v
+                            .get("task_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        // Skip if already present from in-memory tasks
+                        if runs.iter().any(|r| r.task_id == task_id) {
+                            continue;
+                        }
+                        runs.push(AgenticRunInfo {
+                            task_id,
+                            goal: v
+                                .get("goal")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            status: v
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("completed")
+                                .to_string(),
+                            turns: v.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            tool_calls: v.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
+                                as u32,
+                            summary: v.get("summary").and_then(|v| v.as_str()).map(String::from),
+                            started_at: v
+                                .get("started_at")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            completed_at: v
+                                .get("completed_at")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort reverse chronological by started_at
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+    Ok(Json(runs))
+}
+
 /// POST /api/agents/:id/agent/run — start an agentic task.
 async fn api_agentic_run(
     State(state): State<AppState>,
@@ -2858,6 +3206,7 @@ async fn api_agentic_run(
     let task_id = Uuid::new_v4().to_string();
     let (event_tx, _) = tokio::sync::broadcast::channel::<AgenticEvent>(256);
     let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let started_at = chrono::Utc::now();
 
     let task = AgenticTask {
         id: task_id.clone(),
@@ -2870,6 +3219,7 @@ async fn api_agentic_run(
         steps: Vec::new(),
         turn: 0,
         cancel_tx,
+        started_at,
     };
 
     let task_arc = Arc::new(TokioMutex::new(task));
@@ -2881,6 +3231,17 @@ async fn api_agentic_run(
 
     let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
 
+    // Load vault provider names for system prompt awareness
+    let stored_providers: Vec<String> = {
+        let vault = SecretsVault::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        vault
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    };
+
     let loop_config = AgenticLoopConfig {
         task_id: task_id.clone(),
         goal,
@@ -2891,9 +3252,11 @@ async fn api_agentic_run(
         skill_registry: Arc::clone(&state.skill_registry),
         skill_executor: Arc::clone(&state.skill_executor),
         skill_tool_entries,
+        stored_providers,
         event_tx,
         cancel_rx,
         task_handle: task_arc,
+        started_at,
     };
 
     tokio::spawn(agentic::run_agentic_loop(loop_config));
@@ -2911,7 +3274,7 @@ async fn api_agentic_run(
 /// GET /api/agents/:id/agent/stream?task=<id> — SSE event stream for an agentic task.
 async fn api_agentic_stream(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<AgenticStreamQuery>,
 ) -> Result<
     Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
@@ -2927,6 +3290,12 @@ async fn api_agentic_stream(
 
     let rx = {
         let task = task_arc.lock().await;
+        if task.agent_id != id {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "Task does not belong to this agent".to_string(),
+            ));
+        }
         task.event_tx.subscribe()
     };
 
@@ -2967,7 +3336,7 @@ async fn api_agentic_stream(
 /// POST /api/agents/:id/agent/respond — send mentor response to paused agentic task.
 async fn api_agentic_respond(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<MentorResponseRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -2979,6 +3348,12 @@ async fn api_agentic_respond(
     })?;
 
     let mut task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if task.status != AgenticTaskStatus::WaitingForMentor {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -2996,7 +3371,7 @@ async fn api_agentic_respond(
 /// POST /api/agents/:id/agent/confirm — approve or deny a tool confirmation request.
 async fn api_agentic_confirm(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<ConfirmationResponseRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3008,6 +3383,12 @@ async fn api_agentic_confirm(
     })?;
 
     let mut task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if task.status != AgenticTaskStatus::WaitingForConfirmation {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -3025,7 +3406,7 @@ async fn api_agentic_confirm(
 /// POST /api/agents/:id/agent/cancel — cancel a running agentic task.
 async fn api_agentic_cancel(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<CancelRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3037,6 +3418,12 @@ async fn api_agentic_cancel(
     })?;
 
     let task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if matches!(
         task.status,
         AgenticTaskStatus::Completed | AgenticTaskStatus::Failed | AgenticTaskStatus::Cancelled
@@ -3055,7 +3442,7 @@ async fn api_agentic_cancel(
 /// GET /api/agents/:id/agent/status?task=<id> — check task status.
 async fn api_agentic_status(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<AgenticStreamQuery>,
 ) -> Result<Json<AgenticStatusResponse>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3067,6 +3454,12 @@ async fn api_agentic_status(
     })?;
 
     let task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     Ok(Json(AgenticStatusResponse {
         task_id: task.id.clone(),
         goal: task.goal.clone(),
@@ -3211,6 +3604,7 @@ async fn main() -> std::io::Result<()> {
             "/api/agents/:id/skills/:skill_id/execute",
             post(api_execute_skill),
         )
+        .route("/api/agents/:id/agent/runs", get(api_list_agentic_runs))
         .route("/api/agents/:id/agent/run", post(api_agentic_run))
         .route("/api/agents/:id/agent/stream", get(api_agentic_stream))
         .route("/api/agents/:id/agent/respond", post(api_agentic_respond))
@@ -3220,6 +3614,7 @@ async fn main() -> std::io::Result<()> {
         .route("/api/agents/:id/identity", get(api_agent_identity))
         .route("/api/agents/:id/constitution", get(api_agent_constitution))
         .route("/api/agents/:id/verify", post(api_agent_verify))
+        .route("/api/agents/:id/export", get(api_export_agent))
         .layer(cors)
         .with_state(state);
 

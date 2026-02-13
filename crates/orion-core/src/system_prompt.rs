@@ -44,7 +44,7 @@ You can detect common API key formats automatically:
 
 To store a credential, emit a tool_request block:
 ```tool_request
-{"name": "store_secret", "arguments": {"provider": "auto", "key": "THE_KEY"}}
+{"name": "store_provider_key", "arguments": {"provider": "auto", "key": "THE_KEY"}}
 ```
 
 Use `"provider": "auto"` when the key prefix identifies the provider. Use an explicit provider name for ambiguous keys.
@@ -108,12 +108,30 @@ pub struct SkillToolEntry {
     pub tool_name: String,
     pub tool_description: String,
     pub parameters: serde_json::Value,
+    /// Whether all required secrets for this skill are present in the vault.
+    pub ready: bool,
+    /// Names of secrets that are missing (empty when `ready` is true).
+    pub missing_secrets: Vec<String>,
 }
 
 /// Build the dynamic capabilities section based on registered skills.
-fn build_capabilities_section(skill_tools: &[SkillToolEntry]) -> String {
+fn build_capabilities_section(
+    skill_tools: &[SkillToolEntry],
+    stored_providers: &[String],
+) -> String {
+    let mut section = String::new();
+
+    // Vault awareness section
+    if !stored_providers.is_empty() {
+        section.push_str("\n## Your Vault\n\n");
+        section.push_str("Your vault contains keys for: **");
+        section.push_str(&stored_providers.join(", "));
+        section.push_str("**\n");
+    }
+
     if skill_tools.is_empty() {
-        return r#"
+        section.push_str(
+            r#"
 ## Current Capabilities
 
 What you CAN do right now:
@@ -122,42 +140,53 @@ What you CAN do right now:
 - Remember context across conversations
 
 Skills are registered but none are currently loaded. Ask your mentor about enabling skills.
-"#
-        .to_string();
+"#,
+        );
+        return section;
     }
 
-    let mut section = String::from("\n## Available Skills\n\n");
+    section.push_str("\n## Available Skills\n\n");
     section.push_str(
-        "You have the following skills and tools available. To use one, emit a tool_request block:\n\n",
+        "You have the following skills and tools available. To use a ready skill, emit a tool_request block.\n\n",
     );
 
     // Group tools by skill
     let mut skills: std::collections::HashMap<String, Vec<&SkillToolEntry>> =
         std::collections::HashMap::new();
-    let mut skill_meta: std::collections::HashMap<String, (&str, &str)> =
+    let mut skill_meta: std::collections::HashMap<String, (&str, &str, bool, Vec<String>)> =
         std::collections::HashMap::new();
     for entry in skill_tools {
         skills
             .entry(entry.skill_id.clone())
             .or_default()
             .push(entry);
-        skill_meta
-            .entry(entry.skill_id.clone())
-            .or_insert((&entry.skill_name, &entry.trust_tier));
+        skill_meta.entry(entry.skill_id.clone()).or_insert((
+            &entry.skill_name,
+            &entry.trust_tier,
+            entry.ready,
+            entry.missing_secrets.clone(),
+        ));
     }
 
     for (skill_id, tools) in &skills {
-        let (name, tier) = skill_meta.get(skill_id).unwrap();
-        section.push_str(&format!("### {} (trust: {})\n", name, tier));
+        let (name, tier, ready, missing) = skill_meta.get(skill_id).unwrap();
+        let badge = if *ready { "[READY]" } else { "[NEEDS KEYS]" };
+        section.push_str(&format!("### {} {} (trust: {})\n", name, badge, tier));
+        if !ready && !missing.is_empty() {
+            section.push_str(&format!("  Missing secrets: {}\n", missing.join(", ")));
+        }
         for tool in tools {
             section.push_str(&format!(
                 "- **{}**: {}\n",
                 tool.tool_name, tool.tool_description
             ));
-            section.push_str(&format!(
-                "  ```tool_request\n  {{\"name\": \"{}\", \"arguments\": {{}}}}\n  ```\n",
-                tool.tool_name
-            ));
+            // Only show tool_request examples for ready skills
+            if *ready {
+                section.push_str(&format!(
+                    "  ```tool_request\n  {{\"name\": \"{}\", \"arguments\": {{}}}}\n  ```\n",
+                    tool.tool_name
+                ));
+            }
         }
         section.push('\n');
     }
@@ -176,17 +205,19 @@ Skills are registered but none are currently loaded. Ask your mentor about enabl
 /// Falls back to compiled-in constants if a file is missing or unreadable.
 /// Appends the operational awareness section and optionally dynamic skill tools.
 pub fn build_system_prompt(docs_dir: &Path, agent_name: &Option<String>) -> String {
-    build_system_prompt_with_skills(docs_dir, agent_name, &[])
+    build_system_prompt_with_skills(docs_dir, agent_name, &[], &[])
 }
 
 /// Build the full system prompt with dynamic skill tool listing.
 ///
 /// When `skill_tools` is non-empty, the static capabilities section is replaced
 /// with a dynamic listing of available skills and their tools.
+/// `stored_providers` lists provider names currently in the vault (e.g. "openai", "tavily").
 pub fn build_system_prompt_with_skills(
     docs_dir: &Path,
     agent_name: &Option<String>,
     skill_tools: &[SkillToolEntry],
+    stored_providers: &[String],
 ) -> String {
     let soul = read_or_fallback(docs_dir, "soul.md", templates::SOUL_MD);
     let ethics = read_or_fallback(docs_dir, "ethics.md", templates::ETHICS_MD);
@@ -197,7 +228,7 @@ pub fn build_system_prompt_with_skills(
         None => String::new(),
     };
 
-    let capabilities = build_capabilities_section(skill_tools);
+    let capabilities = build_capabilities_section(skill_tools, stored_providers);
 
     format!(
         "{greeting}{soul}\n\n{ethics}\n\n{instincts}\n{operational}\n{capabilities}",
@@ -214,12 +245,14 @@ pub fn build_system_prompt_with_skills(
 ///
 /// Same as the standard system prompt with skills, but appends the agentic
 /// mode instructions that teach the agent to work autonomously.
+/// `stored_providers` lists provider names currently in the vault.
 pub fn build_agentic_system_prompt(
     docs_dir: &Path,
     agent_name: &Option<String>,
     skill_tools: &[SkillToolEntry],
+    stored_providers: &[String],
 ) -> String {
-    let base = build_system_prompt_with_skills(docs_dir, agent_name, skill_tools);
+    let base = build_system_prompt_with_skills(docs_dir, agent_name, skill_tools, stored_providers);
     format!("{}\n{}", base, AGENTIC_PROMPT.trim())
 }
 
@@ -278,7 +311,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
-        let prompt = build_agentic_system_prompt(&tmp, &None, &[]);
+        let prompt = build_agentic_system_prompt(&tmp, &None, &[], &[]);
         assert!(prompt.contains("Agentic Mode"));
         assert!(prompt.contains("ask_mentor"));
         assert!(prompt.contains("task_complete"));
@@ -297,7 +330,62 @@ mod tests {
         let prompt = build_system_prompt(&tmp, &None);
         assert!(prompt.contains("Be yourself"));
         assert!(prompt.contains("Lean forward"));
-        assert!(prompt.contains("store_secret"));
+        assert!(prompt.contains("store_provider_key"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_vault_section_with_providers() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_vault");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let providers = vec!["openai".to_string(), "tavily".to_string()];
+        let prompt = build_system_prompt_with_skills(&tmp, &None, &[], &providers);
+        assert!(prompt.contains("Your Vault"));
+        assert!(prompt.contains("openai, tavily"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_skill_ready_badge() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_badge");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let tools = vec![
+            SkillToolEntry {
+                skill_name: "HTTP".to_string(),
+                skill_id: "http".to_string(),
+                trust_tier: "Verified".to_string(),
+                tool_name: "http_get".to_string(),
+                tool_description: "Make GET request".to_string(),
+                parameters: serde_json::json!({}),
+                ready: true,
+                missing_secrets: vec![],
+            },
+            SkillToolEntry {
+                skill_name: "Web Search".to_string(),
+                skill_id: "web_search".to_string(),
+                trust_tier: "Verified".to_string(),
+                tool_name: "web_search".to_string(),
+                tool_description: "Search the web".to_string(),
+                parameters: serde_json::json!({}),
+                ready: false,
+                missing_secrets: vec!["tavily".to_string()],
+            },
+        ];
+
+        let prompt = build_system_prompt_with_skills(&tmp, &None, &tools, &[]);
+        assert!(prompt.contains("[READY]"));
+        assert!(prompt.contains("[NEEDS KEYS]"));
+        assert!(prompt.contains("Missing secrets: tavily"));
+        // Ready skill should have tool_request example
+        assert!(prompt.contains("\"name\": \"http_get\""));
+        // Not-ready skill should NOT have tool_request example
+        assert!(!prompt.contains("\"name\": \"web_search\""));
 
         let _ = fs::remove_dir_all(&tmp);
     }

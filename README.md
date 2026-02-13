@@ -1,6 +1,6 @@
 # Orion Dock
 
-[![CI](https://github.com/jbcupps/orion/actions/workflows/ci.yml/badge.svg)](https://github.com/jbcupps/orion/actions/workflows/ci.yml)
+[![CI](https://github.com/jbcupps/Orion_dock/actions/workflows/ci.yml/badge.svg)](https://github.com/jbcupps/Orion_dock/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Orion Dock is a Docker-first Rust workspace for Orion's core agent logic and skills runtime.
@@ -14,13 +14,17 @@ Desktop installer and npm-based deployment paths have been retired in favor of c
 - Skill crates under `skills/`
 - Docker development and CI workflow under `docker/`
 - Full stack Compose profile: postgres, ollama, orion-api, frontend
-- GitHub Actions CI: Docker-only fast suite (lint, build, test, frontend typecheck/build in container) and full-stack UAT job
+- GitHub Actions CI (when enabled): Docker-only fast suite (lint, build, test, frontend typecheck/build in container) and full-stack UAT job. CI and Dependabot may be disabled; run `scripts/local-verify` (or `run-uat.ps1` / `dev-stack.ps1`) locally before pushing.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker Desktop (or Docker Engine + Compose v2)
+
+### Environment setup
+
+Copy `example.env` to `.env` and set variables as needed (API keys, `LOCAL_LLM_BASE_URL`, etc.). The file `.env` is gitignored; never commit secrets.
 
 ### Run in Docker
 
@@ -52,6 +56,12 @@ cargo test --workspace --no-fail-fast
 ```
 
 For full-stack UAT (with postgres, orion-api, frontend up): run the container with `UAT_MODE=full` and `DATABASE_URL` set; see `documents/APPLICATION_TEST_PLAN.md`.
+
+## Security (quick reference)
+
+- **Private key:** During birth setup, the Ed25519 private key is shown **once**. Save it securely; it is not stored. See `documents/SECURITY_NOTES.md`.
+- **Non-Windows:** Secret storage uses a plaintext stub on non-Windows platforms (development only). Do not use for production on macOS/Linux until a cross-platform secret store is integrated.
+- **Local LLM URL:** Only `localhost` / `127.0.0.1` / `::1` are allowed to prevent SSRF. Do not point at internal or cloud URLs.
 
 ## Environment Variables
 

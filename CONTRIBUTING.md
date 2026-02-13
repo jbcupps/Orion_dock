@@ -11,8 +11,8 @@ This repository follows a Docker-first development and CI model.
 ## Development Setup
 
 ```bash
-git clone https://github.com/jbcupps/orion.git
-cd orion
+git clone https://github.com/jbcupps/Orion_dock.git
+cd Orion_dock
 
 docker compose -f docker/docker-compose.yml build orion-build
 docker compose -f docker/docker-compose.yml run --rm orion-build
@@ -51,7 +51,7 @@ These scripts execute the same Docker validation path used in CI.
 
 - Fill out the PR template
 - Link related issues when applicable
-- Ensure CI passes
+- Run local verification (see above). GitHub Actions CI and Dependabot may be disabled for this repo; when enabled, ensure CI passes.
 - Avoid unrelated formatting-only churn
 
 ## Security

@@ -107,6 +107,7 @@ pub struct AgenticTask {
     pub steps: Vec<AgenticStep>,
     pub turn: u32,
     pub cancel_tx: mpsc::Sender<()>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Mentor response request body.
@@ -183,9 +184,11 @@ pub struct AgenticLoopConfig {
     pub skill_registry: Arc<SkillRegistry>,
     pub skill_executor: Arc<SkillExecutor>,
     pub skill_tool_entries: Vec<SkillToolEntry>,
+    pub stored_providers: Vec<String>,
     pub event_tx: broadcast::Sender<AgenticEvent>,
     pub cancel_rx: mpsc::Receiver<()>,
     pub task_handle: Arc<Mutex<AgenticTask>>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Run the autonomous agentic loop. Call from `tokio::spawn`.
@@ -194,6 +197,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         &cfg.config.docs_dir,
         &cfg.config.agent_name,
         &cfg.skill_tool_entries,
+        &cfg.stored_providers,
     );
 
     let mut messages: Vec<Message> = vec![
@@ -222,16 +226,27 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
 
     loop {
         if turn >= cfg.max_turns {
+            let summary = format!(
+                "Reached maximum turns limit ({}). Task may be incomplete.",
+                cfg.max_turns
+            );
             let _ = cfg.event_tx.send(AgenticEvent::Done {
-                summary: format!(
-                    "Reached maximum turns limit ({}). Task may be incomplete.",
-                    cfg.max_turns
-                ),
+                summary: summary.clone(),
                 status: "partial".to_string(),
                 turns_used: turn,
                 tool_calls: total_tool_calls,
             });
             update_status(&cfg.task_handle, AgenticTaskStatus::Completed, turn).await;
+            persist_run_summary(
+                &cfg.agent_dir,
+                &cfg.task_id,
+                &cfg.goal,
+                &summary,
+                "partial",
+                turn,
+                total_tool_calls,
+                cfg.started_at,
+            );
             break;
         }
 
@@ -244,6 +259,16 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 tool_calls: total_tool_calls,
             });
             update_status(&cfg.task_handle, AgenticTaskStatus::Cancelled, turn).await;
+            persist_run_summary(
+                &cfg.agent_dir,
+                &cfg.task_id,
+                &cfg.goal,
+                "Task cancelled by mentor.",
+                "cancelled",
+                turn,
+                total_tool_calls,
+                cfg.started_at,
+            );
             break;
         }
 
@@ -256,10 +281,21 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         let response = match router.route(messages.clone()).await {
             Ok(r) => r,
             Err(e) => {
+                let err_msg = format!("LLM call failed: {}", e);
                 let _ = cfg.event_tx.send(AgenticEvent::Error {
-                    message: format!("LLM call failed: {}", e),
+                    message: err_msg.clone(),
                 });
                 update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
+                persist_run_summary(
+                    &cfg.agent_dir,
+                    &cfg.task_id,
+                    &cfg.goal,
+                    &err_msg,
+                    "failed",
+                    turn,
+                    total_tool_calls,
+                    cfg.started_at,
+                );
                 break;
             }
         };
@@ -294,7 +330,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 .to_string();
             let _ = cfg.event_tx.send(AgenticEvent::Done {
                 summary: summary.clone(),
-                status,
+                status: status.clone(),
                 turns_used: turn,
                 tool_calls: total_tool_calls,
             });
@@ -307,8 +343,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 &cfg.task_id,
                 &cfg.goal,
                 &summary,
+                &status,
                 turn,
                 total_tool_calls,
+                cfg.started_at,
             );
             break;
         }
@@ -361,6 +399,16 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                                 tool_calls: total_tool_calls,
                             });
                             update_status(&cfg.task_handle, AgenticTaskStatus::Cancelled, turn).await;
+                            persist_run_summary(
+                                &cfg.agent_dir,
+                                &cfg.task_id,
+                                &cfg.goal,
+                                "Task cancelled (mentor channel closed).",
+                                "cancelled",
+                                turn,
+                                total_tool_calls,
+                                cfg.started_at,
+                            );
                             break;
                         }
                     }
@@ -373,6 +421,16 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                         tool_calls: total_tool_calls,
                     });
                     update_status(&cfg.task_handle, AgenticTaskStatus::Cancelled, turn).await;
+                    persist_run_summary(
+                        &cfg.agent_dir,
+                        &cfg.task_id,
+                        &cfg.goal,
+                        "Task cancelled by mentor.",
+                        "cancelled",
+                        turn,
+                        total_tool_calls,
+                        cfg.started_at,
+                    );
                     break;
                 }
             }
@@ -450,6 +508,16 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                             tool_calls: total_tool_calls,
                         });
                         update_status(&cfg.task_handle, AgenticTaskStatus::Cancelled, turn).await;
+                        persist_run_summary(
+                            &cfg.agent_dir,
+                            &cfg.task_id,
+                            &cfg.goal,
+                            "Task cancelled by mentor.",
+                            "cancelled",
+                            turn,
+                            total_tool_calls,
+                            cfg.started_at,
+                        );
                         return;
                     }
                 };
@@ -584,7 +652,18 @@ fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}... [truncated, {} total chars]", &s[..max_len], s.len())
+        // Find a valid UTF-8 boundary at or before max_len to avoid panics
+        let boundary = s
+            .char_indices()
+            .take_while(|(i, _)| *i <= max_len)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!(
+            "{}... [truncated, {} total chars]",
+            &s[..boundary],
+            s.len()
+        )
     }
 }
 
@@ -633,13 +712,16 @@ async fn record_step(task: &Arc<Mutex<AgenticTask>>, turn: u32, step_type: &str,
 }
 
 /// Persist agentic run to disk for audit trail.
+#[allow(clippy::too_many_arguments)]
 fn persist_run_summary(
     agent_dir: &Path,
     task_id: &str,
     goal: &str,
     summary: &str,
+    status: &str,
     turns: u32,
     tool_calls: u32,
+    started_at: chrono::DateTime<chrono::Utc>,
 ) {
     let runs_dir = agent_dir.join("agentic_runs");
     let _ = std::fs::create_dir_all(&runs_dir);
@@ -648,8 +730,10 @@ fn persist_run_summary(
         "task_id": task_id,
         "goal": goal,
         "summary": summary,
+        "status": status,
         "turns": turns,
         "tool_calls": tool_calls,
+        "started_at": started_at.to_rfc3339(),
         "completed_at": chrono::Utc::now().to_rfc3339(),
     });
 

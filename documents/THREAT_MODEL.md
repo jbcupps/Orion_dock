@@ -59,12 +59,12 @@ MCP Apps render `ui://` resources in the desktop client. A malicious or compromi
 | Control | Status |
 |--------|--------|
 | **Sandboxed iframe** | Implemented. Content is rendered via `srcDoc` in an iframe with restricted `sandbox` (e.g. `allow-scripts allow-same-origin`). No `allow-same-origin` would break many apps; document that same-origin is required and that app content must be from a trusted MCP server. |
-| **CSP** | Tauri/WebView CSP is set in `tauri.conf.json`; limits script/style/connect sources. |
-| **No elevated bridge** | MCP App content is fetched over the existing MCP connection; no separate privileged channel is exposed to the iframe beyond what the frontend already has. |
+| **CSP** | Frontend is a Vite/React SPA; ensure script/style/connect sources are constrained in build and deployment. |
+| **No elevated bridge** | MCP App content is fetched over the existing MCP connection; no separate privileged channel is exposed beyond what the frontend already has. |
 
 ### Abuse cases
 
-- **Script in iframe accesses parent or Tauri APIs:** Mitigated by CSP and iframe sandbox; postMessage bridge should be minimal and not expose sensitive commands.
+- **Script in iframe accesses parent or host APIs:** Mitigated by CSP and iframe sandbox; postMessage bridge should be minimal and not expose sensitive commands.
 - **Malicious server returns HTML that phishes or runs script:** Mitigated by treating MCP Apps as same trust as the MCP server; allowlist servers and use confirmation for sensitive tools.
 
 ## 4. Data exfiltration

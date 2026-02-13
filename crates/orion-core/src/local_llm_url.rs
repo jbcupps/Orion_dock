@@ -77,6 +77,11 @@ pub fn validate_local_llm_url(url_str: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Tests that mutate ALLOWED_LLM_HOSTS must hold this lock to avoid races
+    /// (Rust tests run in parallel within the same process).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_localhost_http() {
@@ -117,12 +122,14 @@ mod tests {
 
     #[test]
     fn test_docker_host_rejected_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("ALLOWED_LLM_HOSTS");
         assert!(validate_local_llm_url("http://ollama:11434").is_err());
     }
 
     #[test]
     fn test_docker_host_allowed_via_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ALLOWED_LLM_HOSTS", "ollama");
         let u = validate_local_llm_url("http://ollama:11434").unwrap();
         assert_eq!(u, "http://ollama:11434");
