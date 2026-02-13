@@ -106,7 +106,9 @@ export default function AgenticPanel({
           agentId,
           result.task_id,
           (eventName, rawData) => {
-            const data = rawData as Record<string, unknown>;
+            // Backend sends {event, data: {…}} via serde tagged enum; unwrap nested payload
+            const envelope = rawData as Record<string, unknown>;
+            const data = (envelope.data ?? envelope) as Record<string, unknown>;
             switch (eventName) {
               case 'thinking':
                 setTurn(data.turn as number);

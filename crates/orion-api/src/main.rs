@@ -3274,7 +3274,7 @@ async fn api_agentic_run(
 /// GET /api/agents/:id/agent/stream?task=<id> — SSE event stream for an agentic task.
 async fn api_agentic_stream(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<AgenticStreamQuery>,
 ) -> Result<
     Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
@@ -3290,6 +3290,12 @@ async fn api_agentic_stream(
 
     let rx = {
         let task = task_arc.lock().await;
+        if task.agent_id != id {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "Task does not belong to this agent".to_string(),
+            ));
+        }
         task.event_tx.subscribe()
     };
 
@@ -3330,7 +3336,7 @@ async fn api_agentic_stream(
 /// POST /api/agents/:id/agent/respond — send mentor response to paused agentic task.
 async fn api_agentic_respond(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<MentorResponseRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3342,6 +3348,12 @@ async fn api_agentic_respond(
     })?;
 
     let mut task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if task.status != AgenticTaskStatus::WaitingForMentor {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -3359,7 +3371,7 @@ async fn api_agentic_respond(
 /// POST /api/agents/:id/agent/confirm — approve or deny a tool confirmation request.
 async fn api_agentic_confirm(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<ConfirmationResponseRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3371,6 +3383,12 @@ async fn api_agentic_confirm(
     })?;
 
     let mut task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if task.status != AgenticTaskStatus::WaitingForConfirmation {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -3388,7 +3406,7 @@ async fn api_agentic_confirm(
 /// POST /api/agents/:id/agent/cancel — cancel a running agentic task.
 async fn api_agentic_cancel(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<CancelRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3400,6 +3418,12 @@ async fn api_agentic_cancel(
     })?;
 
     let task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     if matches!(
         task.status,
         AgenticTaskStatus::Completed | AgenticTaskStatus::Failed | AgenticTaskStatus::Cancelled
@@ -3418,7 +3442,7 @@ async fn api_agentic_cancel(
 /// GET /api/agents/:id/agent/status?task=<id> — check task status.
 async fn api_agentic_status(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<AgenticStreamQuery>,
 ) -> Result<Json<AgenticStatusResponse>, (axum::http::StatusCode, String)> {
     let tasks = state.agentic_tasks.lock().await;
@@ -3430,6 +3454,12 @@ async fn api_agentic_status(
     })?;
 
     let task = task_arc.lock().await;
+    if task.agent_id != id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Task does not belong to this agent".to_string(),
+        ));
+    }
     Ok(Json(AgenticStatusResponse {
         task_id: task.id.clone(),
         goal: task.goal.clone(),
