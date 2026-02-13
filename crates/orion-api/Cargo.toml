@@ -34,7 +34,7 @@ skill-filesystem = { path = "../../skills/skill-filesystem" }
 skill-http = { path = "../../skills/skill-http" }
 skill-shell = { path = "../../skills/skill-shell" }
 skill-web-search = { path = "../../skills/skill-web-search" }
-skill-web-browse = { path = "../../skills/skill-web-browse" }
+skill-web-browse = { path = "../../skills/skill-web-browse", features = ["browser"] }
 skill-perplexity-search = { path = "../../skills/skill-perplexity-search" }
 skill-proton-mail = { path = "../../skills/skill-proton-mail" }
 cron = "0.15.0"

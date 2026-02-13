@@ -41,7 +41,7 @@ use agentic::{
     MentorResponseRequest,
 };
 use orchestration::{
-    assess_significance, append_log_entry, build_id_check_prompt, create_job, decide_action,
+    append_log_entry, assess_significance, build_id_check_prompt, create_job, decide_action,
     delete_job, is_job_due, list_jobs, load_logs, make_mentor_attention_message, save_jobs,
     set_job_enabled, update_job, update_job_after_execution, CreateOrchestrationJobRequest,
     JobLogsQuery, JobRunNowResponse, OrchestrationDecision, OrchestrationJob,
@@ -2180,7 +2180,7 @@ async fn api_operational_chat(
     let redacted_user_message = redact_api_keys(&user_message);
 
     tracing::info!(agent = %id, "operational_chat: sending chat turn");
-    let response = router.route(messages).await.map_err(|e| {
+    let response = router.route(messages.clone()).await.map_err(|e| {
         tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -2204,7 +2204,10 @@ async fn api_operational_chat(
     let mut skill_tool_outputs: Vec<String> = Vec::new();
     let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
     for tr in &tool_requests {
-        if tr.name == "store_secret" || tr.name == "store_provider_key" {
+        if tr.name == "store_secret"
+            || tr.name == "store_provider_key"
+            || tr.name == "store_vault_secret"
+        {
             continue; // handled in the blocking section below
         }
         // Try to match against registered skill tools
@@ -2292,15 +2295,41 @@ async fn api_operational_chat(
         Some(skill_tool_outputs.join("\n\n"))
     };
 
+    // Tool feedback loop: if skill tools produced output, feed results back for ONE follow-up LLM call.
+    // This prevents hallucination — the LLM sees actual tool results and can summarize them accurately.
+    let mut followup_content: Option<String> = None;
+    if let Some(ref output_text) = skill_tool_output_text {
+        let feedback = format!("## Tool Results\n\n{}", output_text);
+        messages.push(orion_capabilities::cognitive::Message::new(
+            "assistant",
+            &clean_content,
+        ));
+        messages.push(orion_capabilities::cognitive::Message::new(
+            "user", &feedback,
+        ));
+
+        match router.route(messages).await {
+            Ok(followup_response) => {
+                let (followup_clean, _) = parse_tool_requests(&followup_response.content);
+                followup_content = Some(followup_clean);
+            }
+            Err(e) => {
+                tracing::warn!("operational_chat: follow-up turn failed: {}", e);
+                // Fall back to original response — no followup_content set
+            }
+        }
+    }
+
     // Blocking 2: execute credential tool requests, persist conversation with redacted content.
     let config_path_2 = config_path.clone();
     let raw_user_message = user_message.clone();
-    let clean_content_clone = clean_content.clone();
+    let final_content = followup_content.as_deref().unwrap_or(&clean_content);
+    let clean_content_clone = final_content.to_string();
 
     let (tool_result, final_providers) = tokio::task::spawn_blocking({
         let chat_path = chat_path.clone();
         let redacted_user = redacted_user_message.clone();
-        let redacted_assistant = redact_api_keys(&clean_content);
+        let redacted_assistant = redact_api_keys(final_content);
         let tools = tool_requests.clone();
         let skill_output_text = skill_tool_output_text.clone();
         move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
@@ -2310,7 +2339,7 @@ async fn api_operational_chat(
                 .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
             let mut tool_executed: Option<OperationalToolResult> = None;
 
-            // Execute store_secret / store_provider_key tool calls from LLM
+            // Execute store_secret / store_provider_key / store_vault_secret tool calls from LLM
             for tr in &tools {
                 if tr.name == "store_secret" || tr.name == "store_provider_key" {
                     let provider = tr
@@ -2336,6 +2365,35 @@ async fn api_operational_chat(
                         }
                         Err(e) => {
                             tracing::warn!("operational_chat: store_secret failed: {}", e);
+                        }
+                    }
+                } else if tr.name == "store_vault_secret" {
+                    let key_name = tr
+                        .arguments
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let value = tr
+                        .arguments
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !key_name.is_empty() && !value.is_empty() {
+                        vault.set_secret(key_name, value);
+                        if let Err(e) = vault.save() {
+                            tracing::warn!(
+                                "operational_chat: store_vault_secret save failed: {}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                key = %key_name,
+                                "operational_chat: stored vault secret"
+                            );
+                            tool_executed = Some(OperationalToolResult {
+                                name: tr.name.clone(),
+                                provider: key_name.to_string(),
+                            });
                         }
                     }
                 }
@@ -3317,7 +3375,10 @@ fn append_operational_notice(agent_dir: &std::path::Path, content: &str) -> Resu
         .map_err(|e| format!("Write operational_chat: {}", e))
 }
 
-async fn run_id_check_for_job(config: &AppConfig, job: &OrchestrationJob) -> Result<String, String> {
+async fn run_id_check_for_job(
+    config: &AppConfig,
+    job: &OrchestrationJob,
+) -> Result<String, String> {
     let router = orion_router::IdEgoRouter::with_provider_auto_detect(
         config.local_llm_base_url.clone(),
         None,
@@ -3425,16 +3486,15 @@ async fn run_orchestration_job_once(
                                 Ok(resp) => task_id = Some(resp.task_id),
                                 Err(e) => {
                                     status = "error".to_string();
-                                    summary = format!(
-                                        "{}\n\nEscalation launch failed: {}",
-                                        summary, e
-                                    );
+                                    summary =
+                                        format!("{}\n\nEscalation launch failed: {}", summary, e);
                                 }
                             }
                         }
                     }
                     OrchestrationDecision::FlagMentor => {
-                        let attention = make_mentor_attention_message(job, significance, &id_output);
+                        let attention =
+                            make_mentor_attention_message(job, significance, &id_output);
                         let _ = append_operational_notice(agent_dir, &attention);
                     }
                 }
@@ -3517,7 +3577,9 @@ async fn run_orchestration_scheduler_loop(state: AppState) {
                 if !due {
                     continue;
                 }
-                match run_orchestration_job_once(&state, &agent_id, &agent_dir, job, "scheduled").await {
+                match run_orchestration_job_once(&state, &agent_id, &agent_dir, job, "scheduled")
+                    .await
+                {
                     Ok(resp) => {
                         tracing::info!(
                             agent = %agent_id,
@@ -3981,16 +4043,15 @@ async fn api_orchestration_job_enable(
     })?;
     let mut jobs =
         list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let updated = set_job_enabled(&mut jobs, &job_id, body.enabled, chrono::Utc::now()).map_err(
-        |e| {
+    let updated =
+        set_job_enabled(&mut jobs, &job_id, body.enabled, chrono::Utc::now()).map_err(|e| {
             let status = if e.contains("not found") {
                 axum::http::StatusCode::NOT_FOUND
             } else {
                 axum::http::StatusCode::BAD_REQUEST
             };
             (status, e)
-        },
-    )?;
+        })?;
     save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(updated))
 }
@@ -4008,7 +4069,10 @@ async fn api_orchestration_job_delete(
     let mut jobs =
         list_jobs(&dir).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !delete_job(&mut jobs, &job_id) {
-        return Err((axum::http::StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Job not found".to_string(),
+        ));
     }
     save_jobs(&dir, &jobs).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -4030,7 +4094,12 @@ async fn api_orchestration_job_run_now(
     let idx = jobs
         .iter()
         .position(|j| j.job_id == job_id)
-        .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "Job not found".to_string(),
+            )
+        })?;
 
     let mut job = jobs.remove(idx);
     let run_result = run_orchestration_job_once(&state, &id, &dir, &mut job, "manual")

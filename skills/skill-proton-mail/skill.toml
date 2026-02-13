@@ -22,8 +22,13 @@ permission = { Network = { Domains = ["mail.proton.me", "smtp.proton.me"] } }
 reason = "IMAP and SMTP for Proton Mail"
 
 [[secrets]]
-name = "imap_password"
+name = "protonmail"
 description = "App password or account password for IMAP login"
+required = true
+
+[[secrets]]
+name = "protonmail_user"
+description = "Email address (e.g. user@proton.me) for IMAP login"
 required = true
 
 [config]

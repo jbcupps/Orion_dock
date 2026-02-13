@@ -232,7 +232,10 @@ pub fn save_jobs(agent_dir: &Path, jobs: &[OrchestrationJob]) -> Result<(), Stri
     std::fs::write(path, content).map_err(|e| format!("Write jobs file: {}", e))
 }
 
-pub fn load_logs(agent_dir: &Path, limit: Option<usize>) -> Result<Vec<OrchestrationJobLogEntry>, String> {
+pub fn load_logs(
+    agent_dir: &Path,
+    limit: Option<usize>,
+) -> Result<Vec<OrchestrationJobLogEntry>, String> {
     let path = logs_file_path(agent_dir);
     if !path.exists() {
         return Ok(Vec::new());
@@ -266,7 +269,8 @@ pub fn append_log_entry(
     let payload = LogsFile { logs };
     let content =
         serde_json::to_string_pretty(&payload).map_err(|e| format!("Serialize logs: {}", e))?;
-    std::fs::write(logs_file_path(agent_dir), content).map_err(|e| format!("Write logs file: {}", e))
+    std::fs::write(logs_file_path(agent_dir), content)
+        .map_err(|e| format!("Write logs file: {}", e))
 }
 
 pub fn validate_cron(expr: &str) -> Result<(), String> {
@@ -546,14 +550,24 @@ mod tests {
 
     #[test]
     fn escalation_decision_for_id_check() {
-        let mut policy = SignificancePolicy::default();
-        policy.flag_high_to_mentor = false;
+        let policy = SignificancePolicy {
+            flag_high_to_mentor: false,
+            ..Default::default()
+        };
         assert_eq!(
-            decide_action(OrchestrationJobMode::IdCheck, SignificanceLevel::High, &policy),
+            decide_action(
+                OrchestrationJobMode::IdCheck,
+                SignificanceLevel::High,
+                &policy
+            ),
             OrchestrationDecision::SpawnAgentic
         );
         assert_eq!(
-            decide_action(OrchestrationJobMode::IdCheck, SignificanceLevel::Low, &policy),
+            decide_action(
+                OrchestrationJobMode::IdCheck,
+                SignificanceLevel::Low,
+                &policy
+            ),
             OrchestrationDecision::SilentLog
         );
     }

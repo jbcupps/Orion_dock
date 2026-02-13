@@ -18,5 +18,5 @@ chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 reqwest = { version = "0.11", features = ["json"] }
-chromiumoxide = { version = "0.8", default-features = false, optional = true }
+chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"], optional = true }
 futures-util = "0.3"

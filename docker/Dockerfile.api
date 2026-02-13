@@ -26,7 +26,10 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     curl \
+    chromium \
     && rm -rf /var/lib/apt/lists/*
+
+ENV CHROME_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY --from=builder /app/target/release/orion-api /app/orion-api
