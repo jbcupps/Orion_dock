@@ -445,24 +445,29 @@ impl WebBrowseSkill {
                 }
                 // Auto: try Chromium then search fallback
                 #[cfg(feature = "browser")]
-                if let Ok(html) = browser::fetch_page_html(&url_str).await {
-                    if let Ok(parsed) = web_fetch::parse_html(&html) {
-                        let formatted = Self::format_parsed(&parsed, &url_str);
-                        let links_json: Vec<serde_json::Value> = parsed
-                            .links
-                            .iter()
-                            .map(|l| serde_json::json!({ "href": l.href, "text": l.text }))
-                            .collect();
-                        return Ok(ToolOutput::success(serde_json::json!({
-                            "formatted": formatted,
-                            "strategy_used": "browser",
-                            "title": parsed.title,
-                            "meta_description": parsed.meta_description,
-                            "body_text": parsed.body_text,
-                            "headings": parsed.headings,
-                            "links": links_json,
-                            "url": url_str
-                        })));
+                match browser::fetch_page_html(&url_str).await {
+                    Ok(html) => {
+                        if let Ok(parsed) = web_fetch::parse_html(&html) {
+                            let formatted = Self::format_parsed(&parsed, &url_str);
+                            let links_json: Vec<serde_json::Value> = parsed
+                                .links
+                                .iter()
+                                .map(|l| serde_json::json!({ "href": l.href, "text": l.text }))
+                                .collect();
+                            return Ok(ToolOutput::success(serde_json::json!({
+                                "formatted": formatted,
+                                "strategy_used": "browser",
+                                "title": parsed.title,
+                                "meta_description": parsed.meta_description,
+                                "body_text": parsed.body_text,
+                                "headings": parsed.headings,
+                                "links": links_json,
+                                "url": url_str
+                            })));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(url = %url_str, error = %e, "Chromium fallback failed, trying search");
                     }
                 }
                 let fallback_query = query.as_deref().unwrap_or(&url_str);
