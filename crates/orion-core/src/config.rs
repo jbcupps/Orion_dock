@@ -101,6 +101,11 @@ pub struct TrinityConfig {
     pub superego_api_key: Option<String>,
 }
 
+/// Central application configuration for an Orion agent, loaded from `config.json`.
+///
+/// Contains paths, LLM settings, routing mode, email accounts, MCP servers, and
+/// birth-stage tracking. Serialized/deserialized with schema versioning for
+/// forward-compatible migrations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Schema version for config migration

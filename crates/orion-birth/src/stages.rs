@@ -12,6 +12,7 @@ use orion_soul_crystallization::{CrystallizationEngine, DepthLevel};
 use std::path::Path;
 use thiserror::Error;
 
+/// The five sequential stages of the agent birth lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BirthStage {
     /// Initial state: generate keypair, present private key to user
@@ -27,6 +28,7 @@ pub enum BirthStage {
 }
 
 impl BirthStage {
+    /// Human-readable status message shown in the UI for this stage.
     pub fn display_message(&self) -> &'static str {
         match self {
             BirthStage::Darkness => "Generating identity...",
@@ -37,6 +39,7 @@ impl BirthStage {
         }
     }
 
+    /// Stage name as persisted in config (e.g. "Darkness", "Genesis").
     pub fn name(&self) -> &'static str {
         match self {
             BirthStage::Darkness => "Darkness",
@@ -47,6 +50,7 @@ impl BirthStage {
         }
     }
 
+    /// Advance to the next stage, or `None` if already at Emergence.
     pub fn next(self) -> Option<BirthStage> {
         match self {
             BirthStage::Darkness => Some(BirthStage::Ignition),
@@ -71,7 +75,8 @@ impl BirthStage {
     }
 }
 
-/// Depth level for Soul Crystallization path (abigail-style).
+/// Depth level for the Soul Crystallization genesis path, controlling how extensive
+/// the psychometric profiling dialogue is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SoulCrystallizationDepth {
     /// ~30 seconds: default template + name/purpose/personality form
@@ -83,6 +88,7 @@ pub enum SoulCrystallizationDepth {
 }
 
 impl SoulCrystallizationDepth {
+    /// Serialization string for config and API usage.
     pub fn as_str(&self) -> &'static str {
         match self {
             SoulCrystallizationDepth::QuickStart => "quick_start",
@@ -177,6 +183,7 @@ impl GenesisPath {
     }
 }
 
+/// Errors that can occur during the birth lifecycle.
 #[derive(Error, Debug)]
 pub enum BirthError {
     #[error("Already born")]

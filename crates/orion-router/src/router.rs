@@ -18,6 +18,7 @@ use std::sync::Arc;
 // Re-export RoutingMode from orion-core for convenience
 pub use orion_core::RoutingMode;
 
+/// Classification result from the Id router: whether a message is routine (stays local) or complex (may escalate to Ego).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteDecision {
     Routine,

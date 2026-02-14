@@ -159,7 +159,7 @@ enum SseEvent {
 enum SseContentBlock {
     #[serde(rename = "text")]
     Text {
-        #[allow(dead_code)]
+        #[allow(dead_code)] // Required for serde deserialization of Anthropic SSE content blocks
         text: String,
     },
     #[serde(rename = "tool_use")]

@@ -22,6 +22,7 @@ use orion_skills::{SkillExecutor, SkillRegistry};
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Request body for starting an autonomous agentic run.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgenticRunRequest {
     pub goal: String,
@@ -37,6 +38,7 @@ fn default_max_turns() -> u32 {
     15
 }
 
+/// Controls how deeply the agentic loop reasons: Auto, ThinkHard, or ThinkHarder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgenticRouterMode {
@@ -46,6 +48,7 @@ pub enum AgenticRouterMode {
     ThinkHarder,
 }
 
+/// Lifecycle state of an in-flight agentic task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgenticTaskStatus {
@@ -106,7 +109,10 @@ pub enum AgenticEvent {
 }
 
 /// Holds the state of a running agentic task.
-#[allow(dead_code)]
+///
+/// Fields are read and mutated via `Arc<Mutex<AgenticTask>>` across the
+/// spawned task and the API handler threads.
+#[allow(dead_code)] // Fields accessed via Arc<Mutex<>> in spawned tasks; compiler cannot trace cross-task reads
 pub struct AgenticTask {
     pub id: String,
     pub agent_id: String,
@@ -184,7 +190,7 @@ pub fn find_skill_for_tool(
 // Core agentic loop
 // ---------------------------------------------------------------------------
 
-/// Configuration for the agentic loop.
+/// Configuration bundle passed to [`run_agentic_loop`] when spawning an autonomous task.
 pub struct AgenticLoopConfig {
     pub task_id: String,
     pub goal: String,
