@@ -1,3 +1,11 @@
+//! Birth lifecycle state machine and interactive chat runtime.
+//!
+//! Implements the five-stage birth sequence (Darkness → Ignition → Connectivity
+//! → Genesis → Emergence) that bootstraps a new Orion agent with cryptographic
+//! identity, LLM configuration, API keys, and a discovered soul. The [`chat`]
+//! module drives the conversational turns, and [`stages`] contains the
+//! [`BirthOrchestrator`] plus the modular [`GenesisPath`] dispatch.
+
 pub mod chat;
 pub mod prompts;
 pub mod stages;

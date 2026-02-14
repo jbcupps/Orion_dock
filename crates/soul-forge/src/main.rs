@@ -95,6 +95,8 @@ fn main() -> Result<()> {
                                 app.handle_selection();
                             }
                             AppState::Crystallize => {
+                                // eprintln! may not be visible in alternate screen mode, but
+                                // the error is non-fatal — we proceed to Done regardless.
                                 app.save_soul()
                                     .unwrap_or_else(|e| eprintln!("Error saving soul: {}", e));
                                 app.next_stage();

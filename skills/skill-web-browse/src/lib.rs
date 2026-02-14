@@ -317,7 +317,7 @@ impl WebBrowseSkill {
         max_results: u32,
     ) -> SkillResult<ToolOutput> {
         if strategy == BrowseStrategy::BrowserOnly {
-            #[allow(unused_variables)]
+            #[allow(unused_variables)] // Used only when the "browser" feature is enabled
             let url_str = url
                 .as_deref()
                 .ok_or_else(|| SkillError::ToolFailed("browser_only requires 'url'".to_string()))?;

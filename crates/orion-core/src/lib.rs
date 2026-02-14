@@ -1,3 +1,11 @@
+//! Core infrastructure for the Orion agent platform.
+//!
+//! Provides foundational building blocks shared across all Orion crates:
+//! configuration management ([`AppConfig`]), Ed25519 cryptographic identity
+//! ([`keyring`]), API-key secrets vault ([`SecretsVault`]), constitutional
+//! document signing and verification ([`Verifier`]), system-prompt assembly,
+//! and soul/ethics/instinct templates.
+
 pub mod config;
 pub mod document;
 pub mod dpapi;

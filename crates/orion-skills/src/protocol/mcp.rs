@@ -39,9 +39,9 @@ struct JsonRpcRequest {
 /// JSON-RPC 2.0 response (result).
 #[derive(Debug, Deserialize)]
 struct JsonRpcResult {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Required for serde deserialization of JSON-RPC 2.0 envelope
     jsonrpc: Option<String>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Required for serde deserialization of JSON-RPC 2.0 envelope
     id: Option<u64>,
     #[serde(default)]
     result: Option<serde_json::Value>,

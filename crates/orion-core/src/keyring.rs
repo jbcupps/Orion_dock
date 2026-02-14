@@ -18,12 +18,18 @@ struct StoredKeysV1 {
     mentor_secret: Vec<u8>,
 }
 
+/// DPAPI-protected keyring for the mentor's Ed25519 signing identity.
+///
+/// Manages generation, persistence (encrypted via DPAPI on Windows, plaintext
+/// fallback on Linux/Docker), and cryptographic signing/verification of data
+/// using the mentor's keypair.
 pub struct Keyring {
     mentor_keypair: SigningKey,
     storage_path: PathBuf,
 }
 
 impl Keyring {
+    /// Generate a fresh Ed25519 mentor keypair for a new installation.
     pub fn generate(storage_path: PathBuf) -> Result<Self> {
         let mentor_keypair = SigningKey::generate(&mut OsRng);
         Ok(Self {
@@ -32,6 +38,8 @@ impl Keyring {
         })
     }
 
+    /// Load an existing mentor keypair from encrypted storage (`keys.bin`).
+    /// Supports both V1 (with install pubkey) and V2 (mentor-only) formats.
     pub fn load(storage_path: PathBuf) -> Result<Self> {
         let keys_file = storage_path.join("keys.bin");
         let encrypted = std::fs::read(&keys_file)?;
@@ -60,6 +68,7 @@ impl Keyring {
         })
     }
 
+    /// Persist the mentor keypair to encrypted storage (`keys.bin`).
     pub fn save(&self) -> Result<()> {
         let stored = StoredKeysV2 {
             mentor_secret: self.mentor_keypair.to_bytes().to_vec(),
@@ -72,20 +81,24 @@ impl Keyring {
         Ok(())
     }
 
+    /// Sign arbitrary data with the mentor's Ed25519 private key.
     pub fn sign_with_mentor(&self, data: &[u8]) -> Signature {
         self.mentor_keypair.sign(data)
     }
 
+    /// Verify a signature against a public key and the original data.
     pub fn verify_signature(pubkey: &VerifyingKey, data: &[u8], signature: &Signature) -> bool {
         pubkey.verify(data, signature).is_ok()
     }
 }
 
 impl Keyring {
+    /// Encrypt raw bytes via DPAPI (Windows) or plaintext fallback.
     pub fn encrypt_bytes(data: &[u8]) -> Result<Vec<u8>> {
         dpapi_encrypt(data)
     }
 
+    /// Decrypt raw bytes previously encrypted via [`Self::encrypt_bytes`].
     pub fn decrypt_bytes(data: &[u8]) -> Result<Vec<u8>> {
         dpapi_decrypt(data)
     }
@@ -95,11 +108,16 @@ impl Keyring {
 // Master Key Generation (for Hive identity signing)
 // ============================================================================
 
+/// Result of generating a new Hive master signing key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MasterKeyResult {
     pub master_key_path: PathBuf,
 }
 
+/// Generate a new Ed25519 master key for the Hive and persist it (DPAPI-encrypted).
+///
+/// The master key signs per-agent public keys so agents can prove membership
+/// in the same Hive installation.
 pub fn generate_master_key(data_dir: &Path) -> Result<MasterKeyResult> {
     let signing_key = SigningKey::generate(&mut OsRng);
     std::fs::create_dir_all(data_dir)?;
@@ -113,6 +131,7 @@ pub fn generate_master_key(data_dir: &Path) -> Result<MasterKeyResult> {
     Ok(MasterKeyResult { master_key_path })
 }
 
+/// Load an existing master key from its encrypted file on disk.
 pub fn load_master_key(path: &Path) -> Result<SigningKey> {
     let encrypted = std::fs::read(path)?;
     let decrypted = dpapi_decrypt(&encrypted)?;
@@ -126,11 +145,13 @@ pub fn load_master_key(path: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&key_bytes))
 }
 
+/// Sign an agent's public key with the Hive master key (proves Hive membership).
 pub fn sign_agent_key(master_key: &SigningKey, agent_pubkey: &VerifyingKey) -> Vec<u8> {
     let signature = master_key.sign(agent_pubkey.as_bytes());
     signature.to_bytes().to_vec()
 }
 
+/// Verify that an agent's public key was signed by the Hive master key.
 pub fn verify_agent_signature(
     master_pubkey: &VerifyingKey,
     agent_pubkey: &VerifyingKey,
@@ -153,12 +174,17 @@ struct MasterKeyStored {
 // External Signing Keypair Generation (for constitutional document signing)
 // ============================================================================
 
+/// Result of generating an external Ed25519 keypair for constitutional document signing.
+///
+/// The private key is returned as base64 and shown to the user exactly once.
+/// The public key is persisted to `external_pubkey.bin` for later verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalKeypairResult {
     pub private_key_base64: String,
     pub public_key_path: PathBuf,
 }
 
+/// Metadata stored alongside a signed constitutional document (`.sig` file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureMetadata {
     pub signature: String,
@@ -166,6 +192,10 @@ pub struct SignatureMetadata {
     pub signed_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Generate an Ed25519 keypair for constitutional document signing (Darkness stage).
+///
+/// Persists the public key to `external_pubkey.bin` and returns the private key
+/// as base64 so the user can save it. The private key is never stored on disk.
 pub fn generate_external_keypair(data_dir: &Path) -> Result<ExternalKeypairResult> {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
@@ -179,6 +209,7 @@ pub fn generate_external_keypair(data_dir: &Path) -> Result<ExternalKeypairResul
     })
 }
 
+/// Sign a single document using the format `{doc_name}|{tier}|{content}`.
 pub fn sign_document(
     signing_key: &SigningKey,
     doc_name: &str,
@@ -194,6 +225,8 @@ pub fn sign_document(
     }
 }
 
+/// Sign all three constitutional documents (soul.md, ethics.md, instincts.md)
+/// and write their `.sig` files. Called during the Emergence stage.
 pub fn sign_constitutional_documents(signing_key: &SigningKey, docs_dir: &Path) -> Result<()> {
     let docs = ["soul.md", "ethics.md", "instincts.md"];
     for doc_name in docs {
@@ -250,6 +283,7 @@ pub fn delete_signing_key(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Parse a base64-encoded Ed25519 private key string into a [`SigningKey`].
 pub fn parse_private_key(base64_key: &str) -> Result<SigningKey> {
     let bytes = BASE64
         .decode(base64_key)

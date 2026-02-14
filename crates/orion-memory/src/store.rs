@@ -7,6 +7,7 @@ use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Retention tier for a memory entry, from short-lived to permanent.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemoryWeight {
     Ephemeral,
@@ -24,6 +25,7 @@ impl MemoryWeight {
     }
 }
 
+/// A single memory record stored by an agent (chat turn, birth record, etc.).
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub id: String,
@@ -33,6 +35,7 @@ pub struct Memory {
 }
 
 impl Memory {
+    /// Create a short-lived ephemeral memory (e.g. a single chat turn).
     pub fn ephemeral(content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -42,6 +45,7 @@ impl Memory {
         }
     }
 
+    /// Create a medium-retention distilled memory (e.g. summarized conversation).
     pub fn distilled(content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -51,6 +55,7 @@ impl Memory {
         }
     }
 
+    /// Create a permanent crystallized memory (e.g. birth record, core identity fact).
     pub fn crystallized(content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -61,6 +66,7 @@ impl Memory {
     }
 }
 
+/// Errors that can occur during memory store operations.
 #[derive(Error, Debug)]
 pub enum StoreError {
     #[error("SQLite error: {0}")]

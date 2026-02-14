@@ -53,6 +53,7 @@ fn logs_file_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("orchestration_job_logs.json")
 }
 
+/// Execution mode for a scheduled orchestration job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationJobMode {
@@ -61,6 +62,7 @@ pub enum OrchestrationJobMode {
     AgenticRun,
 }
 
+/// Assessed significance of an orchestration job's output, used to drive escalation decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SignificanceLevel {
@@ -70,6 +72,7 @@ pub enum SignificanceLevel {
     High,
 }
 
+/// Action taken after evaluating a job's significance level against its policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationDecision {
@@ -78,6 +81,7 @@ pub enum OrchestrationDecision {
     FlagMentor,
 }
 
+/// Per-job policy controlling keyword-based significance assessment and escalation behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignificancePolicy {
     #[serde(default)]
@@ -101,6 +105,7 @@ impl Default for SignificancePolicy {
     }
 }
 
+/// A scheduled orchestration job definition, persisted to `orchestration_jobs.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationJob {
     pub job_id: String,
@@ -127,6 +132,7 @@ pub struct OrchestrationJob {
     pub last_significance: Option<SignificanceLevel>,
 }
 
+/// A single execution log entry for an orchestration job, persisted to `orchestration_job_logs.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationJobLogEntry {
     pub entry_id: String,
@@ -143,6 +149,7 @@ pub struct OrchestrationJobLogEntry {
     pub task_id: Option<String>,
 }
 
+/// Request body for creating a new orchestration job.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateOrchestrationJobRequest {
     pub name: String,
@@ -155,6 +162,7 @@ pub struct CreateOrchestrationJobRequest {
     pub significance_policy: SignificancePolicy,
 }
 
+/// Request body for partially updating an existing orchestration job.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateOrchestrationJobRequest {
     pub name: Option<String>,
@@ -165,16 +173,19 @@ pub struct UpdateOrchestrationJobRequest {
     pub significance_policy: Option<SignificancePolicy>,
 }
 
+/// Request body for enabling or disabling an orchestration job.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetOrchestrationJobEnabledRequest {
     pub enabled: bool,
 }
 
+/// Query parameters for listing orchestration job logs.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JobLogsQuery {
     pub limit: Option<usize>,
 }
 
+/// Response returned after manually triggering a job via run-now.
 #[derive(Debug, Clone, Serialize)]
 pub struct JobRunNowResponse {
     pub job_id: String,
@@ -186,11 +197,13 @@ pub struct JobRunNowResponse {
     pub summary: String,
 }
 
+/// API response wrapper for a list of orchestration jobs.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrchestrationJobsResponse {
     pub jobs: Vec<OrchestrationJob>,
 }
 
+/// API response wrapper for a list of orchestration job log entries.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrchestrationLogsResponse {
     pub logs: Vec<OrchestrationJobLogEntry>,
@@ -206,6 +219,7 @@ struct LogsFile {
     logs: Vec<OrchestrationJobLogEntry>,
 }
 
+/// Load all orchestration jobs from the agent's `orchestration_jobs.json` file.
 pub fn list_jobs(agent_dir: &Path) -> Result<Vec<OrchestrationJob>, String> {
     let path = jobs_file_path(agent_dir);
     if !path.exists() {
@@ -222,6 +236,7 @@ pub fn list_jobs(agent_dir: &Path) -> Result<Vec<OrchestrationJob>, String> {
         .map_err(|e| format!("Parse jobs file: {}", e))
 }
 
+/// Persist the full list of orchestration jobs to disk.
 pub fn save_jobs(agent_dir: &Path, jobs: &[OrchestrationJob]) -> Result<(), String> {
     let path = jobs_file_path(agent_dir);
     let payload = JobsFile {
@@ -232,6 +247,7 @@ pub fn save_jobs(agent_dir: &Path, jobs: &[OrchestrationJob]) -> Result<(), Stri
     std::fs::write(path, content).map_err(|e| format!("Write jobs file: {}", e))
 }
 
+/// Load orchestration job execution logs, optionally limited to `limit` most recent entries.
 pub fn load_logs(
     agent_dir: &Path,
     limit: Option<usize>,
@@ -256,6 +272,7 @@ pub fn load_logs(
     Ok(logs)
 }
 
+/// Prepend a new log entry and truncate the log to `keep_last` entries.
 pub fn append_log_entry(
     agent_dir: &Path,
     entry: OrchestrationJobLogEntry,
@@ -273,12 +290,14 @@ pub fn append_log_entry(
         .map_err(|e| format!("Write logs file: {}", e))
 }
 
+/// Validate a cron expression string. Returns `Err` with a human-readable message on failure.
 pub fn validate_cron(expr: &str) -> Result<(), String> {
     Schedule::from_str(expr)
         .map(|_| ())
         .map_err(|e| format!("Invalid cron expression '{}': {}", expr, e))
 }
 
+/// Compute the next UTC datetime at which a cron expression fires after `from`.
 pub fn next_run_at(expr: &str, from: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
     let schedule = Schedule::from_str(expr)
         .map_err(|e| format!("Invalid cron expression '{}': {}", expr, e))?;
@@ -289,6 +308,7 @@ pub fn next_run_at(expr: &str, from: DateTime<Utc>) -> Result<DateTime<Utc>, Str
         .ok_or_else(|| "Cron expression does not yield a future run".to_string())
 }
 
+/// Check whether a job is due to run at or before `now`, based on its cron schedule and last run time.
 pub fn is_job_due(job: &OrchestrationJob, now: DateTime<Utc>) -> Result<bool, String> {
     let schedule = Schedule::from_str(&job.cron)
         .map_err(|e| format!("Invalid cron expression '{}': {}", job.cron, e))?;
@@ -300,6 +320,10 @@ pub fn is_job_due(job: &OrchestrationJob, now: DateTime<Utc>) -> Result<bool, St
     Ok(next.map(|run_at| run_at <= now).unwrap_or(false))
 }
 
+/// Assess the significance of job output text by scanning for keyword matches in the policy.
+///
+/// Checks high-severity keywords first (falls back to built-in defaults if the policy list
+/// is empty), then medium keywords. Returns [`SignificanceLevel::Low`] if no keywords match.
 pub fn assess_significance(text: &str, policy: &SignificancePolicy) -> SignificanceLevel {
     let normalized = text.to_lowercase();
 
@@ -338,6 +362,7 @@ pub fn assess_significance(text: &str, policy: &SignificancePolicy) -> Significa
     SignificanceLevel::Low
 }
 
+/// Decide what action to take given the job mode, assessed significance, and escalation policy.
 pub fn decide_action(
     mode: OrchestrationJobMode,
     significance: SignificanceLevel,
@@ -365,6 +390,7 @@ pub fn decide_action(
     }
 }
 
+/// Create a new orchestration job, validate inputs, and append it to the jobs list.
 pub fn create_job(
     jobs: &mut Vec<OrchestrationJob>,
     request: CreateOrchestrationJobRequest,
@@ -398,6 +424,7 @@ pub fn create_job(
     Ok(job)
 }
 
+/// Apply a partial update to an existing job, re-validating cron and recomputing next_run_at.
 pub fn update_job(
     jobs: &mut [OrchestrationJob],
     job_id: &str,
@@ -443,6 +470,7 @@ pub fn update_job(
     Ok(job.clone())
 }
 
+/// Toggle a job's enabled state and update its timestamps.
 pub fn set_job_enabled(
     jobs: &mut [OrchestrationJob],
     job_id: &str,
@@ -459,12 +487,14 @@ pub fn set_job_enabled(
     Ok(job.clone())
 }
 
+/// Remove a job by ID. Returns `true` if a job was actually removed.
 pub fn delete_job(jobs: &mut Vec<OrchestrationJob>, job_id: &str) -> bool {
     let before = jobs.len();
     jobs.retain(|j| j.job_id != job_id);
     jobs.len() != before
 }
 
+/// Update a job's post-execution metadata (last run time, significance, status, next run).
 pub fn update_job_after_execution(
     job: &mut OrchestrationJob,
     now: DateTime<Utc>,
@@ -478,6 +508,7 @@ pub fn update_job_after_execution(
     job.next_run_at = next_run_at(&job.cron, now).ok();
 }
 
+/// Build the system prompt for a lightweight Id-check job execution.
 pub fn build_id_check_prompt(job: &OrchestrationJob) -> String {
     format!(
         "You are Id running a lightweight scheduled background check.\n\
@@ -492,6 +523,7 @@ pub fn build_id_check_prompt(job: &OrchestrationJob) -> String {
     )
 }
 
+/// Format an alert message for the mentor when a job detects high significance.
 pub fn make_mentor_attention_message(
     job: &OrchestrationJob,
     significance: SignificanceLevel,
