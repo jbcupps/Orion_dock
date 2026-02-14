@@ -258,6 +258,7 @@ See `example.env` for the full list. Key variables:
 | `BIRTH_MODEL` | Model for birth stages (default: `qwen2.5:3b-instruct`) |
 | `ORION_DATA_DIR` | Agent data directory |
 | `EXTERNAL_PUBKEY_PATH` | Explicit public key path override |
+| `ORION_MASTER_KEY` | Encrypts secrets on Linux/macOS/Docker (ChaCha20-Poly1305). Without it, secrets are plaintext. |
 | `MCP_SERVER_URLS` | Comma-separated MCP server URLs |
 | `VITE_API_URL` | Frontend API base URL (empty = use proxy) |
 

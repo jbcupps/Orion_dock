@@ -238,6 +238,28 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     )
     .await;
 
+    // Pre-flight: verify at least one LLM is reachable before entering the loop.
+    if let Err(e) = router.heartbeat().await {
+        let err_msg = format!("LLM health check failed before starting task: {}", e);
+        tracing::error!("{}", err_msg);
+        let _ = cfg.event_tx.send(AgenticEvent::Error {
+            message: err_msg.clone(),
+        });
+        update_status(&cfg.task_handle, AgenticTaskStatus::Failed, 0).await;
+        persist_run_summary(
+            &cfg.agent_dir,
+            &cfg.task_id,
+            &cfg.goal,
+            &cfg.run_source,
+            &err_msg,
+            "failed",
+            0,
+            0,
+            cfg.started_at,
+        );
+        return;
+    }
+
     let mut turn: u32 = 0;
     let mut total_tool_calls: u32 = 0;
 
@@ -294,7 +316,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         turn += 1;
 
         // Trim context if conversation is getting long
-        trim_context(&mut messages, context_window_pairs(cfg.router_mode));
+        trim_context(&mut messages, context_token_budget(cfg.router_mode));
 
         // LLM call
         let response = match router.route(messages.clone()).await {
@@ -648,27 +670,48 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-/// Trim conversation history to keep it within bounds while preserving
+/// Trim conversation history to stay within a token budget while preserving
 /// the system prompt and original goal message.
-pub fn trim_context(messages: &mut Vec<Message>, max_pairs: usize) {
-    // Keep: system (index 0), goal (index 1), then last N*2 messages
+pub fn trim_context(messages: &mut Vec<Message>, max_tokens: usize) {
     let keep_prefix = 2; // system + goal
-    let max_body = max_pairs * 2;
-
-    if messages.len() <= keep_prefix + max_body {
+    if messages.len() <= keep_prefix {
         return;
     }
 
-    let trim_count = messages.len() - keep_prefix - max_body;
+    let prefix_tokens: usize = messages[..keep_prefix]
+        .iter()
+        .map(|m| estimate_tokens(&m.content))
+        .sum();
+
+    let available = max_tokens.saturating_sub(prefix_tokens);
+
+    // Count from the end: keep as many recent messages as fit in the budget.
+    let mut tail_tokens = 0;
+    let mut keep_from = messages.len();
+    for i in (keep_prefix..messages.len()).rev() {
+        let msg_tokens = estimate_tokens(&messages[i].content);
+        if tail_tokens + msg_tokens > available {
+            break;
+        }
+        tail_tokens += msg_tokens;
+        keep_from = i;
+    }
+
+    if keep_from <= keep_prefix {
+        return; // everything fits
+    }
+
+    let trim_count = keep_from - keep_prefix;
+    let trimmed_tokens: usize = messages[keep_prefix..keep_from]
+        .iter()
+        .map(|m| estimate_tokens(&m.content))
+        .sum();
     let trimmed_summary = format!(
-        "[Context trimmed: {} earlier messages removed to save context window]",
-        trim_count
+        "[Context trimmed: {} earlier messages (~{} tokens) removed to save context window]",
+        trim_count, trimmed_tokens
     );
 
-    // Remove the middle section
-    messages.drain(keep_prefix..keep_prefix + trim_count);
-
-    // Insert a summary message at position 2
+    messages.drain(keep_prefix..keep_from);
     messages.insert(keep_prefix, Message::new("user", &trimmed_summary));
 }
 
@@ -715,11 +758,19 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     (found_name, found_key)
 }
 
-fn context_window_pairs(mode: AgenticRouterMode) -> usize {
+/// Estimate token count for a text string using a character-based heuristic.
+/// ~4 characters per token is a standard approximation for English text,
+/// plus a fixed overhead per message for role/formatting.
+fn estimate_tokens(text: &str) -> usize {
+    (text.len() / 4) + 4
+}
+
+/// Return a token budget for the agentic context window based on router mode.
+fn context_token_budget(mode: AgenticRouterMode) -> usize {
     match mode {
-        AgenticRouterMode::Auto => 20,
-        AgenticRouterMode::ThinkHard => 28,
-        AgenticRouterMode::ThinkHarder => 36,
+        AgenticRouterMode::Auto => 16_000,
+        AgenticRouterMode::ThinkHard => 24_000,
+        AgenticRouterMode::ThinkHarder => 32_000,
     }
 }
 
@@ -846,26 +897,35 @@ mod tests {
             Message::new("assistant", "a1"),
             Message::new("user", "u1"),
         ];
-        trim_context(&mut msgs, 20);
+        // Large budget — everything fits
+        trim_context(&mut msgs, 16_000);
         assert_eq!(msgs.len(), 4);
     }
 
     #[test]
-    fn test_trim_context_removes_middle() {
+    fn test_trim_context_removes_by_token_budget() {
         let mut msgs = vec![Message::new("system", "sys"), Message::new("user", "goal")];
-        // Add 50 message pairs (100 messages)
-        for i in 0..50 {
-            msgs.push(Message::new("assistant", format!("a{}", i)));
-            msgs.push(Message::new("user", format!("u{}", i)));
+        // Add 50 message pairs with ~100 tokens each (400 chars / 4 + 4 overhead)
+        for _ in 0..50 {
+            msgs.push(Message::new("assistant", "a".repeat(400)));
+            msgs.push(Message::new("user", "u".repeat(400)));
         }
         assert_eq!(msgs.len(), 102);
 
-        trim_context(&mut msgs, 8);
-        // Should be: system + goal + trim_notice + last 16 messages = 19
-        assert_eq!(msgs.len(), 19);
+        // Small budget — should trim most messages
+        trim_context(&mut msgs, 2000);
+        assert!(msgs.len() < 102);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "goal");
         assert!(msgs[2].content.contains("Context trimmed"));
+        assert!(msgs[2].content.contains("tokens"));
+    }
+
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(""), 4); // just overhead
+        assert_eq!(estimate_tokens("hello world"), 6); // 11/4 + 4 = 6
+        assert_eq!(estimate_tokens(&"x".repeat(400)), 104); // 400/4 + 4
     }
 
     #[test]
