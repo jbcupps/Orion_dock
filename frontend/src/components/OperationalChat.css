@@ -143,3 +143,85 @@
 .operational-chat-send {
   flex-shrink: 0;
 }
+
+.operational-chat-composer {
+  border: 1px dashed var(--border, #d7d7d7);
+  border-radius: 8px;
+  padding: 0.65rem;
+  background: var(--bg, #fff);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.operational-chat-composer.drag-active {
+  border-color: var(--accent, #4e7be6);
+  background: color-mix(in srgb, var(--bg, #fff) 90%, var(--accent, #4e7be6) 10%);
+}
+
+.operational-chat-file-input {
+  display: none;
+}
+
+.operational-chat-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.operational-chat-attachment-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--card-bg, #f8f8f8);
+  padding: 0.45rem 0.55rem;
+}
+
+.operational-chat-attachment-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.operational-chat-attachment-name {
+  font-size: 0.84rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operational-chat-attachment-meta {
+  font-size: 0.72rem;
+  color: var(--muted, #666);
+}
+
+.operational-chat-attachment-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted, #666);
+  font-size: 1rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+}
+
+.operational-chat-attachment-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.operational-chat-uploading,
+.operational-chat-drop-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted, #666);
+}
+
+.operational-chat-attach {
+  flex-shrink: 0;
+}

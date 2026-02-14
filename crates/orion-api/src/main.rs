@@ -1,8 +1,9 @@
 mod agentic;
+mod chat_attachments;
 mod orchestration;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
@@ -39,6 +40,11 @@ use agentic::{
     AgenticEvent, AgenticLoopConfig, AgenticRunRequest, AgenticRunResponse, AgenticStatusResponse,
     AgenticTask, AgenticTaskStatus, CancelRequest, ConfirmationResponseRequest,
     MentorResponseRequest,
+};
+use chat_attachments::{
+    build_attachment_context_block, build_attachment_storage_note, load_attachment_context,
+    normalize_attachment_ids, should_block_tool_execution_for_attachments,
+    store_uploaded_attachments, ChatAttachmentUploadResponse, UploadedAttachmentInput,
 };
 use orchestration::{
     append_log_entry, assess_significance, build_id_check_prompt, create_job, decide_action,
@@ -116,6 +122,19 @@ fn agent_config_path(id: &str) -> Option<PathBuf> {
 
 fn agent_dir(id: &str) -> Option<PathBuf> {
     data_root().map(|root| root.join("identities").join(id))
+}
+
+fn resolve_birth_timestamp(config: &AppConfig, agent_root: &std::path::Path) -> Option<String> {
+    if let Some(ts) = config.birth_timestamp.clone() {
+        return Some(ts);
+    }
+    if !config.birth_complete {
+        return None;
+    }
+
+    let soul_path = agent_root.join("docs").join("soul.md");
+    let modified = std::fs::metadata(soul_path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
 }
 
 /// Persist genesis path for an agent so it can be restored when loading orchestrator.
@@ -362,6 +381,41 @@ struct AgentExport {
     genesis_path: Option<serde_json::Value>,
     chat_history: serde_json::Value,
     agentic_runs: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestration: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ImportedAgentExport {
+    export_version: u32,
+    #[serde(default)]
+    agent: serde_json::Value,
+    #[serde(default)]
+    identity: serde_json::Value,
+    #[serde(default)]
+    keychain: serde_json::Value,
+    #[serde(default)]
+    constitution: serde_json::Value,
+    #[serde(default)]
+    genesis_path: Option<serde_json::Value>,
+    #[serde(default)]
+    chat_history: serde_json::Value,
+    #[serde(default)]
+    agentic_runs: Vec<serde_json::Value>,
+    #[serde(default)]
+    orchestration: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ImportAgentRequest {
+    export: ImportedAgentExport,
+    private_key_base64: String,
+}
+
+#[derive(Serialize)]
+struct ImportAgentResponse {
+    id: String,
+    name: String,
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -454,7 +508,10 @@ async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::S
         let config_path = agent_dir.join("config.json");
         let (birth_complete, birth_date) = if config_path.exists() {
             match AppConfig::load(&config_path) {
-                Ok(cfg) => (cfg.birth_complete, cfg.birth_timestamp.clone()),
+                Ok(cfg) => (
+                    cfg.birth_complete,
+                    resolve_birth_timestamp(&cfg, &agent_dir),
+                ),
                 Err(_) => (false, None),
             }
         } else {
@@ -1929,6 +1986,8 @@ struct OperationalChatRequest {
     message: String,
     #[serde(default)]
     router_mode: Option<agentic::AgenticRouterMode>,
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1940,6 +1999,8 @@ struct OperationalChatResponseBody {
     stored_providers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_log: Option<Vec<OperationalToolLogEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_notice: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1962,6 +2023,54 @@ fn strip_tool_result_block(content: &str) -> String {
         .split_once("\n\n[Tool Result]\n")
         .map(|(clean, _)| clean.to_string())
         .unwrap_or_else(|| content.to_string())
+}
+
+/// POST /api/agents/:id/chat/attachments — upload and parse attachments for operational chat.
+async fn api_operational_chat_upload_attachments(
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<ChatAttachmentUploadResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let mut uploads: Vec<UploadedAttachmentInput> = Vec::new();
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Read multipart field: {}", e),
+        )
+    })? {
+        let Some(file_name) = field.file_name().map(|s| s.to_string()) else {
+            continue;
+        };
+        let content_type = field.content_type().map(|s| s.to_string());
+        let bytes = field.bytes().await.map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Read uploaded file bytes: {}", e),
+            )
+        })?;
+        uploads.push(UploadedAttachmentInput {
+            file_name,
+            content_type,
+            bytes: bytes.to_vec(),
+        });
+    }
+
+    let attachments = store_uploaded_attachments(&dir, uploads).map_err(|e| {
+        let status = if e.starts_with("upload validation:") {
+            axum::http::StatusCode::BAD_REQUEST
+        } else {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, e)
+    })?;
+
+    Ok(Json(ChatAttachmentUploadResponse { attachments }))
 }
 
 /// GET /api/agents/:id/chat/history — return persisted operational chat messages.
@@ -2046,14 +2155,46 @@ async fn api_operational_chat(
     })?;
 
     let user_message = body.message.trim().to_string();
-    if user_message.is_empty() {
+    let attachment_ids = normalize_attachment_ids(&body.attachment_ids);
+    if user_message.is_empty() && attachment_ids.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            "message is required".to_string(),
+            "message or attachment_ids is required".to_string(),
         ));
     }
 
     let chat_path = dir.join("operational_chat.json");
+    let attachment_context_entries = if attachment_ids.is_empty() {
+        Vec::new()
+    } else {
+        load_attachment_context(&dir, &attachment_ids)
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?
+    };
+    let has_attachments = !attachment_context_entries.is_empty();
+    let attachment_context_block = if has_attachments {
+        Some(build_attachment_context_block(&attachment_context_entries))
+    } else {
+        None
+    };
+    let message_for_model = if let Some(block) = &attachment_context_block {
+        if user_message.is_empty() {
+            block.clone()
+        } else {
+            format!("{}\n\n{}", user_message, block)
+        }
+    } else {
+        user_message.clone()
+    };
+    let user_message_for_storage =
+        if let Some(note) = build_attachment_storage_note(&attachment_context_entries) {
+            if user_message.is_empty() {
+                note
+            } else {
+                format!("{}\n\n{}", user_message, note)
+            }
+        } else {
+            user_message.clone()
+        };
 
     // Blocking 1: load config, verify birth complete, restore conversation, build messages.
     let (config, history) = tokio::task::spawn_blocking({
@@ -2125,7 +2266,7 @@ async fn api_operational_chat(
     }
     messages.push(orion_capabilities::cognitive::Message::new(
         "user",
-        &user_message,
+        &message_for_model,
     ));
 
     // Build operational router from config + SecretsVault
@@ -2169,6 +2310,7 @@ async fn api_operational_chat(
         ego_provider = ?ego_name,
         routing_mode = ?effective_routing_mode,
         requested_router_mode = ?body.router_mode,
+        attachment_count = attachment_ids.len(),
         message_count = messages.len(),
         "operational_chat: building router"
     );
@@ -2182,7 +2324,7 @@ async fn api_operational_chat(
     .await;
 
     // Redact API keys from user message before storing
-    let redacted_user_message = redact_api_keys(&user_message);
+    let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
     tracing::info!(agent = %id, "operational_chat: sending chat turn");
     let response = router.route(messages.clone()).await.map_err(|e| {
@@ -2200,8 +2342,20 @@ async fn api_operational_chat(
         agent = %id,
         content_len = clean_content.len(),
         tool_count = tool_requests.len(),
+        attachment_count = attachment_ids.len(),
         "operational_chat: chat turn complete"
     );
+
+    let block_tool_execution = should_block_tool_execution_for_attachments(&attachment_ids);
+    let mut blocked_tool_count: usize = 0;
+    if block_tool_execution && !tool_requests.is_empty() {
+        blocked_tool_count = tool_requests.len();
+        tracing::info!(
+            agent = %id,
+            blocked_tool_count = blocked_tool_count,
+            "operational_chat: blocked tool execution for attachment turn"
+        );
+    }
 
     // Execute skill tool requests (async — must happen outside spawn_blocking).
     // Supports multiple tool calls per turn for autonomous multi-step actions.
@@ -2209,6 +2363,9 @@ async fn api_operational_chat(
     let mut skill_tool_outputs: Vec<String> = Vec::new();
     let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
     for tr in &tool_requests {
+        if block_tool_execution {
+            continue;
+        }
         if tr.name == "store_secret"
             || tr.name == "store_provider_key"
             || tr.name == "store_vault_secret"
@@ -2329,14 +2486,30 @@ async fn api_operational_chat(
     let config_path_2 = config_path.clone();
     let raw_user_message = user_message.clone();
     let final_content = followup_content.as_deref().unwrap_or(&clean_content);
-    let clean_content_clone = final_content.to_string();
+    let attachment_notice = if blocked_tool_count > 0 {
+        Some(format!(
+            "Attachment safety: I analyzed {} attachment(s) and did not execute tool requests in this turn. Ask explicitly if you want follow-up actions.",
+            attachment_ids.len()
+        ))
+    } else {
+        None
+    };
+    let mut final_content_for_storage = final_content.to_string();
+    if let Some(note) = &attachment_notice {
+        if !final_content_for_storage.trim().is_empty() {
+            final_content_for_storage.push_str("\n\n");
+        }
+        final_content_for_storage.push_str(note);
+    }
+    let clean_content_clone = final_content_for_storage.clone();
 
     let (tool_result, final_providers) = tokio::task::spawn_blocking({
         let chat_path = chat_path.clone();
         let redacted_user = redacted_user_message.clone();
-        let redacted_assistant = redact_api_keys(final_content);
+        let redacted_assistant = redact_api_keys(&final_content_for_storage);
         let tools = tool_requests.clone();
         let skill_output_text = skill_tool_output_text.clone();
+        let allow_tool_execution = !block_tool_execution;
         move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;
@@ -2345,60 +2518,62 @@ async fn api_operational_chat(
             let mut tool_executed: Option<OperationalToolResult> = None;
 
             // Execute store_secret / store_provider_key / store_vault_secret tool calls from LLM
-            for tr in &tools {
-                if tr.name == "store_secret" || tr.name == "store_provider_key" {
-                    let provider = tr
-                        .arguments
-                        .get("provider")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("auto");
-                    let key = tr
-                        .arguments
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    match execute_store_provider_key(&mut vault, &mut config, provider, key) {
-                        Ok(resolved) => {
-                            tracing::info!(
-                                provider = %resolved,
-                                "operational_chat: stored secret via tool call"
-                            );
-                            tool_executed = Some(OperationalToolResult {
-                                name: tr.name.clone(),
-                                provider: resolved,
-                            });
+            if allow_tool_execution {
+                for tr in &tools {
+                    if tr.name == "store_secret" || tr.name == "store_provider_key" {
+                        let provider = tr
+                            .arguments
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("auto");
+                        let key = tr
+                            .arguments
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match execute_store_provider_key(&mut vault, &mut config, provider, key) {
+                            Ok(resolved) => {
+                                tracing::info!(
+                                    provider = %resolved,
+                                    "operational_chat: stored secret via tool call"
+                                );
+                                tool_executed = Some(OperationalToolResult {
+                                    name: tr.name.clone(),
+                                    provider: resolved,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("operational_chat: store_secret failed: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("operational_chat: store_secret failed: {}", e);
-                        }
-                    }
-                } else if tr.name == "store_vault_secret" {
-                    let key_name = tr
-                        .arguments
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let value = tr
-                        .arguments
-                        .get("value")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !key_name.is_empty() && !value.is_empty() {
-                        vault.set_secret(key_name, value);
-                        if let Err(e) = vault.save() {
-                            tracing::warn!(
-                                "operational_chat: store_vault_secret save failed: {}",
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                key = %key_name,
-                                "operational_chat: stored vault secret"
-                            );
-                            tool_executed = Some(OperationalToolResult {
-                                name: tr.name.clone(),
-                                provider: key_name.to_string(),
-                            });
+                    } else if tr.name == "store_vault_secret" {
+                        let key_name = tr
+                            .arguments
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let value = tr
+                            .arguments
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !key_name.is_empty() && !value.is_empty() {
+                            vault.set_secret(key_name, value);
+                            if let Err(e) = vault.save() {
+                                tracing::warn!(
+                                    "operational_chat: store_vault_secret save failed: {}",
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    key = %key_name,
+                                    "operational_chat: stored vault secret"
+                                );
+                                tool_executed = Some(OperationalToolResult {
+                                    name: tr.name.clone(),
+                                    provider: key_name.to_string(),
+                                });
+                            }
                         }
                     }
                 }
@@ -2490,6 +2665,7 @@ async fn api_operational_chat(
         } else {
             Some(skill_tool_log)
         },
+        attachment_notice,
     }))
 }
 
@@ -2530,7 +2706,7 @@ async fn api_agent_identity(
             Ok(cfg) => (
                 cfg.agent_name.clone(),
                 cfg.birth_complete,
-                cfg.birth_timestamp.clone(),
+                resolve_birth_timestamp(&cfg, &dir),
             ),
             Err(_) => (None, false, None),
         }
@@ -2659,7 +2835,7 @@ async fn api_agent_verify(
     })?;
 
     let docs_dir = dir.join("docs");
-    let doc_names = ["soul.md", "ethics.md", "instincts.md"];
+    let doc_names = ["soul.md", "ethics.md", "instincts.md", "growth.md"];
     let mut results = Vec::new();
     let mut all_valid = true;
 
@@ -2758,8 +2934,449 @@ async fn api_agent_verify(
 }
 
 // ============================================================================
-// Agent Export API
+// Agent Import / Export API
 // ============================================================================
+
+/// POST /api/agents/import — import a portable agent identity bundle.
+async fn api_import_agent(
+    Json(body): Json<ImportAgentRequest>,
+) -> Result<Json<ImportAgentResponse>, (axum::http::StatusCode, String)> {
+    let private_key_base64 = body.private_key_base64.trim();
+    if private_key_base64.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "private_key_base64 is required".to_string(),
+        ));
+    }
+
+    let export = body.export;
+    if export.export_version != 2 && export.export_version != 3 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Unsupported export_version: {}", export.export_version),
+        ));
+    }
+
+    let root = data_root().ok_or_else(|| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ORION_DATA_DIR not set".to_string(),
+        )
+    })?;
+    let identities_dir = root.join("identities");
+    std::fs::create_dir_all(&identities_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create identities dir: {}", e),
+        )
+    })?;
+
+    let pubkey_base64 = export
+        .identity
+        .get("pubkey_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Export identity.pubkey_base64 is required".to_string(),
+            )
+        })?;
+    let pubkey_bytes = BASE64.decode(pubkey_base64).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid identity.pubkey_base64: {}", e),
+        )
+    })?;
+    let pubkey_array: [u8; 32] = pubkey_bytes.as_slice().try_into().map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Export public key must be 32 bytes".to_string(),
+        )
+    })?;
+    let private_signing_key = orion_core::parse_private_key(private_key_base64).map_err(|e| {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            format!("Invalid private key: {}", e),
+        )
+    })?;
+    if private_signing_key.verifying_key().to_bytes() != pubkey_array {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Private key does not match export identity".to_string(),
+        ));
+    }
+
+    let constitution_obj = export.constitution.as_object().ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Export constitution must be an object".to_string(),
+        )
+    })?;
+
+    let imported_name = export
+        .agent
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Imported Agent")
+        .to_string();
+    let birth_complete = export
+        .agent
+        .get("birth_complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let birth_timestamp = export
+        .agent
+        .get("birth_timestamp")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let routing_mode = export
+        .agent
+        .get("routing_mode")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<RoutingMode>(v).ok())
+        .unwrap_or_default();
+
+    let uuid = Uuid::new_v4().to_string();
+    let agent_dir = identities_dir.join(&uuid);
+    std::fs::create_dir_all(&agent_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create agent dir: {}", e),
+        )
+    })?;
+    let docs_dir = agent_dir.join("docs");
+    std::fs::create_dir_all(&docs_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create docs dir: {}", e),
+        )
+    })?;
+
+    std::fs::write(agent_dir.join("external_pubkey.bin"), &pubkey_bytes).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write external public key: {}", e),
+        )
+    })?;
+    let verifier = {
+        let verify_vault =
+            orion_core::ReadOnlyFileVault::new(agent_dir.join("external_pubkey.bin"));
+        Verifier::from_vault(&verify_vault).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to initialize signature verifier: {}", e),
+            )
+        })?
+    };
+    for doc_name in ["soul", "ethics", "instincts"] {
+        let doc_export = constitution_obj
+            .get(doc_name)
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Missing constitution document: {}", doc_name),
+                )
+            })?;
+        let content = doc_export
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid constitution content for {}", doc_name),
+                )
+            })?;
+        let signature_value = doc_export.get("signature").cloned().ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Missing signature for {}", doc_name),
+            )
+        })?;
+        if signature_value.is_null() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Missing signature for {}", doc_name),
+            ));
+        }
+        let meta: SigMeta = serde_json::from_value(signature_value).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid signature metadata for {}: {}", doc_name, e),
+            )
+        })?;
+        let doc = CoreDocument {
+            name: format!("{}.md", doc_name),
+            tier: meta.tier,
+            content: content.to_string(),
+            signature: meta.signature,
+            signed_at: meta.signed_at,
+        };
+        verifier.verify_document(&doc).map_err(|e| {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                format!("Invalid signature for {}.md: {}", doc_name, e),
+            )
+        })?;
+    }
+
+    let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
+    let memory_backend = std::env::var("MEMORY_BACKEND")
+        .ok()
+        .unwrap_or_else(|| "sqlite".to_string());
+    let memory_backend = MemoryBackend::from_str(&memory_backend).unwrap_or_default();
+    let birth_model = std::env::var("BIRTH_MODEL").ok().filter(|s| !s.is_empty());
+    let local_llm_base_url = std::env::var("LOCAL_LLM_BASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let config = AppConfig {
+        schema_version: CONFIG_SCHEMA_VERSION,
+        data_dir: agent_dir.clone(),
+        models_dir: agent_dir.join("models"),
+        docs_dir: docs_dir.clone(),
+        db_path: agent_dir.join("orion_seed.db"),
+        openai_api_key: None,
+        email: None,
+        email_accounts: Vec::new(),
+        birth_complete,
+        birth_stage: None,
+        external_pubkey_path: None,
+        local_llm_base_url,
+        routing_mode,
+        trinity: None,
+        agent_name: Some(imported_name.clone()),
+        birth_timestamp,
+        mcp_servers: Vec::new(),
+        mcp_trust_policy: Default::default(),
+        approved_skill_ids: Vec::new(),
+        trusted_skill_signers: Vec::new(),
+        sao_endpoint: None,
+        memory_backend,
+        database_url,
+        birth_model,
+        id_model_default: None,
+    };
+    config.save(&agent_dir.join("config.json")).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save config: {}", e),
+        )
+    })?;
+
+    let write_doc = |key: &str,
+                     file_name: &str,
+                     required: bool|
+     -> Result<(), (axum::http::StatusCode, String)> {
+        let Some(doc_value) = constitution_obj.get(key) else {
+            if required {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Missing constitution document: {}", key),
+                ));
+            }
+            return Ok(());
+        };
+        let doc_obj = doc_value.as_object().ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid constitution object for {}", key),
+            )
+        })?;
+        let content = match doc_obj.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None if required => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Missing constitution content for {}", key),
+                ));
+            }
+            None => return Ok(()),
+        };
+        std::fs::write(docs_dir.join(file_name), content).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write {}: {}", file_name, e),
+            )
+        })?;
+
+        if let Some(signature_value) = doc_obj.get("signature") {
+            if !signature_value.is_null() {
+                let sig_json = serde_json::to_string_pretty(signature_value).map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        format!("Invalid signature JSON for {}: {}", key, e),
+                    )
+                })?;
+                std::fs::write(docs_dir.join(format!("{}.sig", file_name)), sig_json).map_err(
+                    |e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to write {}.sig: {}", file_name, e),
+                        )
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    };
+
+    write_doc("soul", "soul.md", true)?;
+    write_doc("ethics", "ethics.md", true)?;
+    write_doc("instincts", "instincts.md", true)?;
+    write_doc("growth", "growth.md", false)?;
+
+    if let Some(path_value) = export.genesis_path {
+        if !path_value.is_null() {
+            let path_json = serde_json::to_string_pretty(&path_value).map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid genesis path JSON: {}", e),
+                )
+            })?;
+            std::fs::write(agent_dir.join("genesis_path.json"), path_json).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write genesis_path.json: {}", e),
+                )
+            })?;
+        }
+    }
+
+    if !export.chat_history.is_null() {
+        let chat_obj = export.chat_history.as_object().ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Export chat_history must be an object".to_string(),
+            )
+        })?;
+        for (key, file_name) in [
+            ("birth", "birth_chat.json"),
+            ("connectivity", "connectivity_chat.json"),
+            ("operational", "operational_chat.json"),
+        ] {
+            let Some(chat_value) = chat_obj.get(key) else {
+                continue;
+            };
+            if chat_value.is_null() {
+                continue;
+            }
+            let content = serde_json::to_string_pretty(chat_value).map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid chat history JSON for {}: {}", key, e),
+                )
+            })?;
+            std::fs::write(agent_dir.join(file_name), content).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write {}: {}", file_name, e),
+                )
+            })?;
+        }
+    }
+
+    if !export.agentic_runs.is_empty() {
+        let runs_dir = agent_dir.join("agentic_runs");
+        std::fs::create_dir_all(&runs_dir).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create agentic_runs dir: {}", e),
+            )
+        })?;
+        for (idx, run) in export.agentic_runs.iter().enumerate() {
+            let run_json = serde_json::to_string_pretty(run).map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid agentic run JSON: {}", e),
+                )
+            })?;
+            let run_path = runs_dir.join(format!("run-{:04}.json", idx + 1));
+            std::fs::write(run_path, run_json).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write agentic run file: {}", e),
+                )
+            })?;
+        }
+    }
+
+    if let Some(orchestration_value) = export.orchestration {
+        if !orchestration_value.is_null() {
+            let orchestration_json =
+                serde_json::to_string_pretty(&orchestration_value).map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        format!("Invalid orchestration JSON: {}", e),
+                    )
+                })?;
+            std::fs::write(
+                agent_dir.join("orchestration_jobs.json"),
+                orchestration_json,
+            )
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write orchestration_jobs.json: {}", e),
+                )
+            })?;
+        }
+    }
+
+    if let Some(provider_secrets) = export
+        .keychain
+        .get("provider_secrets")
+        .and_then(|v| v.as_object())
+    {
+        let mut vault = SecretsVault::new(agent_dir.clone());
+        for (provider, secret_value) in provider_secrets {
+            if let Some(secret) = secret_value.as_str() {
+                if !secret.trim().is_empty() {
+                    vault.set_secret(provider, secret);
+                }
+            }
+        }
+        vault.save().map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to save imported secrets vault: {}", e),
+            )
+        })?;
+    }
+
+    let gc_path = GlobalConfig::config_path(&root);
+    let mut gc = if gc_path.exists() {
+        GlobalConfig::load(&root).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load global config: {}", e),
+            )
+        })?
+    } else {
+        GlobalConfig::new(&root)
+    };
+
+    gc.register_agent(AgentEntry {
+        id: uuid.clone(),
+        name: imported_name.clone(),
+        directory: PathBuf::from(format!("identities/{}", uuid)),
+    })
+    .map_err(|e| (axum::http::StatusCode::CONFLICT, e.to_string()))?;
+    gc.save(&root).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save global config: {}", e),
+        )
+    })?;
+
+    tracing::info!("Imported agent: {} ({})", imported_name, uuid);
+    Ok(Json(ImportAgentResponse {
+        id: uuid,
+        name: imported_name,
+    }))
+}
 
 /// GET /api/agents/:id/export — export portable agent identity bundle as JSON download.
 async fn api_export_agent(
@@ -2971,6 +3588,16 @@ async fn api_export_agent(
         }
     }
 
+    // ---- Orchestration jobs ----
+    let orchestration_jobs_file = dir.join("orchestration_jobs.json");
+    let orchestration = if orchestration_jobs_file.exists() {
+        std::fs::read_to_string(&orchestration_jobs_file)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
     let now = chrono::Utc::now().to_rfc3339();
     let safe_name = agent_name
         .chars()
@@ -2986,7 +3613,7 @@ async fn api_export_agent(
     let filename = format!("orion-agent-{}-{}.json", safe_name, date_str);
 
     let export = AgentExport {
-        export_version: 2,
+        export_version: 3,
         exported_at: now,
         agent: agent_meta,
         identity,
@@ -2995,6 +3622,7 @@ async fn api_export_agent(
         genesis_path,
         chat_history,
         agentic_runs,
+        orchestration,
     };
 
     Ok((
@@ -4255,6 +4883,7 @@ async fn main() -> std::io::Result<()> {
         .route("/api/status", get(api_status))
         .route("/api/identities", get(api_identities))
         .route("/api/agents", post(api_create_agent))
+        .route("/api/agents/import", post(api_import_agent))
         .route("/api/agents/:id/load", post(api_load_agent))
         .route("/api/agents/:id/birth/state", get(api_birth_state))
         .route(
@@ -4305,6 +4934,12 @@ async fn main() -> std::io::Result<()> {
         .route(
             "/api/agents/:id/chat/history",
             get(api_operational_chat_history),
+        )
+        .route(
+            "/api/agents/:id/chat/attachments",
+            post(api_operational_chat_upload_attachments).layer(DefaultBodyLimit::max(
+                chat_attachments::MAX_TOTAL_UPLOAD_BYTES,
+            )),
         )
         .route("/api/agents/:id/chat", post(api_operational_chat))
         .route("/api/agents/:id/skills", get(api_list_skills))

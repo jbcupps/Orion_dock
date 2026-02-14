@@ -442,15 +442,14 @@ impl BirthOrchestrator {
         if self.store.has_birth()? {
             return Err(BirthError::AlreadyBorn.into());
         }
-        let content = format!(
-            "I was born. First run completed at {}.",
-            chrono::Utc::now().to_rfc3339()
-        );
+        let born_at = chrono::Utc::now().to_rfc3339();
+        let content = format!("I was born. First run completed at {}.", born_at);
         let memory = Memory::crystallized(content);
         self.store.record_birth(&memory)?;
 
         // Save config - mark birth complete and clear stage
         self.config.birth_complete = true;
+        self.config.birth_timestamp = Some(born_at);
         self.config.clear_birth_stage();
         self.config.save(&self.config.config_path())?;
 
@@ -493,13 +492,12 @@ impl BirthOrchestrator {
 
         self.private_key_base64 = None;
 
-        let content = format!(
-            "I was born. First run completed at {}.",
-            chrono::Utc::now().to_rfc3339()
-        );
+        let born_at = chrono::Utc::now().to_rfc3339();
+        let content = format!("I was born. First run completed at {}.", born_at);
         let memory = Memory::crystallized(content);
         self.store.record_birth(&memory)?;
         self.config.birth_complete = true;
+        self.config.birth_timestamp = Some(born_at);
         self.config.clear_birth_stage();
         self.config.save(&self.config.config_path())?;
         Ok(())
