@@ -411,6 +411,7 @@ export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
   stored_providers?: string[];
+  attachment_notice?: string;
   tool_log?: {
     tool_name: string;
     skill_name?: string;
@@ -419,15 +420,60 @@ export interface OperationalChatResponse {
   }[];
 }
 
+export interface ChatAttachmentUploadItem {
+  attachment_id: string;
+  file_name: string;
+  size_bytes: number;
+  detected_mime: string;
+  detected_kind: string;
+  parse_status: string;
+  warning_count: number;
+  summary: string;
+}
+
+export interface ChatAttachmentUploadResponse {
+  attachments: ChatAttachmentUploadItem[];
+}
+
+export async function uploadChatAttachments(
+  agentId: string,
+  files: File[]
+): Promise<ChatAttachmentUploadResponse> {
+  if (!files.length) {
+    return { attachments: [] };
+  }
+  const base = getBaseUrl();
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file, file.name);
+  }
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat/attachments`,
+    {
+      method: 'POST',
+      body: formData,
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Attachment upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function sendChat(
   agentId: string,
   message: string,
-  routerMode?: 'auto' | 'think_hard' | 'think_harder'
+  routerMode?: 'auto' | 'think_hard' | 'think_harder',
+  attachmentIds: string[] = []
 ): Promise<OperationalChatResponse> {
   const base = getBaseUrl();
   const payload: Record<string, unknown> = { message: message.trim() };
   if (routerMode) {
     payload.router_mode = routerMode;
+  }
+  if (attachmentIds.length > 0) {
+    payload.attachment_ids = attachmentIds;
   }
   const res = await fetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat`,
@@ -952,4 +998,38 @@ export async function exportAgent(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ---- Agent Import API ----
+
+export interface ImportAgentResponse {
+  id: string;
+  name: string;
+}
+
+export async function importAgent(
+  exportData: unknown,
+  privateKeyBase64: string
+): Promise<ImportAgentResponse> {
+  const trimmedKey = privateKeyBase64.trim();
+  if (!trimmedKey) {
+    throw new Error('Private key is required for import');
+  }
+
+  const base = getBaseUrl();
+  const res = await fetch(`${base}/api/agents/import`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      export: exportData,
+      private_key_base64: trimmedKey,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Import failed: ${res.status}`);
+  }
+  return res.json();
 }

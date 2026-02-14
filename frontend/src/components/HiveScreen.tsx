@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   fetchIdentities,
   createAgent,
   loadAgent,
   exportAgent,
+  importAgent,
   type AgentIdentityInfo,
 } from '../api';
 
@@ -11,6 +12,29 @@ interface HiveScreenProps {
   onAgentSelected: (agentId: string) => void;
   onCreateAgent: (agentId: string) => void;
   onViewIntro?: () => void;
+}
+
+const IMPORT_FALLBACK_NAME = 'Imported Agent';
+
+function formatBirthDate(value: string | null): string {
+  if (!value) return '\u2014';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+  });
+}
+
+function extractImportName(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return IMPORT_FALLBACK_NAME;
+  const agent = (payload as Record<string, unknown>).agent;
+  if (!agent || typeof agent !== 'object') return IMPORT_FALLBACK_NAME;
+  const name = (agent as Record<string, unknown>).name;
+  if (typeof name !== 'string') return IMPORT_FALLBACK_NAME;
+  const trimmed = name.trim();
+  return trimmed || IMPORT_FALLBACK_NAME;
 }
 
 export default function HiveScreen({
@@ -26,6 +50,11 @@ export default function HiveScreen({
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [exportModalAgent, setExportModalAgent] = useState<AgentIdentityInfo | null>(null);
   const [exportPrivateKey, setExportPrivateKey] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importModalBundle, setImportModalBundle] = useState<unknown | null>(null);
+  const [importModalName, setImportModalName] = useState(IMPORT_FALLBACK_NAME);
+  const [importPrivateKey, setImportPrivateKey] = useState('');
+  const importFileRef = useRef<HTMLInputElement>(null);
 
   const fetchAgents = async () => {
     try {
@@ -75,6 +104,12 @@ export default function HiveScreen({
     setExportPrivateKey('');
   };
 
+  const closeImportModal = () => {
+    setImportModalBundle(null);
+    setImportModalName(IMPORT_FALLBACK_NAME);
+    setImportPrivateKey('');
+  };
+
   const handleExport = (e: React.MouseEvent, agent: AgentIdentityInfo) => {
     e.stopPropagation(); // prevent row click navigation
     setExportModalAgent(agent);
@@ -100,6 +135,52 @@ export default function HiveScreen({
     }
   };
 
+  const handleImportClick = () => {
+    if (importing) return;
+    importFileRef.current?.click();
+  };
+
+  const handleImportFileSelected = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as unknown;
+      setImportModalBundle(parsed);
+      setImportModalName(extractImportName(parsed));
+      setImportPrivateKey('');
+      setError(null);
+    } catch {
+      setError('Invalid export file. Please select a valid Orion bundle JSON.');
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!importModalBundle) return;
+    const privateKey = importPrivateKey.trim();
+    if (!privateKey) {
+      setError('Private key is required for import');
+      return;
+    }
+
+    try {
+      setImporting(true);
+      const imported = await importAgent(importModalBundle, privateKey);
+      closeImportModal();
+      await fetchAgents();
+      await loadAgent(imported.id);
+      onAgentSelected(imported.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="hive-loading">
@@ -117,9 +198,62 @@ export default function HiveScreen({
     </div>
   );
 
+  const importModal = importModalBundle ? (
+    <div
+      className="hive-modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !importing) {
+          closeImportModal();
+        }
+      }}
+    >
+      <div className="hive-modal-card" role="dialog" aria-modal="true" aria-labelledby="hive-import-title">
+        <h3 id="hive-import-title">Import identity bundle</h3>
+        <p className="hive-modal-text">
+          Enter the external private key that matches <strong>{importModalName}</strong>.
+        </p>
+        <input
+          type="password"
+          value={importPrivateKey}
+          onChange={(e) => setImportPrivateKey(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleConfirmImport()}
+          className="hive-input"
+          placeholder="Private key (base64)"
+          autoFocus
+          disabled={importing}
+        />
+        <div className="hive-modal-actions">
+          <button
+            type="button"
+            className="hive-btn-secondary"
+            onClick={closeImportModal}
+            disabled={importing}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="hive-btn"
+            onClick={handleConfirmImport}
+            disabled={importing || !importPrivateKey.trim()}
+          >
+            {importing ? 'Importing...' : 'Import'}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   if (agents.length === 0) {
     return (
       <div className="hive-root hive-empty">
+        <input
+          ref={importFileRef}
+          type="file"
+          accept="application/json,.json"
+          onChange={handleImportFileSelected}
+          hidden
+        />
         <div className="hive-header">
           <h1 className="hive-title">ORION HIVE</h1>
           <p className="hive-subtitle">Identity Management</p>
@@ -154,13 +288,29 @@ export default function HiveScreen({
           >
             {creating ? 'Creating...' : 'Create'}
           </button>
+          <button
+            type="button"
+            className="hive-btn-secondary"
+            onClick={handleImportClick}
+            disabled={importing}
+          >
+            {importing ? 'Importing...' : 'Import'}
+          </button>
         </div>
+        {importModal}
       </div>
     );
   }
 
   return (
     <div className="hive-root">
+      <input
+        ref={importFileRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={handleImportFileSelected}
+        hidden
+      />
       <div className="hive-header">
         <h1 className="hive-title">ORION HIVE</h1>
         <p className="hive-subtitle">Identity Management</p>
@@ -208,7 +358,7 @@ export default function HiveScreen({
                   )}
                 </td>
                 <td className="hive-cell-date">
-                  {agent.birth_date ?? '\u2014'}
+                  {formatBirthDate(agent.birth_date)}
                 </td>
                 <td className="hive-cell-actions">
                   {agent.birth_complete && (
@@ -248,8 +398,18 @@ export default function HiveScreen({
           >
             {creating ? 'Creating...' : 'Create'}
           </button>
+          <button
+            type="button"
+            className="hive-btn-secondary"
+            onClick={handleImportClick}
+            disabled={importing}
+          >
+            {importing ? 'Importing...' : 'Import'}
+          </button>
         </div>
       </section>
+
+      {importModal}
 
       {exportModalAgent && (
         <div
