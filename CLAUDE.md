@@ -115,6 +115,24 @@ The **birth process is the key differentiator**: cryptographic identity, convers
 - **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Primary path for mentor-facing operational chat and deep reasoning, with Id fallback.
 - **Superego** — Safety pre-check support exists in router; dedicated ethical oversight model remains planned.
 
+### Cognitive Discipline (Karpathy Principles)
+
+The agent's cognitive model incorporates four operational principles derived from Andrej Karpathy's observations on LLM behavior. These are woven into the constitutional documents (instincts, ethics, soul) and the runtime system prompt:
+
+| Principle | Where It Lives | What It Does |
+|-----------|---------------|--------------|
+| **Deliberate before acting** | Instincts (Deliberation Instinct), Operational Prompt | Forces the agent to surface assumptions, present ambiguities, and ask when confused rather than guessing |
+| **Simplicity first** | Instincts (Precision Instinct), Ethics (Virtue), Operational Prompt | Prevents overengineering — minimum action that solves the problem, no speculative features |
+| **Surgical precision** | Instincts (Precision Instinct), Operational Prompt, Agentic Prompt | Constrains changes to only what was requested — no drive-by refactoring or adjacent "improvements" |
+| **Goal-driven execution** | Instincts (Precision Instinct), Operational Prompt, Agentic Prompt | Transforms vague tasks into verifiable success criteria; iterates with verification at each step |
+
+These principles appear at multiple layers:
+- **Instincts** (`instincts.md`): Pre-cognitive Deliberation and Precision instincts
+- **Ethics** (`ethics.md`): "Simplicity over cleverness" and "precision over thoroughness" as virtues
+- **Soul** (`soul.md` / template): Nature statement: "I think before I act, I simplify before I build, I verify before I move on"
+- **System prompt** (`system_prompt.rs`): Cognitive Discipline section in operational awareness; goal-driven workflow in agentic mode
+- **Growth** (`GROWTH_MD`): Aspirational development of these disciplines over time
+
 ### Crate Map
 
 | Crate | Role |
