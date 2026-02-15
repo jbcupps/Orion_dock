@@ -380,6 +380,22 @@ export async function storeProviderKey(
   return res.json();
 }
 
+export async function removeProviderKey(
+  agentId: string,
+  provider: string
+): Promise<{ ok: boolean }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/keys/${encodeURIComponent(provider)}`,
+    { method: 'DELETE' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Remove key failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchStoredProviders(
   agentId: string
 ): Promise<{ providers: string[] }> {

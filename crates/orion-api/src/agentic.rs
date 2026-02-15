@@ -13,10 +13,11 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use orion_birth::parse_tool_requests;
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, SkillToolEntry};
-use orion_core::{AppConfig, SecretsVault, ThinkingModelTier};
+use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
 use orion_skills::manifest::SkillId;
-use orion_skills::skill::ToolDescriptor;
-use orion_skills::{SkillExecutor, SkillRegistry};
+use orion_skills::protocol::mcp::McpSkillRuntime;
+use orion_skills::skill::{Skill, ToolDescriptor};
+use orion_skills::{SkillExecutor, SkillRegistry, TrustTier};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -277,8 +278,26 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
 
     let mut turn: u32 = 0;
     let mut total_tool_calls: u32 = 0;
+    let mut tools_changed = false;
 
     loop {
+        // Refresh system prompt when tools have been added mid-run.
+        if tools_changed {
+            let refreshed_entries = crate::build_skill_tool_entries(&cfg.skill_registry);
+            let refreshed_prompt = build_agentic_system_prompt(
+                &cfg.config.docs_dir,
+                &cfg.config.agent_name,
+                &refreshed_entries,
+                &cfg.stored_providers,
+            );
+            if !messages.is_empty() {
+                messages[0] = Message::new("system", &refreshed_prompt);
+            }
+            cfg.skill_tool_entries = refreshed_entries;
+            tools_changed = false;
+            tracing::info!(agent_dir = %cfg.agent_dir.display(), "agentic: refreshed tool list after skill registration");
+        }
+
         if turn >= cfg.max_turns {
             let summary = format!(
                 "Reached maximum turns limit ({}). Task may be incomplete.",
@@ -497,6 +516,68 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             continue;
         }
 
+        // Check for register_mcp_skill synthetic tool
+        if let Some(reg) = tool_requests.iter().find(|t| t.name == "register_mcp_skill") {
+            let server_id = reg
+                .arguments
+                .get("server_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let server_name = reg
+                .arguments
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&server_id)
+                .to_string();
+            let base_url = reg
+                .arguments
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let result_msg = if server_id.is_empty() || base_url.is_empty() {
+                "register_mcp_skill failed: server_id and base_url are required.".to_string()
+            } else {
+                match register_mcp_skill_impl(
+                    &server_id,
+                    &server_name,
+                    &base_url,
+                    &cfg.config,
+                    &cfg.skill_registry,
+                    &cfg.agent_dir,
+                )
+                .await
+                {
+                    Ok(tool_names) => {
+                        tools_changed = true;
+                        format!(
+                            "MCP skill '{}' registered successfully. Discovered tools: [{}]. They will be available on your next turn.",
+                            server_name,
+                            tool_names.join(", ")
+                        )
+                    }
+                    Err(e) => {
+                        format!("register_mcp_skill failed: {}", e)
+                    }
+                }
+            };
+
+            let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                turn,
+                tool_name: "register_mcp_skill".to_string(),
+                success: tools_changed,
+                output: result_msg.clone(),
+            });
+            record_step(&cfg.task_handle, turn, "register_mcp_skill", &result_msg).await;
+            messages.push(Message::new(
+                "user",
+                format!("## Tool Result: register_mcp_skill\n\n{}", result_msg),
+            ));
+            // Process remaining tool requests in this turn (don't skip to next turn).
+        }
+
         // No tool calls and no synthetic tools — nudge the LLM
         if tool_requests.is_empty() {
             messages.push(Message::new(
@@ -510,7 +591,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         let mut tool_results: Vec<String> = Vec::new();
         for tr in &tool_requests {
             // Skip synthetic tools already handled above
-            if tr.name == "task_complete" || tr.name == "ask_mentor" {
+            if tr.name == "task_complete"
+                || tr.name == "ask_mentor"
+                || tr.name == "register_mcp_skill"
+            {
                 continue;
             }
 
@@ -901,6 +985,83 @@ fn persist_run_summary(
         &chat_path,
         serde_json::to_string_pretty(&history).unwrap_or_default(),
     );
+}
+
+/// Connect to an MCP server, initialize it, register it as an AgentBuilt skill,
+/// and persist the definition to the agent's config.
+async fn register_mcp_skill_impl(
+    server_id: &str,
+    server_name: &str,
+    base_url: &str,
+    config: &AppConfig,
+    registry: &SkillRegistry,
+    agent_dir: &Path,
+) -> Result<Vec<String>, String> {
+    // Validate URL against trust policy.
+    config.mcp_trust_policy.validate_url(base_url)?;
+
+    // Create and initialize the MCP runtime.
+    let mut runtime = McpSkillRuntime::new(server_id, server_name, base_url);
+    let skill_config = orion_skills::skill::SkillConfig {
+        values: Default::default(),
+        secrets: Default::default(),
+        limits: orion_skills::ResourceLimits::default(),
+        permissions: vec![],
+        event_sender: None,
+    };
+    runtime
+        .initialize(skill_config)
+        .await
+        .map_err(|e| format!("MCP initialize failed: {}", e))?;
+
+    // Collect discovered tool names before moving into Arc.
+    let tool_names: Vec<String> = Skill::tools(&runtime)
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+
+    if tool_names.is_empty() {
+        return Err(format!("MCP server at {} exposed no tools", base_url));
+    }
+
+    // Register into live registry.
+    let skill_id = SkillId(server_id.to_string());
+    registry
+        .register_with_tier(
+            skill_id,
+            std::sync::Arc::new(runtime),
+            TrustTier::AgentBuilt,
+        )
+        .map_err(|e| format!("registry insert failed: {}", e))?;
+
+    // Persist to agent config so the skill reloads on restart.
+    let config_path = agent_dir.join("config.json");
+    if let Ok(mut persisted_config) = AppConfig::load(&config_path) {
+        // Avoid duplicate entries.
+        persisted_config
+            .mcp_servers
+            .retain(|s| s.id != server_id);
+        persisted_config.mcp_servers.push(McpServerDefinition {
+            id: server_id.to_string(),
+            name: server_name.to_string(),
+            transport: "http".to_string(),
+            command_or_url: base_url.to_string(),
+            env: Default::default(),
+        });
+        if let Err(e) = persisted_config.save(&config_path) {
+            tracing::warn!(error = %e, "failed to persist MCP server to config");
+        }
+    }
+
+    tracing::info!(
+        server_id = server_id,
+        server_name = server_name,
+        base_url = base_url,
+        tools = ?tool_names,
+        "registered MCP skill (AgentBuilt)"
+    );
+
+    Ok(tool_names)
 }
 
 // ---------------------------------------------------------------------------

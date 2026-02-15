@@ -21,12 +21,14 @@ import {
   type StatusResponse,
   type TierModels,
 } from './api';
+import { SUPPORTED_PROVIDERS } from './providers';
 import { stageDisplayMessage, OPERATION_MESSAGE } from './birthStages';
 import SplashScreen from './components/SplashScreen';
 import HiveScreen from './components/HiveScreen';
 import GenesisPathSelector from './components/GenesisPathSelector';
 import ForgeScenario from './components/ForgeScenario';
 import GenesisChat from './components/GenesisChat';
+import ApiKeyModal from './components/ApiKeyModal';
 import ConnectivityPanel from './components/ConnectivityPanel';
 import OperationalChat from './components/OperationalChat';
 import AgenticPanel from './components/AgenticPanel';
@@ -66,6 +68,8 @@ function App() {
   const [tierValidation, setTierValidation] = useState<Record<string, ProviderModelValidation>>({});
   const [tierRefreshing, setTierRefreshing] = useState(false);
   const [tierValidating, setTierValidating] = useState(false);
+  const [keyModalProvider, setKeyModalProvider] = useState<string | null>(null);
+  const [addKeyPickerOpen, setAddKeyPickerOpen] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [dashboardTab, setDashboardTab] = useState<'chat' | 'agent' | 'jobs'>('chat');
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
@@ -460,6 +464,14 @@ function App() {
     }
   }, [currentAgentId]);
 
+  const refreshProviders = useCallback(async () => {
+    if (!currentAgentId) return;
+    try {
+      const res = await fetchStoredProviders(currentAgentId);
+      setStoredProviders(res.providers);
+    } catch { /* ignore */ }
+  }, [currentAgentId]);
+
   if (appState === 'splash') {
     return (
       <div className="app">
@@ -832,26 +844,75 @@ function App() {
                     <dd>{status.birth_model ?? '—'}</dd>
                     <dt>Cloud providers</dt>
                     <dd>
-                      {storedProviders.length > 0 ? (
-                        <span className="provider-badges">
-                          {storedProviders.map((p) => (
-                            <span
-                              key={p}
-                              className={`provider-badge provider-badge-ok${cloudBusy ? ' provider-badge-active' : ''}`}
-                            >
-                              {p}
-                              {cloudBusy && (
-                                <span className="provider-dots">
-                                  <span />
-                                  <span />
-                                  <span />
-                                </span>
-                              )}
-                            </span>
-                          ))}
+                      <span className="provider-badges">
+                        {storedProviders.map((p) => (
+                          <span
+                            key={p}
+                            className={`provider-badge provider-badge-ok provider-badge-clickable${cloudBusy ? ' provider-badge-active' : ''}`}
+                            title="Click to rotate key"
+                            onClick={() => setKeyModalProvider(p)}
+                          >
+                            {p}
+                            {cloudBusy && (
+                              <span className="provider-dots">
+                                <span />
+                                <span />
+                                <span />
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                        <span className="provider-add-key-wrap">
+                          <button
+                            type="button"
+                            className="provider-add-key-btn"
+                            onClick={() => setAddKeyPickerOpen((v) => !v)}
+                          >
+                            + Add key
+                          </button>
+                          {addKeyPickerOpen && (
+                            <div className="provider-picker-dropdown">
+                              {SUPPORTED_PROVIDERS.map((sp) => {
+                                const configured = storedProviders.includes(sp.id);
+                                return (
+                                  <button
+                                    key={sp.id}
+                                    type="button"
+                                    className={`provider-picker-item${configured ? ' configured' : ''}`}
+                                    onClick={() => {
+                                      setAddKeyPickerOpen(false);
+                                      setKeyModalProvider(sp.id);
+                                    }}
+                                  >
+                                    <span>{sp.label}</span>
+                                    {configured && <span className="provider-picker-check">&#10003;</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
                         </span>
-                      ) : (
-                        <span className="muted">None configured</span>
+                      </span>
+                      {keyModalProvider && currentAgentId && (
+                        <ApiKeyModal
+                          agentId={currentAgentId}
+                          provider={keyModalProvider}
+                          onClose={() => setKeyModalProvider(null)}
+                          onKeyStored={async (provider) => {
+                            const storedProvider = provider;
+                            setKeyModalProvider(null);
+                            await refreshProviders();
+                            if (currentAgentId) {
+                              await setActiveProvider(currentAgentId, storedProvider);
+                              const tm = await fetchTierModels(currentAgentId);
+                              setTierModels(tm.models || {});
+                              setActiveTierProvider(tm.active_provider ?? null);
+                              setTierCatalog(tm.catalog || {});
+                              setTierModelsDraft(tm.models || {});
+                            }
+                          }}
+                          onError={(msg) => setError(msg)}
+                        />
                       )}
                     </dd>
                     <dt>Thinking models</dt>

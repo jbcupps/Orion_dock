@@ -5,17 +5,9 @@ import {
   sendConnectivityChat,
   type BirthChatMessageItem,
 } from '../api';
+import { SUPPORTED_PROVIDERS } from '../providers';
 import ApiKeyModal from './ApiKeyModal';
 import './ConnectivityPanel.css';
-
-const SUPPORTED_PROVIDERS = [
-  { id: 'openai', label: 'OpenAI' },
-  { id: 'anthropic', label: 'Anthropic' },
-  { id: 'perplexity', label: 'Perplexity' },
-  { id: 'xai', label: 'X.AI' },
-  { id: 'google', label: 'Google' },
-  { id: 'tavily', label: 'Tavily' },
-];
 
 interface ConnectivityPanelProps {
   agentId: string;

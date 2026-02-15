@@ -52,7 +52,8 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - deeper reasoning/tool-planning tasks,
   - model selected by tier: Fast (lightweight), Standard (balanced), Pro (highest capability),
   - per-provider model mappings with catalog validation,
-  - Pro tier uses native Rust council debate/synthesis across providers when multiple providers are available.
+  - Pro tier uses native Rust council debate/synthesis across providers when multiple providers are available,
+  - agentic runs can self-extend by registering MCP server tools at runtime (`register_mcp_skill`).
 - **Orchestration (policy + scheduler)**:
   - runs scheduled UTC cron jobs,
   - scores significance (`low`, `medium`, `high`),
@@ -69,6 +70,7 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
 4. **Agentic run**: Mentor starts autonomous multi-step tasks with timeline + approvals.
 5. **Scheduled orchestration jobs**: Periodic jobs run in background and escalate only when needed.
 6. **Provider management**: Mentor configures per-provider tier models, validates against catalogs, sets active provider preference.
+7. **Dynamic tool creation**: Agent deploys an MCP server (e.g., in toolbox container) and registers it as a skill, extending its own capabilities within a single agentic run.
 
 ## Key Backend Areas
 
@@ -119,7 +121,7 @@ Per-agent data is stored under `ORION_DATA_DIR/identities/<agent_id>/`.
 
 Important files include:
 
-- `config.json` (agent config, routing state, tier models, provider catalog cache, active provider preference)
+- `config.json` (agent config, routing state, tier models, provider catalog cache, active provider preference, `mcp_servers` for agent-registered MCP connections)
 - `operational_chat.json` (chat history)
 - `agentic_runs/*.json` (agentic summaries, including run source)
 - `orchestration_jobs.json` (scheduled jobs)
@@ -147,5 +149,7 @@ The current architecture favors:
 - orchestration as the control plane for when and how autonomy escalates,
 - **provider catalog management** so mentors can validate and customize model choices,
 - **Pro council engine** for highest-tier multi-provider drafting/critique/synthesis when multiple providers are available.
+
+Dynamic self-extension via MCP skill registration allows the agent to build new capabilities at runtime, with `AgentBuilt` trust tier and MCP trust policy for safety.
 
 This keeps the system capable without overloading the local lightweight model, while giving mentors granular control over model selection and provider preference.

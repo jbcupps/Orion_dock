@@ -20,13 +20,16 @@ Do not reference other drafts or reviewers.";
 /// System prompt for critique nodes.
 const CRITIQUE_SYSTEM: &str = "You are a critical reviewer. \
 Evaluate the draft against the original query for correctness, completeness, \
-and quality. Return STRICT JSON: {\"score\": <number 0-10>, \"rationale\": \"<brief explanation>\"}. \
+and quality. If agent identity context is provided below, also assess whether \
+the draft aligns with the agent's stated ethics, instincts, and personality. \
+Return STRICT JSON: {\"score\": <number 0-10>, \"rationale\": \"<brief explanation>\"}. \
 Only output the JSON object, nothing else.";
 
 /// System prompt for synthesis node.
 const SYNTHESIS_SYSTEM: &str = "You synthesize multiple expert drafts into a single best answer. \
 Favor content from higher-scored drafts. Resolve conflicts by choosing the most accurate option. \
-Produce a polished, coherent final response.";
+If agent identity context is provided below, maintain the agent's voice, ethical framework, \
+and personality in the final response. Produce a polished, coherent final response.";
 
 /// Artifact payload moving through council DAG nodes.
 pub trait Artifact: Send + Sync {
@@ -182,8 +185,8 @@ impl GraphExecutor {
         messages: &[Message],
         memory: Option<&MemoryStore>,
     ) -> anyhow::Result<CompletionResponse> {
-        // Separate system context from the user query.
-        let (system_context, query_text) = extract_context(messages);
+        // Separate system context, user query, and conversation history.
+        let (system_context, query_text, history) = extract_context(messages);
         let query_id = persist(memory, "query", &query_text);
 
         // ── Phase 1: Parallel drafting (graceful degradation) ────────────
@@ -192,6 +195,7 @@ impl GraphExecutor {
             let node = node.clone();
             let system = system_context.clone();
             let query = query_text.clone();
+            let hist = history.clone();
             draft_tasks.push(tokio::spawn(async move {
                 let mut msgs = Vec::new();
                 if !system.is_empty() {
@@ -202,6 +206,8 @@ impl GraphExecutor {
                 } else {
                     msgs.push(Message::new("system", DRAFT_SYSTEM));
                 }
+                // Include conversation history for multi-turn continuity.
+                msgs.extend(hist);
                 msgs.push(Message::new("user", query));
                 let response = node.run(msgs).await?;
                 Ok::<(usize, Node, TextArtifact), anyhow::Error>((
@@ -267,10 +273,16 @@ impl GraphExecutor {
             let draft_content = artifact.content.clone();
             let draft_mem_id = draft_mem_id.clone();
             let query = query_text.clone();
+            let system = system_context.clone();
             let draft_idx = *idx;
             critique_tasks.push(tokio::spawn(async move {
+                let critique_system = if !system.is_empty() {
+                    format!("{}\n\n{}", CRITIQUE_SYSTEM, system)
+                } else {
+                    CRITIQUE_SYSTEM.to_string()
+                };
                 let msgs = vec![
-                    Message::new("system", CRITIQUE_SYSTEM),
+                    Message::new("system", critique_system),
                     Message::new(
                         "user",
                         format!(
@@ -345,8 +357,13 @@ impl GraphExecutor {
             ));
         }
 
+        let synthesis_system = if !system_context.is_empty() {
+            format!("{}\n\n{}", SYNTHESIS_SYSTEM, system_context)
+        } else {
+            SYNTHESIS_SYSTEM.to_string()
+        };
         let synthesis_msgs = vec![
-            Message::new("system", SYNTHESIS_SYSTEM),
+            Message::new("system", synthesis_system),
             Message::new("user", synthesis_input),
         ];
 
@@ -410,39 +427,49 @@ fn parse_score(raw: &str) -> Option<f32> {
     Some(digit.clamp(0.0, 10.0))
 }
 
-/// Extract system context and user query from the message list.
+/// Extract system context, user query, and conversation history from the
+/// message list.
 ///
-/// Returns (system_context, query_text) where:
+/// Returns (system_context, query_text, history) where:
 /// - system_context: concatenation of all system role messages
 /// - query_text: the last user message (the actual query), or a fallback
 ///   concatenation of non-system messages if no user message exists.
-fn extract_context(messages: &[Message]) -> (String, String) {
+/// - history: all non-system messages preceding the last user message,
+///   preserving multi-turn conversational context.
+fn extract_context(messages: &[Message]) -> (String, String, Vec<Message>) {
     let mut system_parts: Vec<&str> = Vec::new();
-    let mut last_user_content: Option<&str> = None;
+    let mut non_system: Vec<&Message> = Vec::new();
 
     for msg in messages {
-        match msg.role.as_str() {
-            "system" => system_parts.push(&msg.content),
-            "user" => last_user_content = Some(&msg.content),
-            _ => {}
+        if msg.role == "system" {
+            system_parts.push(&msg.content);
+        } else {
+            non_system.push(msg);
         }
     }
 
     let system = system_parts.join("\n\n");
 
-    let query = if let Some(user_msg) = last_user_content {
-        user_msg.to_string()
-    } else {
-        // Fallback: concatenate all non-system messages.
-        messages
+    // Split: everything before the last user message is history; the last
+    // user message becomes the query.
+    if let Some(last_user_pos) = non_system.iter().rposition(|m| m.role == "user") {
+        let query = non_system[last_user_pos].content.clone();
+        let history: Vec<Message> = non_system
             .iter()
-            .filter(|m| m.role != "system")
+            .enumerate()
+            .filter(|(i, _)| *i != last_user_pos)
+            .map(|(_, m)| Message::new(&m.role, &m.content))
+            .collect();
+        (system, query, history)
+    } else {
+        // Fallback: concatenate all non-system messages as query, no history.
+        let fallback = non_system
+            .iter()
             .map(|m| format!("{}: {}", m.role, m.content))
             .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    (system, query)
+            .join("\n");
+        (system, fallback, Vec::new())
+    }
 }
 
 fn persist(memory: Option<&MemoryStore>, node: &str, payload: &str) -> Option<String> {
@@ -526,9 +553,14 @@ mod tests {
             Message::new("assistant", "Hi there"),
             Message::new("user", "What is Rust?"),
         ];
-        let (system, query) = extract_context(&msgs);
+        let (system, query, history) = extract_context(&msgs);
         assert_eq!(system, "You are helpful");
         assert_eq!(query, "What is Rust?");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "Hello");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].content, "Hi there");
     }
 
     #[test]
@@ -538,9 +570,10 @@ mod tests {
             Message::new("system", "Second"),
             Message::new("user", "Query"),
         ];
-        let (system, query) = extract_context(&msgs);
+        let (system, query, history) = extract_context(&msgs);
         assert_eq!(system, "First\n\nSecond");
         assert_eq!(query, "Query");
+        assert!(history.is_empty());
     }
 
     #[test]
@@ -549,8 +582,34 @@ mod tests {
             Message::new("system", "Sys"),
             Message::new("assistant", "Answer"),
         ];
-        let (system, query) = extract_context(&msgs);
+        let (system, query, history) = extract_context(&msgs);
         assert_eq!(system, "Sys");
         assert_eq!(query, "assistant: Answer");
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_extract_context_preserves_full_history() {
+        let msgs = vec![
+            Message::new("system", "You are Orion. soul.md: ..."),
+            Message::new("system", "ethics.md: ..."),
+            Message::new("user", "Hello, who are you?"),
+            Message::new("assistant", "I am Orion."),
+            Message::new("user", "Tell me about Rust generics"),
+            Message::new("assistant", "Generics allow type parameters..."),
+            Message::new("user", "Can you give an example?"),
+        ];
+        let (system, query, history) = extract_context(&msgs);
+        assert_eq!(system, "You are Orion. soul.md: ...\n\nethics.md: ...");
+        assert_eq!(query, "Can you give an example?");
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "Hello, who are you?");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].content, "I am Orion.");
+        assert_eq!(history[2].role, "user");
+        assert_eq!(history[2].content, "Tell me about Rust generics");
+        assert_eq!(history[3].role, "assistant");
+        assert_eq!(history[3].content, "Generics allow type parameters...");
     }
 }

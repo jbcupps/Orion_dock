@@ -148,6 +148,12 @@ In addition to your skill tools, you have these agentic-mode tools:
   ```
   Status can be `success`, `partial`, or `failed`.
 
+- **`register_mcp_skill`**: Connects to an MCP server and registers its tools for use in subsequent turns. Use this when you need capabilities not provided by your existing tools — for example, after deploying an MCP server script via `toolbox_exec`.
+  ```tool_request
+  {"name": "register_mcp_skill", "arguments": {"server_id": "my-tool", "server_name": "My Custom Tool", "base_url": "http://orion-toolbox:9090/mcp"}}
+  ```
+  After successful registration, the new tools become available immediately in your next turn.
+
 ### Guidelines
 
 - Be resourceful. Try multiple approaches before giving up.
