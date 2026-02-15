@@ -19,8 +19,9 @@ use orion_core::system_prompt::{
 };
 use orion_core::templates::{fill_soul_template, GROWTH_MD};
 use orion_core::{
-    validate_local_llm_url, AgentEntry, AppConfig, CoreDocument, GlobalConfig, MemoryBackend,
-    RoutingMode, SecretsVault, SigMeta, Verifier, CONFIG_SCHEMA_VERSION,
+    curated_provider_models, validate_local_llm_url, AgentEntry, AppConfig, CoreDocument,
+    GlobalConfig, MemoryBackend, ProviderCatalogEntry, RoutingMode, SecretsVault, SigMeta,
+    ThinkingModelTier, TierModels, Verifier, CONFIG_SCHEMA_VERSION,
 };
 use orion_skills::manifest::TrustTier;
 use orion_skills::skill::Skill;
@@ -212,6 +213,9 @@ struct AgentIdentityInfo {
 #[derive(Deserialize)]
 struct CreateAgentRequest {
     name: String,
+    /// If true, skip interactive birth and auto-generate standard documents from agent name.
+    #[serde(default)]
+    quick_start: bool,
 }
 
 #[derive(Serialize)]
@@ -310,6 +314,50 @@ fn default_true() -> bool {
     true
 }
 
+fn provider_supports_tier_models(provider: &str) -> bool {
+    matches!(
+        AppConfig::normalize_provider_name(provider).as_str(),
+        "openai" | "anthropic" | "perplexity" | "xai" | "google"
+    )
+}
+
+fn resolve_ego_credentials_with_preference(
+    vault: &SecretsVault,
+    preference: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    // If explicit preference is set and has a key, use it first.
+    if let Some(pref) = preference {
+        let normalized = AppConfig::normalize_provider_name(pref);
+        if let Some(key) = vault.get_secret(&normalized) {
+            return (Some(normalized), Some(key.to_string()));
+        }
+    }
+    // Default: anthropic > openai > first available non-tavily key.
+    let providers = vault.list_providers();
+    let preferred = ["anthropic", "openai"];
+    let mut found_name: Option<String> = None;
+    let mut found_key: Option<String> = None;
+    for pref in &preferred {
+        if let Some(key) = vault.get_secret(pref) {
+            found_name = Some(pref.to_string());
+            found_key = Some(key.to_string());
+            break;
+        }
+    }
+    if found_name.is_none() {
+        for p in &providers {
+            if *p != "tavily" {
+                if let Some(key) = vault.get_secret(p) {
+                    found_name = Some(p.to_string());
+                    found_key = Some(key.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    (found_name, found_key)
+}
+
 #[derive(Serialize)]
 struct StoreKeyResponse {
     ok: bool,
@@ -320,6 +368,68 @@ struct StoreKeyResponse {
 #[derive(Serialize)]
 struct ProvidersResponse {
     providers: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TierModelsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_provider: Option<String>,
+    models: HashMap<String, TierModels>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog: Option<HashMap<String, ProviderCatalogEntry>>,
+}
+
+#[derive(Deserialize)]
+struct TierModelsUpdateRequest {
+    models: HashMap<String, TierModels>,
+}
+
+#[derive(Serialize)]
+struct TierModelsUpdateResponse {
+    ok: bool,
+}
+
+#[derive(Deserialize)]
+struct RefreshCatalogRequest {
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RefreshCatalogResponse {
+    ok: bool,
+    refreshed: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ValidateModelsRequest {
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ValidateModelsResponse {
+    results: HashMap<String, ProviderModelValidation>,
+}
+
+#[derive(Serialize)]
+struct ProviderModelValidation {
+    fast: ModelValidationResult,
+    standard: ModelValidationResult,
+    pro: ModelValidationResult,
+}
+
+#[derive(Serialize)]
+struct ModelValidationResult {
+    model: String,
+    valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetActiveProviderRequest {
+    provider: String,
 }
 
 #[derive(Serialize)]
@@ -605,6 +715,10 @@ async fn api_create_agent(
         database_url,
         birth_model,
         id_model_default: None,
+        tier_models: std::collections::HashMap::new(),
+        active_provider_preference: None,
+        provider_catalog: std::collections::HashMap::new(),
+        pro_mode_sidecar_url: None,
     };
     let config_path = agent_dir.join("config.json");
     config.save(&config_path).map_err(|e| {
@@ -640,6 +754,68 @@ async fn api_create_agent(
     })?;
 
     tracing::info!("Created new agent: {} ({})", name, uuid);
+
+    // Quick-start: auto-generate identity, constitutional docs, and complete birth.
+    if body.quick_start {
+        let qs_name = name.to_string();
+        let qs_config_path = config_path.clone();
+        let qs_docs_dir = docs_dir.clone();
+        let _qs_agent_dir = agent_dir.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            use orion_core::templates::{
+                fill_soul_template_default, ETHICS_MD, GROWTH_MD, INSTINCTS_MD,
+            };
+
+            // Load fresh config for mutation.
+            let mut config = AppConfig::load(&qs_config_path)
+                .map_err(|e| format!("Quick-start load config: {}", e))?;
+
+            // 1. Generate Ed25519 identity (Darkness).
+            // generate_external_keypair writes pubkey to external_pubkey.bin and returns base64 private key.
+            let keypair = orion_core::generate_external_keypair(&qs_docs_dir)
+                .map_err(|e| format!("Quick-start generate identity: {}", e))?;
+
+            // Reconstruct SigningKey from the returned base64 private key for signing.
+            let signing_key = orion_core::parse_private_key(&keypair.private_key_base64)
+                .map_err(|e| format!("Quick-start parse signing key: {}", e))?;
+
+            // 2. Write standard constitutional documents.
+            let soul_content = fill_soul_template_default(&qs_name);
+            std::fs::write(qs_docs_dir.join("soul.md"), &soul_content)
+                .map_err(|e| format!("Write soul.md: {}", e))?;
+            std::fs::write(qs_docs_dir.join("ethics.md"), ETHICS_MD)
+                .map_err(|e| format!("Write ethics.md: {}", e))?;
+            std::fs::write(qs_docs_dir.join("instincts.md"), INSTINCTS_MD)
+                .map_err(|e| format!("Write instincts.md: {}", e))?;
+            std::fs::write(qs_docs_dir.join("growth.md"), GROWTH_MD)
+                .map_err(|e| format!("Write growth.md: {}", e))?;
+
+            // 3. Sign constitutional documents with the signing key.
+            orion_core::sign_constitutional_documents(&signing_key, &qs_docs_dir)
+                .map_err(|e| format!("Quick-start sign docs: {}", e))?;
+
+            // 4. Mark birth complete (pubkey already written by generate_external_keypair).
+            config.birth_complete = true;
+            config.birth_stage = None;
+            config.birth_timestamp = Some(chrono::Utc::now().to_rfc3339());
+            config
+                .save(&qs_config_path)
+                .map_err(|e| format!("Quick-start save config: {}", e))?;
+
+            tracing::info!(agent = %qs_name, "Quick-start birth completed");
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Quick-start task join: {}", e),
+            )
+        })?
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
     Ok(Json(CreateAgentResponse { id: uuid }))
 }
 
@@ -686,7 +862,7 @@ async fn api_load_agent(
     Ok(Json(HealthResponse { status: "ok" }))
 }
 
-/// GET /api/agents/:id/birth/state — materialize Darkness if needed and return stage + one-time private key.
+/// GET /api/agents/{id}/birth/state — materialize Darkness if needed and return stage + one-time private key.
 async fn api_birth_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -779,7 +955,7 @@ async fn api_birth_state(
     Ok(Json(response))
 }
 
-/// POST /api/agents/:id/birth/advance-darkness — user has saved the private key; advance to Ignition.
+/// POST /api/agents/{id}/birth/advance-darkness — user has saved the private key; advance to Ignition.
 async fn api_birth_advance_darkness(
     Path(id): Path<String>,
 ) -> Result<Json<HealthResponse>, (axum::http::StatusCode, String)> {
@@ -824,7 +1000,7 @@ async fn api_birth_advance_darkness(
     Ok(Json(HealthResponse { status: "ok" }))
 }
 
-/// POST /api/agents/:id/birth/ignition — set local LLM URL (optional) and advance to Connectivity.
+/// POST /api/agents/{id}/birth/ignition — set local LLM URL (optional) and advance to Connectivity.
 async fn api_birth_ignition(
     Path(id): Path<String>,
     Json(body): Json<IgnitionRequest>,
@@ -886,7 +1062,7 @@ async fn api_birth_ignition(
     Ok(Json(HealthResponse { status: "ok" }))
 }
 
-/// GET /api/agents/:id/genesis/state — read persisted genesis path (for session recovery).
+/// GET /api/agents/{id}/genesis/state — read persisted genesis path (for session recovery).
 async fn api_genesis_state(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -915,7 +1091,7 @@ async fn api_genesis_state(
     Ok(Json(value))
 }
 
-/// GET /api/agents/:id/genesis/forge/state — read current Soul Forge session state (for session recovery).
+/// GET /api/agents/{id}/genesis/forge/state — read current Soul Forge session state (for session recovery).
 async fn api_genesis_forge_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1160,7 +1336,7 @@ async fn api_genesis_forge_select(
     })))
 }
 
-/// POST /api/agents/:id/genesis/forge/crystallize — produce soul from Soul Forge and crystallize.
+/// POST /api/agents/{id}/genesis/forge/crystallize — produce soul from Soul Forge and crystallize.
 async fn api_genesis_forge_crystallize(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1234,7 +1410,7 @@ async fn api_genesis_forge_crystallize(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// GET /api/agents/:id/birth/chat/history — return persisted birth chat messages (for Direct Discovery).
+/// GET /api/agents/{id}/birth/chat/history — return persisted birth chat messages (for Direct Discovery).
 async fn api_birth_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -1258,7 +1434,7 @@ async fn api_birth_chat_history(
     Ok(Json(serde_json::json!({ "messages": messages })))
 }
 
-/// POST /api/agents/:id/birth/chat — one turn of Direct Discovery Genesis chat; handles recommend_crystallize.
+/// POST /api/agents/{id}/birth/chat — one turn of Direct Discovery Genesis chat; handles recommend_crystallize.
 async fn api_birth_chat(
     Path(id): Path<String>,
     Json(body): Json<BirthChatRequest>,
@@ -1475,7 +1651,7 @@ async fn api_birth_chat(
 // Connectivity API — dual-channel key provision
 // ============================================================================
 
-/// GET /api/agents/:id/connectivity/providers — list currently stored provider names.
+/// GET /api/agents/{id}/connectivity/providers — list currently stored provider names.
 async fn api_connectivity_providers(
     Path(id): Path<String>,
 ) -> Result<Json<ProvidersResponse>, (axum::http::StatusCode, String)> {
@@ -1496,7 +1672,365 @@ async fn api_connectivity_providers(
     Ok(Json(ProvidersResponse { providers }))
 }
 
-/// POST /api/agents/:id/connectivity/keys — store an API key directly (button channel, no LLM).
+/// GET /api/agents/{id}/tier-models — effective tier-model mapping for configured LLM providers.
+async fn api_agent_tier_models(
+    Path(id): Path<String>,
+) -> Result<Json<TierModelsResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+
+    let vault = SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
+    let (active_provider, _) = resolve_ego_credentials_with_preference(
+        &vault,
+        config.active_provider_preference.as_deref(),
+    );
+    let active_provider = active_provider
+        .map(|p| AppConfig::normalize_provider_name(&p))
+        .filter(|p| provider_supports_tier_models(p));
+
+    let mut providers: Vec<String> = Vec::new();
+    for p in vault.list_providers() {
+        let normalized = AppConfig::normalize_provider_name(p);
+        if provider_supports_tier_models(&normalized) && !providers.contains(&normalized) {
+            providers.push(normalized);
+        }
+    }
+    for p in config.tier_models.keys() {
+        let normalized = AppConfig::normalize_provider_name(p);
+        if provider_supports_tier_models(&normalized) && !providers.contains(&normalized) {
+            providers.push(normalized);
+        }
+    }
+    if let Some(active) = &active_provider {
+        if !providers.contains(active) {
+            providers.push(active.clone());
+        }
+    }
+
+    let mut models: HashMap<String, TierModels> = HashMap::new();
+    let mut catalog: HashMap<String, ProviderCatalogEntry> = HashMap::new();
+    for provider in &providers {
+        models.insert(provider.clone(), config.effective_tier_models(provider));
+        // Include catalog data if cached, else provide curated baseline.
+        let entry = config
+            .provider_catalog
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| ProviderCatalogEntry {
+                available_models: curated_provider_models(provider),
+                source: "curated".to_string(),
+                last_refreshed: None,
+                warnings: vec![],
+                validated: false,
+            });
+        catalog.insert(provider.clone(), entry);
+    }
+
+    Ok(Json(TierModelsResponse {
+        active_provider,
+        models,
+        catalog: Some(catalog),
+    }))
+}
+
+/// PUT /api/agents/{id}/tier-models — merge/update per-provider tier model mapping.
+async fn api_agent_tier_models_update(
+    Path(id): Path<String>,
+    Json(body): Json<TierModelsUpdateRequest>,
+) -> Result<Json<TierModelsUpdateResponse>, (axum::http::StatusCode, String)> {
+    if body.models.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "models payload is required".to_string(),
+        ));
+    }
+
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+
+    for (provider, incoming) in body.models {
+        let normalized = AppConfig::normalize_provider_name(&provider);
+        if !provider_supports_tier_models(&normalized) {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Unsupported provider for tier models: {}", provider),
+            ));
+        }
+        let fast = incoming.fast.trim().to_string();
+        let standard = incoming.standard.trim().to_string();
+        let pro = incoming.pro.trim().to_string();
+        if fast.is_empty() || standard.is_empty() || pro.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "All tier model values are required for provider '{}'",
+                    provider
+                ),
+            ));
+        }
+        config.tier_models.insert(
+            normalized,
+            TierModels {
+                fast,
+                standard,
+                pro,
+            },
+        );
+    }
+
+    config.save(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Save config failed: {}", e),
+        )
+    })?;
+
+    Ok(Json(TierModelsUpdateResponse { ok: true }))
+}
+
+/// POST /api/agents/{id}/tier-models/refresh — refresh provider model catalogs from upstream APIs.
+async fn api_agent_tier_models_refresh(
+    Path(id): Path<String>,
+    Json(body): Json<RefreshCatalogRequest>,
+) -> Result<Json<RefreshCatalogResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+    let vault = SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
+
+    // Determine which providers to refresh.
+    let targets: Vec<String> = if let Some(ref p) = body.provider {
+        vec![AppConfig::normalize_provider_name(p)]
+    } else {
+        vault
+            .list_providers()
+            .into_iter()
+            .map(|p| AppConfig::normalize_provider_name(p))
+            .filter(|p| provider_supports_tier_models(p))
+            .collect()
+    };
+
+    let mut refreshed: Vec<String> = Vec::new();
+    for provider in &targets {
+        if let Some(key) = vault.get_secret(provider) {
+            let entry = orion_capabilities::cognitive::model_catalog::refresh_catalog(
+                provider,
+                &key.to_string(),
+            )
+            .await;
+            config.provider_catalog.insert(provider.clone(), entry);
+            refreshed.push(provider.clone());
+        }
+    }
+
+    config.save(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Save config failed: {}", e),
+        )
+    })?;
+
+    Ok(Json(RefreshCatalogResponse {
+        ok: true,
+        refreshed,
+    }))
+}
+
+/// POST /api/agents/{id}/tier-models/validate — validate selected tier models against provider APIs.
+async fn api_agent_tier_models_validate(
+    Path(id): Path<String>,
+    Json(body): Json<ValidateModelsRequest>,
+) -> Result<Json<ValidateModelsResponse>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+    let vault = SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
+
+    let targets: Vec<String> = if let Some(ref p) = body.provider {
+        vec![AppConfig::normalize_provider_name(p)]
+    } else {
+        vault
+            .list_providers()
+            .into_iter()
+            .map(|p| AppConfig::normalize_provider_name(p))
+            .filter(|p| provider_supports_tier_models(p))
+            .collect()
+    };
+
+    let mut results: HashMap<String, ProviderModelValidation> = HashMap::new();
+    for provider in &targets {
+        let tiers = config.effective_tier_models(provider);
+        let key = vault
+            .get_secret(provider)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let validate = |model: &str| {
+            let p = provider.clone();
+            let k = key.clone();
+            let m = model.to_string();
+            async move {
+                match orion_capabilities::cognitive::model_catalog::validate_model(&p, &m, &k).await
+                {
+                    Ok(()) => ModelValidationResult {
+                        model: m,
+                        valid: true,
+                        error: None,
+                    },
+                    Err(e) => ModelValidationResult {
+                        model: m,
+                        valid: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+        };
+
+        let (fast, standard, pro) = tokio::join!(
+            validate(&tiers.fast),
+            validate(&tiers.standard),
+            validate(&tiers.pro)
+        );
+        results.insert(
+            provider.clone(),
+            ProviderModelValidation {
+                fast,
+                standard,
+                pro,
+            },
+        );
+    }
+
+    Ok(Json(ValidateModelsResponse { results }))
+}
+
+/// POST /api/agents/{id}/tier-models/reset — reset a provider's tier models to built-in defaults.
+async fn api_agent_tier_models_reset(
+    Path(id): Path<String>,
+    Json(body): Json<RefreshCatalogRequest>,
+) -> Result<Json<TierModelsUpdateResponse>, (axum::http::StatusCode, String)> {
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+
+    if let Some(ref p) = body.provider {
+        let normalized = AppConfig::normalize_provider_name(p);
+        config.tier_models.remove(&normalized);
+    } else {
+        config.tier_models.clear();
+    }
+
+    config.save(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Save config failed: {}", e),
+        )
+    })?;
+
+    Ok(Json(TierModelsUpdateResponse { ok: true }))
+}
+
+/// PUT /api/agents/{id}/active-provider — set the preferred active provider for Ego routing.
+async fn api_agent_set_active_provider(
+    Path(id): Path<String>,
+    Json(body): Json<SetActiveProviderRequest>,
+) -> Result<Json<TierModelsUpdateResponse>, (axum::http::StatusCode, String)> {
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config failed: {}", e),
+        )
+    })?;
+
+    let normalized = AppConfig::normalize_provider_name(&body.provider);
+    if normalized.is_empty() || normalized == "auto" {
+        config.active_provider_preference = None;
+    } else {
+        config.active_provider_preference = Some(normalized);
+    }
+
+    config.save(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Save config failed: {}", e),
+        )
+    })?;
+
+    Ok(Json(TierModelsUpdateResponse { ok: true }))
+}
+
+/// POST /api/agents/{id}/connectivity/keys — store an API key directly (button channel, no LLM).
 async fn api_connectivity_store_key(
     Path(id): Path<String>,
     Json(body): Json<StoreKeyRequest>,
@@ -1584,7 +2118,7 @@ async fn api_connectivity_store_key(
     }))
 }
 
-/// GET /api/agents/:id/connectivity/chat/history — return persisted connectivity chat messages.
+/// GET /api/agents/{id}/connectivity/chat/history — return persisted connectivity chat messages.
 async fn api_connectivity_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -1608,7 +2142,7 @@ async fn api_connectivity_chat_history(
     Ok(Json(serde_json::json!({ "messages": messages })))
 }
 
-/// POST /api/agents/:id/connectivity/chat — one turn of Connectivity stage chat.
+/// POST /api/agents/{id}/connectivity/chat — one turn of Connectivity stage chat.
 async fn api_connectivity_chat(
     Path(id): Path<String>,
     Json(body): Json<ConnectivityChatRequest>,
@@ -1890,7 +2424,7 @@ async fn api_connectivity_chat(
     }))
 }
 
-/// POST /api/agents/:id/birth/complete-emergence — sign docs, write birth memory, drop key. Only when birth_stage is Emergence.
+/// POST /api/agents/{id}/birth/complete-emergence — sign docs, write birth memory, drop key. Only when birth_stage is Emergence.
 async fn api_birth_complete_emergence(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2025,7 +2559,7 @@ fn strip_tool_result_block(content: &str) -> String {
         .unwrap_or_else(|| content.to_string())
 }
 
-/// POST /api/agents/:id/chat/attachments — upload and parse attachments for operational chat.
+/// POST /api/agents/{id}/chat/attachments — upload and parse attachments for operational chat.
 async fn api_operational_chat_upload_attachments(
     Path(id): Path<String>,
     mut multipart: Multipart,
@@ -2073,7 +2607,7 @@ async fn api_operational_chat_upload_attachments(
     Ok(Json(ChatAttachmentUploadResponse { attachments }))
 }
 
-/// GET /api/agents/:id/chat/history — return persisted operational chat messages.
+/// GET /api/agents/{id}/chat/history — return persisted operational chat messages.
 async fn api_operational_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -2135,7 +2669,7 @@ fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
     entries
 }
 
-/// POST /api/agents/:id/chat — one turn of operational (post-birth) conversation.
+/// POST /api/agents/{id}/chat — one turn of operational (post-birth) conversation.
 async fn api_operational_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2273,32 +2807,20 @@ async fn api_operational_chat(
     let (ego_name, ego_key) = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        // Prefer anthropic > openai > first available
-        let providers = vault.list_providers();
-        let preferred = ["anthropic", "openai"];
-        let mut found_name: Option<String> = None;
-        let mut found_key: Option<String> = None;
-        for pref in &preferred {
-            if let Some(key) = vault.get_secret(pref) {
-                found_name = Some(pref.to_string());
-                found_key = Some(key.to_string());
-                break;
-            }
-        }
-        if found_name.is_none() {
-            // Fall back to first available non-tavily provider
-            for p in &providers {
-                if *p != "tavily" {
-                    if let Some(key) = vault.get_secret(p) {
-                        found_name = Some(p.to_string());
-                        found_key = Some(key.to_string());
-                        break;
-                    }
-                }
-            }
-        }
-        (found_name, found_key)
+        resolve_ego_credentials_with_preference(
+            &vault,
+            config.active_provider_preference.as_deref(),
+        )
     };
+    let requested_router_mode = body.router_mode.unwrap_or(agentic::AgenticRouterMode::Auto);
+    let tier = match requested_router_mode {
+        agentic::AgenticRouterMode::Auto => ThinkingModelTier::Fast,
+        agentic::AgenticRouterMode::ThinkHard => ThinkingModelTier::Standard,
+        agentic::AgenticRouterMode::ThinkHarder => ThinkingModelTier::Pro,
+    };
+    let ego_model = ego_name
+        .as_deref()
+        .map(|provider| config.effective_tier_model(provider, tier));
 
     // Orchestration policy: mentor-facing chat is Ego-primary.
     // Router still preserves built-in Id fallback when Ego is unavailable or fails.
@@ -2308,8 +2830,9 @@ async fn api_operational_chat(
         agent = %id,
         local_llm = ?config.local_llm_base_url,
         ego_provider = ?ego_name,
+        ego_model = ?ego_model,
         routing_mode = ?effective_routing_mode,
-        requested_router_mode = ?body.router_mode,
+        requested_router_mode = ?requested_router_mode,
         attachment_count = attachment_ids.len(),
         message_count = messages.len(),
         "operational_chat: building router"
@@ -2319,6 +2842,7 @@ async fn api_operational_chat(
         config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
+        ego_model,
         effective_routing_mode,
     )
     .await;
@@ -2327,13 +2851,60 @@ async fn api_operational_chat(
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
     tracing::info!(agent = %id, "operational_chat: sending chat turn");
-    let response = router.route(messages.clone()).await.map_err(|e| {
-        tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Chat failed: {}", e),
-        )
-    })?;
+
+    // Pro-mode sidecar path: if Pro tier + sidecar configured + 2+ providers, compare.
+    let response = if tier == ThinkingModelTier::Pro && config.pro_mode_sidecar_url.is_some() {
+        let sidecar_url = config.pro_mode_sidecar_url.as_deref().unwrap();
+        let vault_for_pro = SecretsVault::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        let top_two =
+            resolve_top_two_providers(&vault_for_pro, config.active_provider_preference.as_deref());
+        if top_two.len() >= 2 {
+            let provider_configs: Vec<(String, String, String)> = top_two
+                .into_iter()
+                .map(|(name, key)| {
+                    let model = config.effective_tier_model(&name, ThinkingModelTier::Pro);
+                    (name, key, model)
+                })
+                .collect();
+            tracing::info!(
+                agent = %id,
+                providers = ?provider_configs.iter().map(|(n, _, m)| format!("{}:{}", n, m)).collect::<Vec<_>>(),
+                "operational_chat: pro sidecar path"
+            );
+            match call_pro_sidecar(sidecar_url, &messages, provider_configs).await {
+                Ok(content) => orion_capabilities::cognitive::CompletionResponse {
+                    content,
+                    tool_calls: None,
+                },
+                Err(e) => {
+                    tracing::warn!(agent = %id, error = %e, "operational_chat: pro sidecar failed, falling back to standard Ego");
+                    router.route(messages.clone()).await.map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Chat failed: {}", e),
+                        )
+                    })?
+                }
+            }
+        } else {
+            // Fewer than 2 providers; use normal routing.
+            router.route(messages.clone()).await.map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Chat failed: {}", e),
+                )
+            })?
+        }
+    } else {
+        router.route(messages.clone()).await.map_err(|e| {
+            tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Chat failed: {}", e),
+            )
+        })?
+    };
 
     // Parse tool_request blocks from LLM response
     let (clean_content, tool_requests) = parse_tool_requests(&response.content);
@@ -2673,7 +3244,7 @@ async fn api_operational_chat(
 // External Verification API
 // ============================================================================
 
-/// GET /api/agents/:id/identity — public key bundle for external verification.
+/// GET /api/agents/{id}/identity — public key bundle for external verification.
 async fn api_agent_identity(
     Path(id): Path<String>,
 ) -> Result<Json<AgentIdentityBundle>, (axum::http::StatusCode, String)> {
@@ -2723,7 +3294,7 @@ async fn api_agent_identity(
     }))
 }
 
-/// GET /api/agents/:id/constitution — signed constitutional documents.
+/// GET /api/agents/{id}/constitution — signed constitutional documents.
 async fn api_agent_constitution(
     Path(id): Path<String>,
 ) -> Result<Json<ConstitutionResponse>, (axum::http::StatusCode, String)> {
@@ -2802,7 +3373,7 @@ async fn api_agent_constitution(
     }))
 }
 
-/// POST /api/agents/:id/verify — verify all constitutional document signatures.
+/// POST /api/agents/{id}/verify — verify all constitutional document signatures.
 async fn api_agent_verify(
     Path(id): Path<String>,
 ) -> Result<Json<VerifyResponse>, (axum::http::StatusCode, String)> {
@@ -3158,6 +3729,10 @@ async fn api_import_agent(
         database_url,
         birth_model,
         id_model_default: None,
+        tier_models: std::collections::HashMap::new(),
+        active_provider_preference: None,
+        provider_catalog: std::collections::HashMap::new(),
+        pro_mode_sidecar_url: None,
     };
     config.save(&agent_dir.join("config.json")).map_err(|e| {
         (
@@ -3378,7 +3953,7 @@ async fn api_import_agent(
     }))
 }
 
-/// GET /api/agents/:id/export — export portable agent identity bundle as JSON download.
+/// GET /api/agents/{id}/export — export portable agent identity bundle as JSON download.
 async fn api_export_agent(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -3675,7 +4250,7 @@ struct SkillExecuteResponse {
     error: Option<String>,
 }
 
-/// GET /api/agents/:id/skills — list registered skills with trust tiers and tools.
+/// GET /api/agents/{id}/skills — list registered skills with trust tiers and tools.
 async fn api_list_skills(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3722,7 +4297,7 @@ async fn api_list_skills(
     Ok(Json(result))
 }
 
-/// POST /api/agents/:id/skills/:skill_id/execute — execute a skill tool directly.
+/// POST /api/agents/{id}/skills/{skill_id}/execute — execute a skill tool directly.
 async fn api_execute_skill(
     State(state): State<AppState>,
     Path((id, skill_id)): Path<(String, String)>,
@@ -3778,7 +4353,7 @@ async fn api_execute_skill(
     }
 }
 
-/// GET /api/agents/:id/skills/missing-secrets — list secrets needed by registered skills.
+/// GET /api/agents/{id}/skills/missing-secrets — list secrets needed by registered skills.
 async fn api_skills_missing_secrets(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4041,6 +4616,142 @@ async fn launch_agentic_task_internal(
     })
 }
 
+/// Call the Pro-mode LangChain sidecar to compare two providers and return the best response.
+/// Returns Ok(content) on success, Err on sidecar failure (caller should fallback).
+async fn call_pro_sidecar(
+    sidecar_url: &str,
+    messages: &[orion_capabilities::cognitive::Message],
+    provider_configs: Vec<(String, String, String)>, // (name, key, model)
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct SidecarProviderConfig {
+        name: String,
+        api_key: String,
+        model: String,
+    }
+    #[derive(serde::Serialize)]
+    struct SidecarMessage {
+        role: String,
+        content: String,
+    }
+    #[derive(serde::Serialize)]
+    struct SidecarRequest {
+        messages: Vec<SidecarMessage>,
+        provider_configs: Vec<SidecarProviderConfig>,
+    }
+    #[derive(serde::Deserialize)]
+    struct SidecarResponse {
+        content: String,
+        selected_provider: String,
+        reason: String,
+    }
+
+    let sidecar_msgs: Vec<SidecarMessage> = messages
+        .iter()
+        .map(|m| SidecarMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+
+    let configs: Vec<SidecarProviderConfig> = provider_configs
+        .into_iter()
+        .map(|(name, key, model)| SidecarProviderConfig {
+            name,
+            api_key: key,
+            model,
+        })
+        .collect();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let url = format!("{}/compare", sidecar_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .json(&SidecarRequest {
+            messages: sidecar_msgs,
+            provider_configs: configs,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("Sidecar request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Sidecar error ({}): {}", status, body));
+    }
+
+    let parsed: SidecarResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Sidecar response parse error: {}", e))?;
+
+    tracing::info!(
+        selected_provider = %parsed.selected_provider,
+        reason = %parsed.reason,
+        "pro_sidecar: comparison complete"
+    );
+
+    Ok(parsed.content)
+}
+
+/// Resolve the top two connected providers from vault for Pro-mode comparison.
+fn resolve_top_two_providers(
+    vault: &SecretsVault,
+    preference: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+
+    // If preference is set and has key, add it first.
+    if let Some(pref) = preference {
+        let normalized = AppConfig::normalize_provider_name(pref);
+        if provider_supports_tier_models(&normalized) {
+            if let Some(key) = vault.get_secret(&normalized) {
+                result.push((normalized, key.to_string()));
+            }
+        }
+    }
+
+    // Add preferred providers.
+    let preferred = ["anthropic", "openai"];
+    for pref in &preferred {
+        if result.iter().any(|(n, _)| n == *pref) {
+            continue;
+        }
+        if let Some(key) = vault.get_secret(pref) {
+            result.push((pref.to_string(), key.to_string()));
+            if result.len() >= 2 {
+                break;
+            }
+        }
+    }
+
+    // Fill remaining from vault.
+    if result.len() < 2 {
+        for p in vault.list_providers() {
+            let normalized = AppConfig::normalize_provider_name(p);
+            if !provider_supports_tier_models(&normalized) || normalized == "tavily" {
+                continue;
+            }
+            if result.iter().any(|(n, _)| *n == normalized) {
+                continue;
+            }
+            if let Some(key) = vault.get_secret(p) {
+                result.push((normalized, key.to_string()));
+                if result.len() >= 2 {
+                    break;
+                }
+            }
+        }
+    }
+
+    result
+}
+
 fn append_operational_notice(agent_dir: &std::path::Path, content: &str) -> Result<(), String> {
     let chat_path = agent_dir.join("operational_chat.json");
     let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
@@ -4063,6 +4774,7 @@ async fn run_id_check_for_job(
 ) -> Result<String, String> {
     let router = orion_router::IdEgoRouter::with_provider_auto_detect(
         config.local_llm_base_url.clone(),
+        None,
         None,
         None,
         RoutingMode::IdPrimary,
@@ -4323,7 +5035,7 @@ struct AgenticRunInfo {
     completed_at: Option<String>,
 }
 
-/// GET /api/agents/:id/agent/runs — list agentic runs (active + historical).
+/// GET /api/agents/{id}/agent/runs — list agentic runs (active + historical).
 async fn api_list_agentic_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4425,7 +5137,7 @@ async fn api_list_agentic_runs(
     Ok(Json(runs))
 }
 
-/// POST /api/agents/:id/agent/run — start an agentic task.
+/// POST /api/agents/{id}/agent/run — start an agentic task.
 async fn api_agentic_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4450,7 +5162,7 @@ async fn api_agentic_run(
     Ok(Json(response))
 }
 
-/// GET /api/agents/:id/agent/stream?task=<id> — SSE event stream for an agentic task.
+/// GET /api/agents/{id}/agent/stream?task=<id> — SSE event stream for an agentic task.
 async fn api_agentic_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4512,7 +5224,7 @@ async fn api_agentic_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// POST /api/agents/:id/agent/respond — send mentor response to paused agentic task.
+/// POST /api/agents/{id}/agent/respond — send mentor response to paused agentic task.
 async fn api_agentic_respond(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4547,7 +5259,7 @@ async fn api_agentic_respond(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// POST /api/agents/:id/agent/confirm — approve or deny a tool confirmation request.
+/// POST /api/agents/{id}/agent/confirm — approve or deny a tool confirmation request.
 async fn api_agentic_confirm(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4582,7 +5294,7 @@ async fn api_agentic_confirm(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// POST /api/agents/:id/agent/cancel — cancel a running agentic task.
+/// POST /api/agents/{id}/agent/cancel — cancel a running agentic task.
 async fn api_agentic_cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4618,7 +5330,7 @@ async fn api_agentic_cancel(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// GET /api/agents/:id/agent/status?task=<id> — check task status.
+/// GET /api/agents/{id}/agent/status?task=<id> — check task status.
 async fn api_agentic_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4652,7 +5364,7 @@ async fn api_agentic_status(
 // Orchestration Jobs Endpoints
 // ============================================================================
 
-/// GET /api/agents/:id/orchestration/jobs — list scheduled orchestration jobs.
+/// GET /api/agents/{id}/orchestration/jobs — list scheduled orchestration jobs.
 async fn api_orchestration_jobs(
     Path(id): Path<String>,
 ) -> Result<Json<OrchestrationJobsResponse>, (axum::http::StatusCode, String)> {
@@ -4668,7 +5380,7 @@ async fn api_orchestration_jobs(
     Ok(Json(OrchestrationJobsResponse { jobs }))
 }
 
-/// POST /api/agents/:id/orchestration/jobs — create a scheduled orchestration job.
+/// POST /api/agents/{id}/orchestration/jobs — create a scheduled orchestration job.
 async fn api_orchestration_job_create(
     Path(id): Path<String>,
     Json(body): Json<CreateOrchestrationJobRequest>,
@@ -4687,7 +5399,7 @@ async fn api_orchestration_job_create(
     Ok(Json(job))
 }
 
-/// POST /api/agents/:id/orchestration/jobs/:job_id — update an orchestration job.
+/// POST /api/agents/{id}/orchestration/jobs/{job_id} — update an orchestration job.
 async fn api_orchestration_job_update(
     Path((id, job_id)): Path<(String, String)>,
     Json(body): Json<UpdateOrchestrationJobRequest>,
@@ -4712,7 +5424,7 @@ async fn api_orchestration_job_update(
     Ok(Json(updated))
 }
 
-/// POST /api/agents/:id/orchestration/jobs/:job_id/enable — enable/disable a job.
+/// POST /api/agents/{id}/orchestration/jobs/{job_id}/enable — enable/disable a job.
 async fn api_orchestration_job_enable(
     Path((id, job_id)): Path<(String, String)>,
     Json(body): Json<SetOrchestrationJobEnabledRequest>,
@@ -4738,7 +5450,7 @@ async fn api_orchestration_job_enable(
     Ok(Json(updated))
 }
 
-/// POST /api/agents/:id/orchestration/jobs/:job_id/delete — delete an orchestration job.
+/// POST /api/agents/{id}/orchestration/jobs/{job_id}/delete — delete an orchestration job.
 async fn api_orchestration_job_delete(
     Path((id, job_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -4760,7 +5472,7 @@ async fn api_orchestration_job_delete(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// POST /api/agents/:id/orchestration/jobs/:job_id/run — run one job immediately.
+/// POST /api/agents/{id}/orchestration/jobs/{job_id}/run — run one job immediately.
 async fn api_orchestration_job_run_now(
     State(state): State<AppState>,
     Path((id, job_id)): Path<(String, String)>,
@@ -4792,7 +5504,7 @@ async fn api_orchestration_job_run_now(
     Ok(Json(run_result))
 }
 
-/// GET /api/agents/:id/orchestration/logs — fetch recent orchestration logs.
+/// GET /api/agents/{id}/orchestration/logs — fetch recent orchestration logs.
 async fn api_orchestration_logs(
     Path(id): Path<String>,
     Query(query): Query<JobLogsQuery>,
@@ -4889,108 +5601,128 @@ async fn main() -> std::io::Result<()> {
         .route("/api/identities", get(api_identities))
         .route("/api/agents", post(api_create_agent))
         .route("/api/agents/import", post(api_import_agent))
-        .route("/api/agents/:id/load", post(api_load_agent))
-        .route("/api/agents/:id/birth/state", get(api_birth_state))
+        .route("/api/agents/{id}/load", post(api_load_agent))
+        .route("/api/agents/{id}/birth/state", get(api_birth_state))
         .route(
-            "/api/agents/:id/birth/advance-darkness",
+            "/api/agents/{id}/birth/advance-darkness",
             post(api_birth_advance_darkness),
         )
-        .route("/api/agents/:id/birth/ignition", post(api_birth_ignition))
+        .route("/api/agents/{id}/birth/ignition", post(api_birth_ignition))
         .route(
-            "/api/agents/:id/connectivity/providers",
+            "/api/agents/{id}/connectivity/providers",
             get(api_connectivity_providers),
         )
         .route(
-            "/api/agents/:id/connectivity/keys",
+            "/api/agents/{id}/tier-models",
+            get(api_agent_tier_models).put(api_agent_tier_models_update),
+        )
+        .route(
+            "/api/agents/{id}/tier-models/refresh",
+            post(api_agent_tier_models_refresh),
+        )
+        .route(
+            "/api/agents/{id}/tier-models/validate",
+            post(api_agent_tier_models_validate),
+        )
+        .route(
+            "/api/agents/{id}/tier-models/reset",
+            post(api_agent_tier_models_reset),
+        )
+        .route(
+            "/api/agents/{id}/active-provider",
+            axum::routing::put(api_agent_set_active_provider),
+        )
+        .route(
+            "/api/agents/{id}/connectivity/keys",
             post(api_connectivity_store_key),
         )
         .route(
-            "/api/agents/:id/connectivity/chat/history",
+            "/api/agents/{id}/connectivity/chat/history",
             get(api_connectivity_chat_history),
         )
         .route(
-            "/api/agents/:id/connectivity/chat",
+            "/api/agents/{id}/connectivity/chat",
             post(api_connectivity_chat),
         )
         .route("/api/genesis/paths", get(api_genesis_paths))
-        .route("/api/agents/:id/genesis/state", get(api_genesis_state))
-        .route("/api/agents/:id/genesis/start", post(api_genesis_start))
+        .route("/api/agents/{id}/genesis/state", get(api_genesis_state))
+        .route("/api/agents/{id}/genesis/start", post(api_genesis_start))
         .route(
-            "/api/agents/:id/genesis/forge/state",
+            "/api/agents/{id}/genesis/forge/state",
             get(api_genesis_forge_state),
         )
         .route(
-            "/api/agents/:id/genesis/forge/select",
+            "/api/agents/{id}/genesis/forge/select",
             post(api_genesis_forge_select),
         )
         .route(
-            "/api/agents/:id/genesis/forge/crystallize",
+            "/api/agents/{id}/genesis/forge/crystallize",
             post(api_genesis_forge_crystallize),
         )
         .route(
-            "/api/agents/:id/birth/complete-emergence",
+            "/api/agents/{id}/birth/complete-emergence",
             post(api_birth_complete_emergence),
         )
         .route(
-            "/api/agents/:id/birth/chat/history",
+            "/api/agents/{id}/birth/chat/history",
             get(api_birth_chat_history),
         )
-        .route("/api/agents/:id/birth/chat", post(api_birth_chat))
+        .route("/api/agents/{id}/birth/chat", post(api_birth_chat))
         .route(
-            "/api/agents/:id/chat/history",
+            "/api/agents/{id}/chat/history",
             get(api_operational_chat_history),
         )
         .route(
-            "/api/agents/:id/chat/attachments",
+            "/api/agents/{id}/chat/attachments",
             post(api_operational_chat_upload_attachments).layer(DefaultBodyLimit::max(
                 chat_attachments::MAX_TOTAL_UPLOAD_BYTES,
             )),
         )
-        .route("/api/agents/:id/chat", post(api_operational_chat))
-        .route("/api/agents/:id/skills", get(api_list_skills))
+        .route("/api/agents/{id}/chat", post(api_operational_chat))
+        .route("/api/agents/{id}/skills", get(api_list_skills))
         .route(
-            "/api/agents/:id/skills/missing-secrets",
+            "/api/agents/{id}/skills/missing-secrets",
             get(api_skills_missing_secrets),
         )
         .route(
-            "/api/agents/:id/skills/:skill_id/execute",
+            "/api/agents/{id}/skills/{skill_id}/execute",
             post(api_execute_skill),
         )
-        .route("/api/agents/:id/agent/runs", get(api_list_agentic_runs))
-        .route("/api/agents/:id/agent/run", post(api_agentic_run))
-        .route("/api/agents/:id/agent/stream", get(api_agentic_stream))
-        .route("/api/agents/:id/agent/respond", post(api_agentic_respond))
-        .route("/api/agents/:id/agent/confirm", post(api_agentic_confirm))
-        .route("/api/agents/:id/agent/cancel", post(api_agentic_cancel))
-        .route("/api/agents/:id/agent/status", get(api_agentic_status))
+        .route("/api/agents/{id}/agent/runs", get(api_list_agentic_runs))
+        .route("/api/agents/{id}/agent/run", post(api_agentic_run))
+        .route("/api/agents/{id}/agent/stream", get(api_agentic_stream))
+        .route("/api/agents/{id}/agent/respond", post(api_agentic_respond))
+        .route("/api/agents/{id}/agent/confirm", post(api_agentic_confirm))
+        .route("/api/agents/{id}/agent/cancel", post(api_agentic_cancel))
+        .route("/api/agents/{id}/agent/status", get(api_agentic_status))
         .route(
-            "/api/agents/:id/orchestration/jobs",
+            "/api/agents/{id}/orchestration/jobs",
             get(api_orchestration_jobs).post(api_orchestration_job_create),
         )
         .route(
-            "/api/agents/:id/orchestration/jobs/:job_id",
+            "/api/agents/{id}/orchestration/jobs/{job_id}",
             post(api_orchestration_job_update),
         )
         .route(
-            "/api/agents/:id/orchestration/jobs/:job_id/enable",
+            "/api/agents/{id}/orchestration/jobs/{job_id}/enable",
             post(api_orchestration_job_enable),
         )
         .route(
-            "/api/agents/:id/orchestration/jobs/:job_id/delete",
+            "/api/agents/{id}/orchestration/jobs/{job_id}/delete",
             post(api_orchestration_job_delete),
         )
         .route(
-            "/api/agents/:id/orchestration/jobs/:job_id/run",
+            "/api/agents/{id}/orchestration/jobs/{job_id}/run",
             post(api_orchestration_job_run_now),
         )
         .route(
-            "/api/agents/:id/orchestration/logs",
+            "/api/agents/{id}/orchestration/logs",
             get(api_orchestration_logs),
         )
-        .route("/api/agents/:id/identity", get(api_agent_identity))
-        .route("/api/agents/:id/constitution", get(api_agent_constitution))
-        .route("/api/agents/:id/verify", post(api_agent_verify))
-        .route("/api/agents/:id/export", get(api_export_agent))
+        .route("/api/agents/{id}/identity", get(api_agent_identity))
+        .route("/api/agents/{id}/constitution", get(api_agent_constitution))
+        .route("/api/agents/{id}/verify", post(api_agent_verify))
+        .route("/api/agents/{id}/export", get(api_export_agent))
         .layer(cors)
         .with_state(state);
 

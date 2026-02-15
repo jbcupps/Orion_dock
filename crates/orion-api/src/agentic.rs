@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use orion_birth::parse_tool_requests;
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, SkillToolEntry};
-use orion_core::{AppConfig, SecretsVault};
+use orion_core::{AppConfig, SecretsVault, ThinkingModelTier};
 use orion_skills::manifest::SkillId;
 use orion_skills::skill::ToolDescriptor;
 use orion_skills::{SkillExecutor, SkillRegistry};
@@ -236,10 +236,19 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             orion_core::RoutingMode::EgoPrimary
         }
     };
+    let tier = match cfg.router_mode {
+        AgenticRouterMode::Auto => ThinkingModelTier::Fast,
+        AgenticRouterMode::ThinkHard => ThinkingModelTier::Standard,
+        AgenticRouterMode::ThinkHarder => ThinkingModelTier::Pro,
+    };
+    let ego_model = ego_name
+        .as_deref()
+        .map(|provider| cfg.config.effective_tier_model(provider, tier));
     let router = orion_router::IdEgoRouter::with_provider_auto_detect(
         cfg.config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
+        ego_model,
         routing_mode,
     )
     .await;
@@ -739,6 +748,13 @@ fn truncate_output(s: &str, max_len: usize) -> String {
 fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String>) {
     let vault = SecretsVault::load(config.data_dir.clone())
         .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+    // Respect active provider preference if set.
+    if let Some(ref pref) = config.active_provider_preference {
+        let normalized = AppConfig::normalize_provider_name(pref);
+        if let Some(key) = vault.get_secret(&normalized) {
+            return (Some(normalized), Some(key.to_string()));
+        }
+    }
     let providers = vault.list_providers();
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;

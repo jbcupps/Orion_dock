@@ -183,3 +183,16 @@ pub fn fill_soul_template(name: &str, purpose: &str, personality: &str) -> Strin
         .replace("{purpose}", purpose)
         .replace("{personality}", personality)
 }
+
+/// Default purpose for quick-start birth.
+pub const DEFAULT_PURPOSE: &str =
+    "assist, retrieve, connect, and surface information for my mentor";
+
+/// Default personality for quick-start birth.
+pub const DEFAULT_PERSONALITY: &str =
+    "balanced and adaptable; I match my mentor's tone, stay precise when it matters, and bring warmth when it helps";
+
+/// Generate a complete standard soul document from just the agent name.
+pub fn fill_soul_template_default(name: &str) -> String {
+    fill_soul_template(name, DEFAULT_PURPOSE, DEFAULT_PERSONALITY)
+}

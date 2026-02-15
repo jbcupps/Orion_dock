@@ -73,13 +73,15 @@ export default function HiveScreen({
     fetchAgents();
   }, []);
 
+  const [quickStart, setQuickStart] = useState(false);
+
   const handleCreateAgent = async () => {
     const name = newAgentName.trim();
     if (!name) return;
 
     try {
       setCreating(true);
-      const { id } = await createAgent(name);
+      const { id } = await createAgent(name, quickStart);
       setNewAgentName('');
       setCreating(false);
       await loadAgent(id);
@@ -280,6 +282,15 @@ export default function HiveScreen({
             disabled={creating}
             autoFocus
           />
+          <label className="hive-quickstart-toggle">
+            <input
+              type="checkbox"
+              checked={quickStart}
+              onChange={(e) => setQuickStart(e.target.checked)}
+              disabled={creating}
+            />
+            Quick start
+          </label>
           <button
             type="button"
             className="hive-btn"
@@ -390,6 +401,15 @@ export default function HiveScreen({
             className="hive-input"
             disabled={creating}
           />
+          <label className="hive-quickstart-toggle">
+            <input
+              type="checkbox"
+              checked={quickStart}
+              onChange={(e) => setQuickStart(e.target.checked)}
+              disabled={creating}
+            />
+            Quick start
+          </label>
           <button
             type="button"
             className="hive-btn"

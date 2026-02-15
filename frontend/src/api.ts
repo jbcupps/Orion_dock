@@ -46,12 +46,15 @@ export async function fetchIdentities(): Promise<AgentIdentityInfo[]> {
   return res.json();
 }
 
-export async function createAgent(name: string): Promise<{ id: string }> {
+export async function createAgent(
+  name: string,
+  quickStart = false
+): Promise<{ id: string }> {
   const base = getBaseUrl();
   const res = await fetch(`${base}/api/agents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, quick_start: quickStart }),
   });
   if (!res.ok) {
     const err = await res.text();
@@ -389,6 +392,153 @@ export async function fetchStoredProviders(
     throw new Error(err || `Providers failed: ${res.status}`);
   }
   return res.json();
+}
+
+export interface TierModels {
+  fast: string;
+  standard: string;
+  pro: string;
+}
+
+export interface ProviderCatalogEntry {
+  available_models: string[];
+  source: string;
+  last_refreshed?: string | null;
+  warnings: string[];
+  validated: boolean;
+}
+
+export interface TierModelsResponse {
+  active_provider?: string | null;
+  models: Record<string, TierModels>;
+  catalog?: Record<string, ProviderCatalogEntry>;
+}
+
+export interface ModelValidationResult {
+  model: string;
+  valid: boolean;
+  error?: string | null;
+}
+
+export interface ProviderModelValidation {
+  fast: ModelValidationResult;
+  standard: ModelValidationResult;
+  pro: ModelValidationResult;
+}
+
+export interface ValidateModelsResponse {
+  results: Record<string, ProviderModelValidation>;
+}
+
+export async function fetchTierModels(
+  agentId: string
+): Promise<TierModelsResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Tier models failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateTierModels(
+  agentId: string,
+  models: Record<string, TierModels>
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ models }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Update tier models failed: ${res.status}`);
+  }
+}
+
+export async function refreshProviderCatalog(
+  agentId: string,
+  provider?: string
+): Promise<{ ok: boolean; refreshed: string[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/refresh`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider ?? null }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Refresh catalog failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function validateTierModels(
+  agentId: string,
+  provider?: string
+): Promise<ValidateModelsResponse> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/validate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider ?? null }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Validate models failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function resetTierModels(
+  agentId: string,
+  provider?: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/reset`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider ?? null }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Reset tier models failed: ${res.status}`);
+  }
+}
+
+export async function setActiveProvider(
+  agentId: string,
+  provider: string
+): Promise<void> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/active-provider`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Set active provider failed: ${res.status}`);
+  }
 }
 
 // ---- Operational Chat API (post-birth) ----

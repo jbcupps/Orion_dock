@@ -77,6 +77,7 @@ pub async fn build_birth_router(config: &AppConfig) -> IdEgoRouter {
         id_model,
         ego_name.as_deref(),
         ego_key,
+        None,
         RoutingMode::EgoPrimary,
     )
     .await

@@ -8,9 +8,18 @@ import {
   fetchHealth,
   fetchStatus,
   fetchStoredProviders,
+  fetchTierModels,
+  refreshProviderCatalog,
+  resetTierModels,
+  setActiveProvider,
   setIgnition,
+  updateTierModels,
+  validateTierModels,
   type BirthStateResponse,
+  type ProviderCatalogEntry,
+  type ProviderModelValidation,
   type StatusResponse,
+  type TierModels,
 } from './api';
 import { stageDisplayMessage, OPERATION_MESSAGE } from './birthStages';
 import SplashScreen from './components/SplashScreen';
@@ -47,6 +56,16 @@ function App() {
   const [ignitionUrl, setIgnitionUrl] = useState('');
   const [connectivityDone, setConnectivityDone] = useState(false);
   const [storedProviders, setStoredProviders] = useState<string[]>([]);
+  const [tierModels, setTierModels] = useState<Record<string, TierModels>>({});
+  const [activeTierProvider, setActiveTierProvider] = useState<string | null>(null);
+  const [tierModelsLoading, setTierModelsLoading] = useState(false);
+  const [tierModelsEditOpen, setTierModelsEditOpen] = useState(false);
+  const [tierModelsDraft, setTierModelsDraft] = useState<Record<string, TierModels>>({});
+  const [tierModelsSaving, setTierModelsSaving] = useState(false);
+  const [tierCatalog, setTierCatalog] = useState<Record<string, ProviderCatalogEntry>>({});
+  const [tierValidation, setTierValidation] = useState<Record<string, ProviderModelValidation>>({});
+  const [tierRefreshing, setTierRefreshing] = useState(false);
+  const [tierValidating, setTierValidating] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [dashboardTab, setDashboardTab] = useState<'chat' | 'agent' | 'jobs'>('chat');
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
@@ -115,6 +134,41 @@ function App() {
       clearInterval(interval);
     };
   }, [appState, currentAgentId]);
+
+  // Fetch and refresh per-provider Fast/Standard/Pro model mappings
+  useEffect(() => {
+    if (appState !== 'dashboard' || !currentAgentId) return;
+    let cancelled = false;
+    const load = async () => {
+      if (!cancelled) setTierModelsLoading(true);
+      try {
+        const res = await fetchTierModels(currentAgentId);
+        if (cancelled) return;
+        setTierModels(res.models || {});
+        setActiveTierProvider(res.active_provider ?? null);
+        setTierCatalog(res.catalog || {});
+        if (!tierModelsEditOpen) {
+          setTierModelsDraft(res.models || {});
+        }
+      } catch {
+        if (cancelled) return;
+        setTierModels({});
+        setActiveTierProvider(null);
+        setTierCatalog({});
+        if (!tierModelsEditOpen) {
+          setTierModelsDraft({});
+        }
+      } finally {
+        if (!cancelled) setTierModelsLoading(false);
+      }
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [appState, currentAgentId, tierModelsEditOpen]);
 
   // Recover genesis path state on dashboard entry (handles refresh / reconnect)
   useEffect(() => {
@@ -240,6 +294,16 @@ function App() {
     setBirthStateError(null);
     setConnectivityDone(false);
     setStoredProviders([]);
+    setTierModels({});
+    setActiveTierProvider(null);
+    setTierModelsLoading(false);
+    setTierModelsEditOpen(false);
+    setTierModelsDraft({});
+    setTierModelsSaving(false);
+    setTierCatalog({});
+    setTierValidation({});
+    setTierRefreshing(false);
+    setTierValidating(false);
     setShowChat(false);
     setDashboardTab('chat');
   };
@@ -299,6 +363,100 @@ function App() {
       setError(e instanceof Error ? e.message : 'Finalize failed');
     } finally {
       setEmergenceBusy(false);
+    }
+  }, [currentAgentId]);
+
+  const handleTierModelDraftChange = useCallback(
+    (provider: string, tier: keyof TierModels, value: string) => {
+      setTierModelsDraft((prev) => {
+        const existing = prev[provider];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [provider]: {
+            ...existing,
+            [tier]: value,
+          },
+        };
+      });
+    },
+    []
+  );
+
+  const handleSaveTierModels = useCallback(async () => {
+    if (!currentAgentId) return;
+    setError(null);
+    setTierModelsSaving(true);
+    try {
+      await updateTierModels(currentAgentId, tierModelsDraft);
+      const refreshed = await fetchTierModels(currentAgentId);
+      setTierModels(refreshed.models || {});
+      setActiveTierProvider(refreshed.active_provider ?? null);
+      setTierModelsDraft(refreshed.models || {});
+      setTierModelsEditOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update thinking models');
+    } finally {
+      setTierModelsSaving(false);
+    }
+  }, [currentAgentId, tierModelsDraft]);
+
+  const handleCancelTierModelsEdit = useCallback(() => {
+    setTierModelsDraft(tierModels);
+    setTierModelsEditOpen(false);
+  }, [tierModels]);
+
+  const handleRefreshCatalog = useCallback(async () => {
+    if (!currentAgentId) return;
+    setTierRefreshing(true);
+    try {
+      await refreshProviderCatalog(currentAgentId);
+      const res = await fetchTierModels(currentAgentId);
+      setTierModels(res.models || {});
+      setActiveTierProvider(res.active_provider ?? null);
+      setTierCatalog(res.catalog || {});
+      if (!tierModelsEditOpen) setTierModelsDraft(res.models || {});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Refresh failed');
+    } finally {
+      setTierRefreshing(false);
+    }
+  }, [currentAgentId, tierModelsEditOpen]);
+
+  const handleValidateModels = useCallback(async () => {
+    if (!currentAgentId) return;
+    setTierValidating(true);
+    try {
+      const res = await validateTierModels(currentAgentId);
+      setTierValidation(res.results || {});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Validation failed');
+    } finally {
+      setTierValidating(false);
+    }
+  }, [currentAgentId]);
+
+  const handleResetProviderModels = useCallback(async (provider: string) => {
+    if (!currentAgentId) return;
+    try {
+      await resetTierModels(currentAgentId, provider);
+      const res = await fetchTierModels(currentAgentId);
+      setTierModels(res.models || {});
+      setTierCatalog(res.catalog || {});
+      setTierModelsDraft(res.models || {});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Reset failed');
+    }
+  }, [currentAgentId]);
+
+  const handleSetActiveProvider = useCallback(async (provider: string) => {
+    if (!currentAgentId) return;
+    try {
+      await setActiveProvider(currentAgentId, provider);
+      const res = await fetchTierModels(currentAgentId);
+      setActiveTierProvider(res.active_provider ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Set active provider failed');
     }
   }, [currentAgentId]);
 
@@ -394,6 +552,14 @@ function App() {
     status &&
     !status.birth_complete &&
     status.birth_stage === 'Emergence';
+
+  const activeThinkingProvider =
+    activeTierProvider && tierModels[activeTierProvider]
+      ? activeTierProvider
+      : Object.keys(tierModels)[0] ?? null;
+  const activeThinkingModels = activeThinkingProvider
+    ? tierModels[activeThinkingProvider]
+    : null;
 
   return (
     <div className="app">
@@ -601,7 +767,7 @@ function App() {
                           className={`router-mode-pill${routerMode === mode ? ' router-mode-pill-active' : ''}`}
                           onClick={() => setRouterMode(mode)}
                         >
-                          {mode === 'auto' ? 'auto' : mode === 'think_hard' ? 'think hard' : 'think harder'}
+                          {mode === 'auto' ? 'Fast' : mode === 'think_hard' ? 'Standard' : 'Pro'}
                         </button>
                       ))}
                     </div>
@@ -686,6 +852,208 @@ function App() {
                         </span>
                       ) : (
                         <span className="muted">None configured</span>
+                      )}
+                    </dd>
+                    <dt>Thinking models</dt>
+                    <dd>
+                      {tierModelsLoading ? (
+                        <span className="muted">Loading…</span>
+                      ) : activeThinkingModels && activeThinkingProvider ? (
+                        <div className="thinking-models-line">
+                          <span className="provider-badge provider-badge-ok">
+                            {activeThinkingProvider}
+                          </span>
+                          <span className="thinking-model-pill">
+                            Fast: <code>{activeThinkingModels.fast}</code>
+                          </span>
+                          <span className="thinking-model-pill">
+                            Standard: <code>{activeThinkingModels.standard}</code>
+                          </span>
+                          <span className="thinking-model-pill">
+                            Pro: <code>{activeThinkingModels.pro}</code>
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="muted">No LLM tier models available</span>
+                      )}
+                    </dd>
+                    <dt>Model settings</dt>
+                    <dd>
+                      <div className="tier-model-actions">
+                        <button
+                          type="button"
+                          className="tier-model-button"
+                          onClick={() => {
+                            setTierModelsDraft(tierModels);
+                            setTierModelsEditOpen((prev) => !prev);
+                          }}
+                          disabled={tierModelsSaving}
+                        >
+                          {tierModelsEditOpen ? 'Hide editor' : 'Edit models'}
+                        </button>
+                        <button
+                          type="button"
+                          className="tier-model-button"
+                          onClick={handleRefreshCatalog}
+                          disabled={tierRefreshing}
+                        >
+                          {tierRefreshing ? 'Refreshing…' : 'Refresh catalogs'}
+                        </button>
+                        <button
+                          type="button"
+                          className="tier-model-button"
+                          onClick={handleValidateModels}
+                          disabled={tierValidating}
+                        >
+                          {tierValidating ? 'Validating…' : 'Validate models'}
+                        </button>
+                      </div>
+                      {/* Catalog warnings */}
+                      {Object.entries(tierCatalog).some(([, c]) => c.warnings.length > 0) && (
+                        <div className="tier-model-warnings">
+                          {Object.entries(tierCatalog).map(([prov, cat]) =>
+                            cat.warnings.map((w, i) => (
+                              <div key={`${prov}-${i}`} className="tier-model-warning">
+                                {prov}: {w}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                      {/* Validation results */}
+                      {Object.keys(tierValidation).length > 0 && (
+                        <div className="tier-model-validation-results">
+                          {Object.entries(tierValidation).map(([prov, v]) => (
+                            <div key={prov} className="tier-model-validation-row">
+                              <span className="tier-model-validation-provider">{prov}</span>
+                              {(['fast', 'standard', 'pro'] as const).map((t) => {
+                                const r = v[t];
+                                return (
+                                  <span key={t} className={`tier-model-validation-badge ${r.valid ? 'valid' : 'invalid'}`}>
+                                    {t}: {r.valid ? 'ok' : r.error ?? 'invalid'}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {tierModelsEditOpen && (
+                        <div className="tier-model-editor">
+                          {Object.entries(tierModelsDraft).length === 0 ? (
+                            <p className="muted">No configurable providers found.</p>
+                          ) : (
+                            Object.entries(tierModelsDraft).map(([provider, models]) => (
+                              <div key={provider} className={`tier-model-provider${activeTierProvider === provider ? ' tier-model-provider-active' : ''}`}>
+                                <div className="tier-model-provider-header">
+                                  <p className="tier-model-provider-name">{provider}</p>
+                                  <div className="tier-model-provider-actions">
+                                    {activeTierProvider !== provider && (
+                                      <button
+                                        type="button"
+                                        className="tier-model-button tier-model-button-sm"
+                                        onClick={() => handleSetActiveProvider(provider)}
+                                      >
+                                        Set active
+                                      </button>
+                                    )}
+                                    {activeTierProvider === provider && (
+                                      <span className="tier-model-active-label">active</span>
+                                    )}
+                                    <button
+                                      type="button"
+                                      className="tier-model-button tier-model-button-sm tier-model-button-secondary"
+                                      onClick={() => handleResetProviderModels(provider)}
+                                    >
+                                      Reset defaults
+                                    </button>
+                                  </div>
+                                </div>
+                                {tierCatalog[provider]?.last_refreshed && (
+                                  <p className="tier-model-catalog-meta">
+                                    Catalog: {tierCatalog[provider].source} ({tierCatalog[provider].available_models.length} models)
+                                    {tierCatalog[provider].last_refreshed && ` — refreshed ${new Date(tierCatalog[provider].last_refreshed!).toLocaleString()}`}
+                                  </p>
+                                )}
+                                <div className="tier-model-grid">
+                                  <label>
+                                    Fast
+                                    <input
+                                      type="text"
+                                      value={models.fast}
+                                      onChange={(e) =>
+                                        handleTierModelDraftChange(
+                                          provider,
+                                          'fast',
+                                          e.target.value
+                                        )
+                                      }
+                                      list={`${provider}-models`}
+                                    />
+                                  </label>
+                                  <label>
+                                    Standard
+                                    <input
+                                      type="text"
+                                      value={models.standard}
+                                      onChange={(e) =>
+                                        handleTierModelDraftChange(
+                                          provider,
+                                          'standard',
+                                          e.target.value
+                                        )
+                                      }
+                                      list={`${provider}-models`}
+                                    />
+                                  </label>
+                                  <label>
+                                    Pro
+                                    <input
+                                      type="text"
+                                      value={models.pro}
+                                      onChange={(e) =>
+                                        handleTierModelDraftChange(
+                                          provider,
+                                          'pro',
+                                          e.target.value
+                                        )
+                                      }
+                                      list={`${provider}-models`}
+                                    />
+                                  </label>
+                                </div>
+                                {/* HTML datalist for autocomplete from catalog */}
+                                {tierCatalog[provider]?.available_models.length > 0 && (
+                                  <datalist id={`${provider}-models`}>
+                                    {tierCatalog[provider].available_models.map((m) => (
+                                      <option key={m} value={m} />
+                                    ))}
+                                  </datalist>
+                                )}
+                              </div>
+                            ))
+                          )}
+                          {Object.entries(tierModelsDraft).length > 0 && (
+                            <div className="tier-model-editor-actions">
+                              <button
+                                type="button"
+                                className="tier-model-button"
+                                onClick={handleSaveTierModels}
+                                disabled={tierModelsSaving}
+                              >
+                                {tierModelsSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                type="button"
+                                className="tier-model-button tier-model-button-secondary"
+                                onClick={handleCancelTierModelsEdit}
+                                disabled={tierModelsSaving}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </dd>
                   </dl>

@@ -13,9 +13,12 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+const DEFAULT_MODEL: &str = "gpt-4o-mini";
+
 pub struct OpenAiProvider {
     client: async_openai::Client<OpenAIConfig>,
     api_key: String,
+    model: String,
 }
 
 impl OpenAiProvider {
@@ -23,11 +26,21 @@ impl OpenAiProvider {
         let key = api_key
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
+        Self::with_model(key, DEFAULT_MODEL.to_string())
+    }
+
+    pub fn with_model(api_key: String, model: String) -> Self {
+        let key = if api_key.is_empty() {
+            std::env::var("OPENAI_API_KEY").unwrap_or_default()
+        } else {
+            api_key
+        };
         let config = OpenAIConfig::new().with_api_key(&key);
         let client = async_openai::Client::with_config(config);
         Self {
             client,
             api_key: key,
+            model,
         }
     }
 }
@@ -177,7 +190,7 @@ impl LlmProvider for OpenAiProvider {
         });
 
         let req = CreateChatCompletionRequest {
-            model: "gpt-4o-mini".to_string(),
+            model: self.model.clone(),
             messages,
             tools,
             ..Default::default()
@@ -255,7 +268,7 @@ impl LlmProvider for OpenAiProvider {
         });
 
         let body = StreamChatRequest {
-            model: "gpt-4o-mini".to_string(),
+            model: self.model.clone(),
             messages,
             tools,
             stream: true,
