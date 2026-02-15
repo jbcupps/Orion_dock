@@ -81,6 +81,24 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeType {
+    DerivedFrom,
+    CritiquedBy,
+    RefinedTo,
+}
+
+impl EdgeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeType::DerivedFrom => "derived_from",
+            EdgeType::CritiquedBy => "critiqued_by",
+            EdgeType::RefinedTo => "refined_to",
+        }
+    }
+}
+
 /// Unified memory store: SQLite or PostgreSQL backend.
 pub enum MemoryStore {
     Sqlite(sqlite_store::SqliteStore),
@@ -236,16 +254,22 @@ impl MemoryStore {
         &self,
         from_memory_id: &str,
         to_memory_id: &str,
-        edge_type: &str,
+        edge_type: EdgeType,
         weight: f32,
+        _metadata: serde_json::Value,
     ) -> Result<()> {
         match self {
             MemoryStore::Sqlite(_) => Err(StoreError::InvalidData(format!(
                 "graph edges require postgres backend ({} -> {}, type={}, weight={})",
-                from_memory_id, to_memory_id, edge_type, weight
+                from_memory_id,
+                to_memory_id,
+                edge_type.as_str(),
+                weight
             ))),
             #[cfg(feature = "postgres")]
-            MemoryStore::Postgres(s) => s.add_edge(from_memory_id, to_memory_id, edge_type, weight),
+            MemoryStore::Postgres(s) => {
+                s.add_edge(from_memory_id, to_memory_id, edge_type, weight, _metadata)
+            }
         }
     }
 }
