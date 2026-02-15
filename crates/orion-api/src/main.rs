@@ -2892,11 +2892,25 @@ async fn api_operational_chat(
                 "operational_chat: pro council path"
             );
 
-            let memory_store = orion_memory::MemoryStore::open_with_config(&config).ok();
+            // Council persist() calls store.insert_memory/add_edge. PostgresStore uses block_on(),
+            // which panics when called from async. So use memory store only for Sqlite; for Postgres
+            // pass None so council runs without persisting (Pro chat still works).
+            let council_memory: Option<orion_memory::MemoryStore> = match config.memory_backend {
+                orion_core::MemoryBackend::Postgres => None,
+                orion_core::MemoryBackend::Sqlite => {
+                    let config_for_store = config.clone();
+                    tokio::task::spawn_blocking(move || {
+                        orion_memory::MemoryStore::open_with_config(&config_for_store).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                }
+            };
             match orion_router::council::run_council(
                 &messages,
                 &provider_configs,
-                memory_store.as_ref(),
+                council_memory.as_ref(),
             )
             .await
             {

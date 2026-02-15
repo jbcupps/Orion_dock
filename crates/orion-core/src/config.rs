@@ -113,18 +113,19 @@ fn default_catalog_source() -> String {
 pub fn curated_provider_models(provider: &str) -> Vec<String> {
     match AppConfig::normalize_provider_name(provider).as_str() {
         "openai" => vec![
+            "gpt-4.1-nano",
+            "gpt-4.1-mini",
+            "gpt-4.1",
             "gpt-4o-mini",
             "gpt-4o",
-            "gpt-4-turbo",
-            "gpt-4",
-            "o1",
-            "o1-mini",
             "o3-mini",
+            "o3",
+            "o1",
         ],
         "anthropic" => vec![
-            "claude-3-5-haiku-latest",
-            "claude-sonnet-4-20250514",
-            "claude-opus-4-20250514",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-6",
         ],
         "perplexity" => vec![
             "sonar",
@@ -140,10 +141,10 @@ pub fn curated_provider_models(provider: &str) -> Vec<String> {
             "grok-2-latest",
         ],
         "google" => vec![
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
         ],
         _ => vec![],
     }
@@ -506,30 +507,30 @@ impl AppConfig {
     pub fn default_tier_models(provider: &str) -> TierModels {
         match Self::normalize_provider_name(provider).as_str() {
             "anthropic" => TierModels {
-                fast: "claude-3-5-haiku-latest".to_string(),
-                standard: "claude-sonnet-4-20250514".to_string(),
-                pro: "claude-opus-4-20250514".to_string(),
+                fast: "claude-haiku-4-5-20251001".to_string(),
+                standard: "claude-sonnet-4-5-20250929".to_string(),
+                pro: "claude-opus-4-6".to_string(),
             },
             "perplexity" => TierModels {
                 fast: "sonar".to_string(),
-                standard: "sonar".to_string(),
-                pro: "sonar-pro".to_string(),
+                standard: "sonar-pro".to_string(),
+                pro: "sonar-reasoning-pro".to_string(),
             },
             "xai" => TierModels {
                 fast: "grok-2-latest".to_string(),
-                standard: "grok-2-latest".to_string(),
-                pro: "grok-3".to_string(),
+                standard: "grok-4-fast-reasoning".to_string(),
+                pro: "grok-4".to_string(),
             },
             "google" => TierModels {
-                fast: "gemini-2.0-flash".to_string(),
-                standard: "gemini-2.5-flash".to_string(),
-                pro: "gemini-2.5-pro".to_string(),
+                fast: "gemini-3-flash-preview".to_string(),
+                standard: "gemini-2.5-pro".to_string(),
+                pro: "gemini-3-pro-preview".to_string(),
             },
             // openai + fallback
             _ => TierModels {
-                fast: "gpt-4o-mini".to_string(),
-                standard: "gpt-4o".to_string(),
-                pro: "o1".to_string(),
+                fast: "gpt-4.1-mini".to_string(),
+                standard: "gpt-4.1".to_string(),
+                pro: "o3".to_string(),
             },
         }
     }
@@ -867,14 +868,14 @@ mod tests {
     fn test_effective_tier_models_defaults() {
         let config = AppConfig::default_paths();
         let anthropic = config.effective_tier_models("anthropic");
-        assert_eq!(anthropic.fast, "claude-3-5-haiku-latest");
-        assert_eq!(anthropic.standard, "claude-sonnet-4-20250514");
-        assert_eq!(anthropic.pro, "claude-opus-4-20250514");
+        assert_eq!(anthropic.fast, "claude-haiku-4-5-20251001");
+        assert_eq!(anthropic.standard, "claude-sonnet-4-5-20250929");
+        assert_eq!(anthropic.pro, "claude-opus-4-6");
 
         let openai = config.effective_tier_models("openai");
-        assert_eq!(openai.fast, "gpt-4o-mini");
-        assert_eq!(openai.standard, "gpt-4o");
-        assert_eq!(openai.pro, "o1");
+        assert_eq!(openai.fast, "gpt-4.1-mini");
+        assert_eq!(openai.standard, "gpt-4.1");
+        assert_eq!(openai.pro, "o3");
     }
 
     #[test]
