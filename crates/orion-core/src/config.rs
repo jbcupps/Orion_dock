@@ -948,7 +948,7 @@ mod tests {
         });
 
         assert!(config.migrate());
-        assert_eq!(config.schema_version, 6);
+        assert_eq!(config.schema_version, 7);
         assert_eq!(config.email_accounts.len(), 1);
         let acc = &config.email_accounts[0];
         assert_eq!(acc.address, "user@proton.me");

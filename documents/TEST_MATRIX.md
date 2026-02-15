@@ -8,11 +8,11 @@ Canonical inventory of current tests and target coverage per crate and UI surfac
 
 | Crate | Critical modules | Test locations | Notes |
 |-------|------------------|----------------|-------|
-| orion-core | config, superego, secrets, vault, verifier, local_llm_url | config.rs, superego.rs, secrets.rs, vault.rs, verifier.rs, local_llm_url.rs, global_config.rs, encrypted_storage.rs, email_auth.rs, system_prompt.rs, sao_bridge.rs | Superego and config are routing/safety-critical |
-| orion-router | router | router.rs | Id/Ego routing, provider selection, streaming, tools |
+| orion-core | config, superego, secrets, vault, verifier, local_llm_url, templates | config.rs, superego.rs, secrets.rs, vault.rs, verifier.rs, local_llm_url.rs, global_config.rs, encrypted_storage.rs, email_auth.rs, system_prompt.rs, sao_bridge.rs, templates.rs | Superego, config (incl. tier models, provider catalog), and templates are routing/safety-critical |
+| orion-router | router | router.rs | Id/Ego routing, provider selection, tier-aware model override, streaming, tools |
+| orion-capabilities | cognitive (provider, local_http, openai_compatible, anthropic, validation, model_catalog), sensory (web_fetch, web_search) | cognitive/*.rs, sensory/*.rs | Provider stubs, validation, model catalog fetching |
 | orion-birth | stages, chat, prompts | stages.rs, chat.rs, prompts.rs | Birth orchestration, tool parsing, router wiring |
 | orion-memory | store, sqlite_store, postgres_store, schema | store.rs | Persistence; SQLite in-memory and file-backed |
-| orion-capabilities | cognitive (provider, local_http, openai_compatible, anthropic, validation), sensory (web_fetch, web_search) | cognitive/*.rs, sensory/*.rs | Provider stubs and validation |
 | orion-skills | executor, registry, watcher, protocol/mcp, transport/imap | executor.rs, lib.rs, watcher.rs, protocol/mcp.rs, transport/imap.rs | Sandbox, timeout, tool execution |
 | orion-email | pkce | pkce.rs | Auth helpers |
 | soul-forge | lib.rs (state/calibration), main.rs (TUI) | lib.rs `#[cfg(test)]` | TUI state and deterministic calibration tested in lib |
@@ -55,7 +55,7 @@ Canonical inventory of current tests and target coverage per crate and UI surfac
 - **orion-router**: Id/Ego routing, fallback, streaming/tool-assisted paths; deterministic fixtures for classify and provider failure.
 - **orion-birth**: Stage transitions, build_birth_router, parse_tool_requests, execute_store_provider_key; negative paths.
 - **orion-memory**: SQLite and Postgres (with feature) store behavior; migration/schema handling.
-- **orion-capabilities**: Provider selection, validation, timeout/unavailable behavior.
+- **orion-capabilities**: Provider selection, validation, timeout/unavailable behavior, model catalog fetching/curation.
 - **orion-skills**: Executor timeout/denial, sandbox policy, registry concurrency; skill-level safety tests retained.
 
 ### Routing (cross-cutting)

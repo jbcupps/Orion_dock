@@ -9,8 +9,11 @@ Desktop installer and npm-based deployment paths have been retired in favor of c
 ## What Is Included
 
 - Core crates for identity, memory, routing, capabilities, skills, and birth lifecycle
-- **Orion API** (`crates/orion-api`) — HTTP API for the web UI (health, status)
-- **Web UI** (`frontend/`) — React + Vite + TypeScript; chat-style status dashboard
+- **Orion API** (`crates/orion-api`) — HTTP API for the web UI (health, status, tier-model management)
+- **Web UI** (`frontend/`) — React + Vite + TypeScript; chat dashboard with Fast/Standard/Pro tier selection
+- **Pro Router Sidecar** (`services/pro-router/`) — Python FastAPI service for Pro-tier best-of-two provider comparison via LangChain
+- **Tier Model Orchestration** — Per-provider Fast/Standard/Pro model selection with catalog validation
+- **Quick-Start Birth** — One-call agent creation with auto identity and standard constitutional documents
 - Skill crates under `skills/`
 - Docker development and CI workflow under `docker/`
 - Full stack Compose profile: postgres, ollama, orion-api, frontend
@@ -72,13 +75,15 @@ For full-stack UAT (with postgres, orion-api, frontend up): run the container wi
 - `DATABASE_URL` - Postgres connection string when `MEMORY_BACKEND=postgres`
 - `BIRTH_MODEL` - model used for birth stages (default `qwen2.5:3b-instruct`)
 - `ID_MODEL_DEFAULT` - default model for non-birth Id flows
+- `PRO_MODE_SIDECAR_URL` - Pro-tier LangChain sidecar URL (e.g. `http://localhost:8100`); enables best-of-two provider comparison
 
-Birth runs **local-first** (pinned birth model); once a cloud API key is set, routing uses cloud first with local fallback. See `documents/HOW_TO_RUN_LOCALLY.md` for full stack and birth runtime steps.
+Birth runs **local-first** (pinned birth model); once a cloud API key is set, routing uses cloud first with local fallback. Ego model selection follows the **tier system**: Fast (lightweight), Standard (balanced), or Pro (highest capability with optional sidecar comparison). See `documents/HOW_TO_RUN_LOCALLY.md` for full stack and birth runtime steps.
 
 ## Repository Layout
 
 - `crates/` - core Rust crates (including `orion-api`)
 - `frontend/` - React + Vite web UI; env: `VITE_API_URL` for API base URL when not using proxy
+- `services/` - auxiliary services (`pro-router/` — Python LangChain sidecar for Pro tier)
 - `skills/` - skill plugins
 - `docker/` - Dockerfile and Compose stack
 - `.github/workflows/ci.yml` - Docker-based CI gate

@@ -80,6 +80,17 @@
 - **Trust policy:** `mcp_trust_policy` (e.g. `allow_list_only`, `allowed_http_hosts`) restricts which HTTP hosts are allowed for stdio/HTTP MCP. Use allowlists to avoid data exfiltration to untrusted hosts.
 - **Tool confirmation:** Tools that declare `requires_confirmation` should be gated in the UI before invocation; the backend does not enforce confirmation (UI responsibility).
 
+## Pro Sidecar Security
+
+- **API key forwarding:** When Pro tier is active, the system sends API keys to the sidecar (`PRO_MODE_SIDECAR_URL`) for parallel provider comparison. The sidecar should run on localhost or a trusted network only.
+- **No key persistence:** The sidecar receives keys per-request and does not persist them.
+- **Network scope:** `PRO_MODE_SIDECAR_URL` should point to a local or trusted service. Do not expose the sidecar to untrusted networks.
+
+## Quick-Start Birth Security
+
+- **Automatic signing:** Quick-start birth generates a keypair, signs documents, and stores the public key. The private key is **not** returned to the caller and is discarded after signing. This means quick-start agents cannot have their documents re-signed externally.
+- **Standard documents:** Quick-start uses default constitutional templates rather than mentor-customized ones.
+
 ## Threat Model Summary
 
 | Threat | Mitigation |
@@ -92,3 +103,4 @@
 | Skill supply-chain abuse | Approval list; audit log; (future) signed packages + trusted signers |
 | MCP server exfiltration | Per-server config; HTTP allowlist in trust policy |
 | UI sandbox escape (MCP Apps) | Sandboxed iframe + CSP; no elevated privileges to host |
+| Pro sidecar key exposure | Keys sent per-request only; sidecar must be localhost/trusted |
