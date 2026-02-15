@@ -24,8 +24,9 @@ pub mod vault;
 pub mod verifier;
 
 pub use config::{
-    AppConfig, EmailAccountConfig, EmailAccountStatus, EmailAuthType, EmailConfig, EmailProvider,
-    McpServerDefinition, McpTrustPolicy, MemoryBackend, RoutingMode, TrinityConfig,
+    curated_provider_models, AppConfig, EmailAccountConfig, EmailAccountStatus, EmailAuthType,
+    EmailConfig, EmailProvider, McpServerDefinition, McpTrustPolicy, MemoryBackend,
+    ProviderCatalogEntry, RoutingMode, ThinkingModelTier, TierModels, TrinityConfig,
     CONFIG_SCHEMA_VERSION,
 };
 pub use document::{CoreDocument, DocumentTier};

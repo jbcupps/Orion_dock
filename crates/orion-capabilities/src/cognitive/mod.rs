@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod candle;
 pub mod download;
 pub mod local_http;
+pub mod model_catalog;
 pub mod openai;
 pub mod openai_compatible;
 pub mod provider;

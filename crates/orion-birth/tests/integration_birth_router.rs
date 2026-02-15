@@ -35,6 +35,10 @@ fn test_config(base: &Path) -> AppConfig {
         database_url: None,
         birth_model: None,
         id_model_default: None,
+        tier_models: std::collections::HashMap::new(),
+        active_provider_preference: None,
+        provider_catalog: std::collections::HashMap::new(),
+        pro_mode_sidecar_url: None,
     }
 }
 

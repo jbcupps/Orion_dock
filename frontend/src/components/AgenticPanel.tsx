@@ -289,9 +289,9 @@ export default function AgenticPanel({
                 }
                 className="agentic-router-select"
               >
-                <option value="auto">auto</option>
-                <option value="think_hard">think hard</option>
-                <option value="think_harder">think harder</option>
+                <option value="auto">Fast</option>
+                <option value="think_hard">Standard</option>
+                <option value="think_harder">Pro</option>
               </select>
             </label>
             <label>

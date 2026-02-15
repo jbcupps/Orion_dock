@@ -87,7 +87,7 @@ impl IdEgoRouter {
         ego_api_key: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, None);
         let (id, local_http) = build_id_provider(local_llm_base_url, None);
 
         Self {
@@ -113,7 +113,7 @@ impl IdEgoRouter {
         ego_api_key: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, None);
         let (id, local_http) = build_id_provider(local_llm_base_url, None);
 
         Self {
@@ -134,7 +134,7 @@ impl IdEgoRouter {
         ego_api_key: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, None);
         let (id, local_http) = build_id_provider_auto_detect(local_llm_base_url, None).await;
 
         Self {
@@ -152,9 +152,10 @@ impl IdEgoRouter {
         local_llm_base_url: Option<String>,
         ego_provider_name: Option<&str>,
         ego_api_key: Option<String>,
+        ego_model: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, ego_model);
         let (id, local_http) = build_id_provider_auto_detect(local_llm_base_url, None).await;
 
         Self {
@@ -176,7 +177,7 @@ impl IdEgoRouter {
         ego_api_key: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, None);
         let (id, local_http) = build_id_provider(local_llm_base_url, id_model.as_deref());
 
         Self {
@@ -196,9 +197,10 @@ impl IdEgoRouter {
         id_model: Option<String>,
         ego_provider_name: Option<&str>,
         ego_api_key: Option<String>,
+        ego_model: Option<String>,
         mode: RoutingMode,
     ) -> Self {
-        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key);
+        let (ego, ego_provider) = build_ego_provider(ego_provider_name, ego_api_key, ego_model);
         let (id, local_http) =
             build_id_provider_auto_detect(local_llm_base_url, id_model.as_deref()).await;
 
@@ -636,6 +638,7 @@ pub struct RouterStatusInfo {
 fn build_ego_provider(
     provider_name: Option<&str>,
     api_key: Option<String>,
+    model_override: Option<String>,
 ) -> (Option<Arc<dyn LlmProvider>>, Option<EgoProvider>) {
     let key = match api_key.filter(|k| !k.is_empty()) {
         Some(k) => k,
@@ -648,46 +651,87 @@ fn build_ego_provider(
         }
     };
 
+    let model_override = model_override
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
     tracing::info!(
-        "build_ego_provider: building Ego with provider={:?}, key_len={}",
+        "build_ego_provider: building Ego with provider={:?}, key_len={}, model_override={:?}",
         provider_name,
-        key.len()
+        key.len(),
+        model_override
     );
 
     match provider_name {
         Some("anthropic") => (
-            Some(Arc::new(AnthropicProvider::new(key)) as Arc<dyn LlmProvider>),
+            Some(match model_override {
+                Some(model) => {
+                    Arc::new(AnthropicProvider::with_model(key, model)) as Arc<dyn LlmProvider>
+                }
+                None => Arc::new(AnthropicProvider::new(key)) as Arc<dyn LlmProvider>,
+            }),
             Some(EgoProvider::Anthropic),
         ),
         Some("perplexity") | Some("pplx") => (
-            Some(Arc::new(OpenAiCompatibleProvider::new(
-                CompatibleProvider::Perplexity,
-                key,
-            )) as Arc<dyn LlmProvider>),
+            Some(match model_override {
+                Some(model) => Arc::new(OpenAiCompatibleProvider::with_config(
+                    CompatibleProvider::Perplexity,
+                    CompatibleProvider::Perplexity.base_url().to_string(),
+                    key,
+                    model,
+                )) as Arc<dyn LlmProvider>,
+                None => Arc::new(OpenAiCompatibleProvider::new(
+                    CompatibleProvider::Perplexity,
+                    key,
+                )) as Arc<dyn LlmProvider>,
+            }),
             Some(EgoProvider::Perplexity),
         ),
         Some("xai") | Some("grok") => (
-            Some(
-                Arc::new(OpenAiCompatibleProvider::new(CompatibleProvider::Xai, key))
+            Some(match model_override {
+                Some(model) => Arc::new(OpenAiCompatibleProvider::with_config(
+                    CompatibleProvider::Xai,
+                    CompatibleProvider::Xai.base_url().to_string(),
+                    key,
+                    model,
+                )) as Arc<dyn LlmProvider>,
+                None => Arc::new(OpenAiCompatibleProvider::new(CompatibleProvider::Xai, key))
                     as Arc<dyn LlmProvider>,
-            ),
+            }),
             Some(EgoProvider::Xai),
         ),
         Some("google") | Some("gemini") => (
-            Some(Arc::new(OpenAiCompatibleProvider::new(
-                CompatibleProvider::Google,
-                key,
-            )) as Arc<dyn LlmProvider>),
+            Some(match model_override {
+                Some(model) => Arc::new(OpenAiCompatibleProvider::with_config(
+                    CompatibleProvider::Google,
+                    CompatibleProvider::Google.base_url().to_string(),
+                    key,
+                    model,
+                )) as Arc<dyn LlmProvider>,
+                None => Arc::new(OpenAiCompatibleProvider::new(
+                    CompatibleProvider::Google,
+                    key,
+                )) as Arc<dyn LlmProvider>,
+            }),
             Some(EgoProvider::Google),
         ),
         Some("openai") | None => (
-            Some(Arc::new(OpenAiProvider::new(Some(key))) as Arc<dyn LlmProvider>),
+            Some(match model_override {
+                Some(model) => {
+                    Arc::new(OpenAiProvider::with_model(key, model)) as Arc<dyn LlmProvider>
+                }
+                None => Arc::new(OpenAiProvider::new(Some(key))) as Arc<dyn LlmProvider>,
+            }),
             Some(EgoProvider::OpenAi),
         ),
         Some(unknown) => {
             tracing::warn!("Unknown ego provider '{}', falling back to OpenAI", unknown);
             (
-                Some(Arc::new(OpenAiProvider::new(Some(key))) as Arc<dyn LlmProvider>),
+                Some(match model_override {
+                    Some(model) => {
+                        Arc::new(OpenAiProvider::with_model(key, model)) as Arc<dyn LlmProvider>
+                    }
+                    None => Arc::new(OpenAiProvider::new(Some(key))) as Arc<dyn LlmProvider>,
+                }),
                 Some(EgoProvider::OpenAi),
             )
         }

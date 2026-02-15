@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Current config schema version. Increment when making breaking changes.
-pub const CONFIG_SCHEMA_VERSION: u32 = 5;
+pub const CONFIG_SCHEMA_VERSION: u32 = 7;
 
 /// Memory store backend: SQLite (file) or PostgreSQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -43,6 +44,112 @@ pub enum RoutingMode {
     /// Ego (cloud) is primary when available, Id is fallback (new default)
     #[default]
     EgoPrimary,
+}
+
+/// Thinking tier used by Fast/Standard/Pro UI modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingModelTier {
+    Fast,
+    Standard,
+    Pro,
+}
+
+impl ThinkingModelTier {
+    /// Convert API/UI router mode values to tier values.
+    /// Accepts both display names (fast/standard/pro) and legacy values
+    /// (auto/think_hard/think_harder).
+    pub fn from_mode(mode: &str) -> Self {
+        match mode.trim().to_lowercase().as_str() {
+            "pro" | "think_harder" => ThinkingModelTier::Pro,
+            "standard" | "think_hard" => ThinkingModelTier::Standard,
+            _ => ThinkingModelTier::Fast,
+        }
+    }
+}
+
+/// Per-provider model mapping for thinking tiers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierModels {
+    pub fast: String,
+    pub standard: String,
+    pub pro: String,
+}
+
+impl TierModels {
+    pub fn for_tier(&self, tier: ThinkingModelTier) -> &str {
+        match tier {
+            ThinkingModelTier::Fast => &self.fast,
+            ThinkingModelTier::Standard => &self.standard,
+            ThinkingModelTier::Pro => &self.pro,
+        }
+    }
+}
+
+/// Cached provider model catalog entry with lifecycle metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderCatalogEntry {
+    /// Known available model IDs from the provider.
+    #[serde(default)]
+    pub available_models: Vec<String>,
+    /// How the catalog was obtained: "api", "curated", or "unknown".
+    #[serde(default = "default_catalog_source")]
+    pub source: String,
+    /// ISO 8601 timestamp of last successful refresh.
+    #[serde(default)]
+    pub last_refreshed: Option<String>,
+    /// Deprecation or lifecycle warnings (e.g. "gemini-2.0-flash retiring March 2026").
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Whether the currently selected tier models have been validated against the catalog.
+    #[serde(default)]
+    pub validated: bool,
+}
+
+fn default_catalog_source() -> String {
+    "unknown".to_string()
+}
+
+/// Well-known curated model catalogs per provider (fallback when API listing is unavailable).
+pub fn curated_provider_models(provider: &str) -> Vec<String> {
+    match AppConfig::normalize_provider_name(provider).as_str() {
+        "openai" => vec![
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4-turbo",
+            "gpt-4",
+            "o1",
+            "o1-mini",
+            "o3-mini",
+        ],
+        "anthropic" => vec![
+            "claude-3-5-haiku-latest",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+        ],
+        "perplexity" => vec![
+            "sonar",
+            "sonar-pro",
+            "sonar-deep-research",
+            "sonar-reasoning-pro",
+        ],
+        "xai" => vec![
+            "grok-4-1-fast-reasoning",
+            "grok-4-fast-reasoning",
+            "grok-4",
+            "grok-3",
+            "grok-2-latest",
+        ],
+        "google" => vec![
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+        ],
+        _ => vec![],
+    }
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 fn default_schema_version() -> u32 {
@@ -199,6 +306,25 @@ pub struct AppConfig {
     /// Default model for Id (non-birth) when local LLM is used. If unset, auto-detect or "local-model".
     #[serde(default)]
     pub id_model_default: Option<String>,
+
+    /// Per-provider model mapping for Fast/Standard/Pro thinking tiers.
+    /// Key is provider name (openai, anthropic, perplexity, xai, google).
+    #[serde(default)]
+    pub tier_models: HashMap<String, TierModels>,
+
+    /// Preferred Ego provider for routing (overrides automatic preference order).
+    /// When set, this provider is tried first if its key is available.
+    #[serde(default)]
+    pub active_provider_preference: Option<String>,
+
+    /// Cached provider model catalogs (keyed by normalized provider name).
+    #[serde(default)]
+    pub provider_catalog: HashMap<String, ProviderCatalogEntry>,
+
+    /// URL for the Pro-mode LangChain sidecar service (e.g. "http://localhost:8100").
+    /// When set and Pro tier is selected, enables best-of-two provider comparison.
+    #[serde(default)]
+    pub pro_mode_sidecar_url: Option<String>,
 }
 
 /// Auth mechanism for an email account.
@@ -325,6 +451,10 @@ impl AppConfig {
             database_url: None,
             birth_model: None,
             id_model_default: None,
+            tier_models: HashMap::new(),
+            active_provider_preference: None,
+            provider_catalog: HashMap::new(),
+            pro_mode_sidecar_url: None,
         }
     }
 
@@ -357,6 +487,12 @@ impl AppConfig {
                 self.local_llm_base_url = Some(s);
             }
         }
+        if let Ok(v) = std::env::var("PRO_MODE_SIDECAR_URL") {
+            let s = v.trim().to_string();
+            if !s.is_empty() {
+                self.pro_mode_sidecar_url = Some(s);
+            }
+        }
     }
 
     /// Effective birth model name: config/value or default "qwen2.5:3b-instruct".
@@ -365,6 +501,64 @@ impl AppConfig {
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or("qwen2.5:3b-instruct")
+            .to_string()
+    }
+
+    /// Normalize provider aliases to canonical names used in tier model maps.
+    pub fn normalize_provider_name(provider: &str) -> String {
+        match provider.trim().to_lowercase().as_str() {
+            "pplx" => "perplexity".to_string(),
+            "grok" => "xai".to_string(),
+            "gemini" => "google".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Built-in defaults for provider tier models.
+    pub fn default_tier_models(provider: &str) -> TierModels {
+        match Self::normalize_provider_name(provider).as_str() {
+            "anthropic" => TierModels {
+                fast: "claude-3-5-haiku-latest".to_string(),
+                standard: "claude-sonnet-4-20250514".to_string(),
+                pro: "claude-opus-4-20250514".to_string(),
+            },
+            "perplexity" => TierModels {
+                fast: "sonar".to_string(),
+                standard: "sonar".to_string(),
+                pro: "sonar-pro".to_string(),
+            },
+            "xai" => TierModels {
+                fast: "grok-2-latest".to_string(),
+                standard: "grok-2-latest".to_string(),
+                pro: "grok-3".to_string(),
+            },
+            "google" => TierModels {
+                fast: "gemini-2.0-flash".to_string(),
+                standard: "gemini-2.5-flash".to_string(),
+                pro: "gemini-2.5-pro".to_string(),
+            },
+            // openai + fallback
+            _ => TierModels {
+                fast: "gpt-4o-mini".to_string(),
+                standard: "gpt-4o".to_string(),
+                pro: "o1".to_string(),
+            },
+        }
+    }
+
+    /// Effective tier mappings for a provider: explicit config override or built-in defaults.
+    pub fn effective_tier_models(&self, provider: &str) -> TierModels {
+        let normalized = Self::normalize_provider_name(provider);
+        self.tier_models
+            .get(&normalized)
+            .cloned()
+            .unwrap_or_else(|| Self::default_tier_models(&normalized))
+    }
+
+    /// Effective model for provider and tier.
+    pub fn effective_tier_model(&self, provider: &str, tier: ThinkingModelTier) -> String {
+        self.effective_tier_models(provider)
+            .for_tier(tier)
             .to_string()
     }
 
@@ -483,6 +677,24 @@ impl AppConfig {
             tracing::debug!("Migrated config from v4 to v5 (email_accounts)");
         }
 
+        // Migration from v5 to v6
+        if self.schema_version < 6 {
+            // v6 adds: tier_models
+            self.schema_version = 6;
+            migrated = true;
+            tracing::debug!("Migrated config from v5 to v6 (tier_models)");
+        }
+
+        // Migration from v6 to v7
+        if self.schema_version < 7 {
+            // v7 adds: active_provider_preference, provider_catalog, pro_mode_sidecar_url
+            self.schema_version = 7;
+            migrated = true;
+            tracing::debug!(
+                "Migrated config from v6 to v7 (provider_catalog, active_provider_preference, pro_mode_sidecar_url)"
+            );
+        }
+
         migrated
     }
 
@@ -546,6 +758,10 @@ mod tests {
             database_url: None,
             birth_model: None,
             id_model_default: None,
+            tier_models: HashMap::new(),
+            active_provider_preference: None,
+            provider_catalog: HashMap::new(),
+            pro_mode_sidecar_url: None,
         }
     }
 
@@ -661,6 +877,45 @@ mod tests {
     }
 
     #[test]
+    fn test_effective_tier_models_defaults() {
+        let config = AppConfig::default_paths();
+        let anthropic = config.effective_tier_models("anthropic");
+        assert_eq!(anthropic.fast, "claude-3-5-haiku-latest");
+        assert_eq!(anthropic.standard, "claude-sonnet-4-20250514");
+        assert_eq!(anthropic.pro, "claude-opus-4-20250514");
+
+        let openai = config.effective_tier_models("openai");
+        assert_eq!(openai.fast, "gpt-4o-mini");
+        assert_eq!(openai.standard, "gpt-4o");
+        assert_eq!(openai.pro, "o1");
+    }
+
+    #[test]
+    fn test_effective_tier_models_override() {
+        let mut config = AppConfig::default_paths();
+        config.tier_models.insert(
+            "openai".to_string(),
+            TierModels {
+                fast: "a".to_string(),
+                standard: "b".to_string(),
+                pro: "c".to_string(),
+            },
+        );
+        assert_eq!(
+            config.effective_tier_model("openai", ThinkingModelTier::Fast),
+            "a"
+        );
+        assert_eq!(
+            config.effective_tier_model("openai", ThinkingModelTier::Standard),
+            "b"
+        );
+        assert_eq!(
+            config.effective_tier_model("openai", ThinkingModelTier::Pro),
+            "c"
+        );
+    }
+
+    #[test]
     fn test_memory_backend_from_str() {
         assert_eq!(
             "postgres".parse::<MemoryBackend>().unwrap(),
@@ -693,7 +948,7 @@ mod tests {
         });
 
         assert!(config.migrate());
-        assert_eq!(config.schema_version, 5);
+        assert_eq!(config.schema_version, 6);
         assert_eq!(config.email_accounts.len(), 1);
         let acc = &config.email_accounts[0];
         assert_eq!(acc.address, "user@proton.me");
