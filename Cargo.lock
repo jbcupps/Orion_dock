@@ -3020,6 +3020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skill-cooperative-install",
  "skill-filesystem",
  "skill-http",
  "skill-perplexity-search",
@@ -4360,6 +4361,19 @@ name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
+
+[[package]]
+name = "skill-cooperative-install"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "orion-skills",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "skill-filesystem"

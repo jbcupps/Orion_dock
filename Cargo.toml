@@ -11,6 +11,7 @@ members = [
     "skills/skill-web-search",
     "skills/skill-filesystem",
     "skills/skill-shell",
+    "skills/skill-cooperative-install",
     "skills/skill-http",
     "skills/skill-perplexity-search",
     "skills/skill-web-browse",
