@@ -127,17 +127,9 @@ curl -X PUT http://localhost:8080/api/agents/<id>/active-provider \
   -d '{"provider": "anthropic"}'
 ```
 
-## Pro Mode Sidecar (optional)
+## Pro Council Engine
 
-For Pro-tier best-of-two provider comparison, run the LangChain sidecar:
-
-```bash
-cd services/pro-router
-pip install -r requirements.txt
-uvicorn main:app --port 8100
-```
-
-Then set `PRO_MODE_SIDECAR_URL=http://localhost:8100` in your `.env`. When Pro tier is selected with 2+ providers configured, the sidecar compares responses and returns the best one.
+For Pro-tier multi-provider reasoning, Orion uses the built-in Rust council engine (MoA DAG). No additional service or environment variable is required.
 
 ## Local Verification Script
 

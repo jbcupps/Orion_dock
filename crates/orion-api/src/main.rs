@@ -738,7 +738,6 @@ async fn api_create_agent(
         tier_models: std::collections::HashMap::new(),
         active_provider_preference: None,
         provider_catalog: std::collections::HashMap::new(),
-        pro_mode_sidecar_url: None,
     };
     let config_path = agent_dir.join("config.json");
     config.save(&config_path).map_err(|e| {
@@ -2869,33 +2868,41 @@ async fn api_operational_chat(
 
     tracing::info!(agent = %id, "operational_chat: sending chat turn");
 
-    // Pro-mode sidecar path: if Pro tier + sidecar configured + 2+ providers, compare.
-    let response = if tier == ThinkingModelTier::Pro && config.pro_mode_sidecar_url.is_some() {
-        let sidecar_url = config.pro_mode_sidecar_url.as_deref().unwrap();
+    // Pro-mode council path: for Pro tier with 2+ providers, run MoA DAG in Rust.
+    let response = if tier == ThinkingModelTier::Pro {
         let vault_for_pro = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        let top_two =
-            resolve_top_two_providers(&vault_for_pro, config.active_provider_preference.as_deref());
-        if top_two.len() >= 2 {
-            let provider_configs: Vec<(String, String, String)> = top_two
+        let council_providers =
+            resolve_council_providers(&vault_for_pro, config.active_provider_preference.as_deref());
+        if council_providers.len() >= 2 {
+            let provider_configs: Vec<orion_router::council::ProviderConfig> = council_providers
                 .into_iter()
                 .map(|(name, key)| {
                     let model = config.effective_tier_model(&name, ThinkingModelTier::Pro);
-                    (name, key, model)
+                    orion_router::council::ProviderConfig {
+                        name,
+                        api_key: key,
+                        model,
+                    }
                 })
                 .collect();
             tracing::info!(
                 agent = %id,
-                providers = ?provider_configs.iter().map(|(n, _, m)| format!("{}:{}", n, m)).collect::<Vec<_>>(),
-                "operational_chat: pro sidecar path"
+                providers = ?provider_configs.iter().map(|p| format!("{}:{}", p.name, p.model)).collect::<Vec<_>>(),
+                "operational_chat: pro council path"
             );
-            match call_pro_sidecar(sidecar_url, &messages, provider_configs).await {
-                Ok(content) => orion_capabilities::cognitive::CompletionResponse {
-                    content,
-                    tool_calls: None,
-                },
+
+            let memory_store = orion_memory::MemoryStore::open_with_config(&config).ok();
+            match orion_router::council::run_council(
+                &messages,
+                &provider_configs,
+                memory_store.as_ref(),
+            )
+            .await
+            {
+                Ok(council_response) => council_response,
                 Err(e) => {
-                    tracing::warn!(agent = %id, error = %e, "operational_chat: pro sidecar failed, falling back to standard Ego");
+                    tracing::warn!(agent = %id, error = %e, "operational_chat: council failed, falling back to standard Ego");
                     router.route(messages.clone()).await.map_err(|e| {
                         (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -2905,7 +2912,6 @@ async fn api_operational_chat(
                 }
             }
         } else {
-            // Fewer than 2 providers; use normal routing.
             router.route(messages.clone()).await.map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -3749,7 +3755,6 @@ async fn api_import_agent(
         tier_models: std::collections::HashMap::new(),
         active_provider_preference: None,
         provider_catalog: std::collections::HashMap::new(),
-        pro_mode_sidecar_url: None,
     };
     config.save(&agent_dir.join("config.json")).map_err(|e| {
         (
@@ -4638,91 +4643,8 @@ async fn launch_agentic_task_internal(
     })
 }
 
-/// Call the Pro-mode LangChain sidecar to compare two providers and return the best response.
-/// Returns Ok(content) on success, Err on sidecar failure (caller should fallback).
-async fn call_pro_sidecar(
-    sidecar_url: &str,
-    messages: &[orion_capabilities::cognitive::Message],
-    provider_configs: Vec<(String, String, String)>, // (name, key, model)
-) -> Result<String, String> {
-    #[derive(serde::Serialize)]
-    struct SidecarProviderConfig {
-        name: String,
-        api_key: String,
-        model: String,
-    }
-    #[derive(serde::Serialize)]
-    struct SidecarMessage {
-        role: String,
-        content: String,
-    }
-    #[derive(serde::Serialize)]
-    struct SidecarRequest {
-        messages: Vec<SidecarMessage>,
-        provider_configs: Vec<SidecarProviderConfig>,
-    }
-    #[derive(serde::Deserialize)]
-    struct SidecarResponse {
-        content: String,
-        selected_provider: String,
-        reason: String,
-    }
-
-    let sidecar_msgs: Vec<SidecarMessage> = messages
-        .iter()
-        .map(|m| SidecarMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
-
-    let configs: Vec<SidecarProviderConfig> = provider_configs
-        .into_iter()
-        .map(|(name, key, model)| SidecarProviderConfig {
-            name,
-            api_key: key,
-            model,
-        })
-        .collect();
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
-    let url = format!("{}/compare", sidecar_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .json(&SidecarRequest {
-            messages: sidecar_msgs,
-            provider_configs: configs,
-        })
-        .send()
-        .await
-        .map_err(|e| format!("Sidecar request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Sidecar error ({}): {}", status, body));
-    }
-
-    let parsed: SidecarResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Sidecar response parse error: {}", e))?;
-
-    tracing::info!(
-        selected_provider = %parsed.selected_provider,
-        reason = %parsed.reason,
-        "pro_sidecar: comparison complete"
-    );
-
-    Ok(parsed.content)
-}
-
-/// Resolve the top two connected providers from vault for Pro-mode comparison.
-fn resolve_top_two_providers(
+/// Resolve connected providers for council execution (priority-ordered).
+fn resolve_council_providers(
     vault: &SecretsVault,
     preference: Option<&str>,
 ) -> Vec<(String, String)> {
@@ -4738,22 +4660,22 @@ fn resolve_top_two_providers(
         }
     }
 
-    // Add preferred providers.
-    let preferred = ["anthropic", "openai"];
+    // Add preferred providers first.
+    let preferred = ["anthropic", "openai", "google", "xai", "perplexity"];
     for pref in &preferred {
         if result.iter().any(|(n, _)| n == *pref) {
             continue;
         }
         if let Some(key) = vault.get_secret(pref) {
             result.push((pref.to_string(), key.to_string()));
-            if result.len() >= 2 {
+            if result.len() >= 3 {
                 break;
             }
         }
     }
 
     // Fill remaining from vault.
-    if result.len() < 2 {
+    if result.len() < 3 {
         for p in vault.list_providers() {
             let normalized = AppConfig::normalize_provider_name(p);
             if !provider_supports_tier_models(&normalized) || normalized == "tavily" {
@@ -4764,7 +4686,7 @@ fn resolve_top_two_providers(
             }
             if let Some(key) = vault.get_secret(p) {
                 result.push((normalized, key.to_string()));
-                if result.len() >= 2 {
+                if result.len() >= 3 {
                     break;
                 }
             }

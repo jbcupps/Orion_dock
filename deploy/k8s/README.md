@@ -7,7 +7,7 @@ Minimal manifests for running Orion's full stack in Kubernetes. **Matches the Do
 | Resource         | Purpose |
 |------------------|---------|
 | `namespace.yaml` | Optional `orion` namespace |
-| `configmap.yaml` | `MEMORY_BACKEND`, `BIRTH_MODEL`, `LOCAL_LLM_BASE_URL`, `ORION_DATA_DIR`, `PRO_MODE_SIDECAR_URL` |
+| `configmap.yaml` | `MEMORY_BACKEND`, `BIRTH_MODEL`, `LOCAL_LLM_BASE_URL`, `ORION_DATA_DIR` |
 | `secret.yaml`    | `DATABASE_URL` (required), optional `OPENAI_API_KEY` |
 | `postgres.yaml`  | Postgres + pgvector, PVC, Secret for DB password |
 | `ollama.yaml`    | Ollama service and PVC for models |
@@ -59,4 +59,4 @@ docker build -f frontend/Dockerfile -t orion-frontend:latest .
 - **Birth model:** After Ollama is running, pull the birth model:  
   `kubectl exec -it deploy/ollama -n orion -- ollama pull qwen2.5:3b-instruct`
 - **Secrets:** Prefer a secret manager (External Secrets, Sealed Secrets) instead of plain `secret.yaml`; override `DATABASE_URL` and Postgres password there.
-- **Pro sidecar (optional):** To enable Pro-tier best-of-two provider comparison, deploy the `services/pro-router/` Python service as a separate pod and set `PRO_MODE_SIDECAR_URL` in the configmap to its service URL (e.g. `http://pro-router:8100`). A Kubernetes manifest for the sidecar is not yet provided; create a Deployment + Service from `services/pro-router/Dockerfile`.
+- **Pro council (built-in):** Pro-tier routing uses the native Rust council engine in-process; no extra sidecar deployment is required.

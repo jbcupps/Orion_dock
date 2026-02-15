@@ -52,7 +52,7 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - deeper reasoning/tool-planning tasks,
   - model selected by tier: Fast (lightweight), Standard (balanced), Pro (highest capability),
   - per-provider model mappings with catalog validation,
-  - Pro tier optionally uses best-of-two provider comparison via sidecar.
+  - Pro tier uses native Rust council debate/synthesis across providers when multiple providers are available.
 - **Orchestration (policy + scheduler)**:
   - runs scheduled UTC cron jobs,
   - scores significance (`low`, `medium`, `high`),
@@ -78,7 +78,7 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - agentic endpoints (tier-aware model resolution),
   - tier-model and provider catalog management endpoints,
   - quick-start birth endpoint,
-  - Pro sidecar integration,
+  - Pro council integration,
   - orchestration endpoints + scheduler startup.
 - `crates/orion-api/src/agentic.rs`:
   - autonomous loop,
@@ -97,8 +97,8 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - Id/Ego routing, fallback behavior, tier-aware ego model override.
 - `crates/orion-skills/src/*`:
   - skill registry, executor, sandbox, trust tiers.
-- `services/pro-router/main.py`:
-  - Pro-tier LangChain sidecar for parallel provider comparison.
+- `crates/orion-router/src/council.rs`:
+  - Pro-tier native Rust MoA DAG for parallel drafting, critique, and synthesis.
 
 ## Frontend Areas
 
@@ -146,6 +146,6 @@ The current architecture favors:
 - Id for lightweight autonomous checks,
 - orchestration as the control plane for when and how autonomy escalates,
 - **provider catalog management** so mentors can validate and customize model choices,
-- **Pro sidecar** for highest-tier best-of-two provider comparison when multiple providers are available.
+- **Pro council engine** for highest-tier multi-provider drafting/critique/synthesis when multiple providers are available.
 
 This keeps the system capable without overloading the local lightweight model, while giving mentors granular control over model selection and provider preference.

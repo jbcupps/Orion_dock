@@ -320,11 +320,6 @@ pub struct AppConfig {
     /// Cached provider model catalogs (keyed by normalized provider name).
     #[serde(default)]
     pub provider_catalog: HashMap<String, ProviderCatalogEntry>,
-
-    /// URL for the Pro-mode LangChain sidecar service (e.g. "http://localhost:8100").
-    /// When set and Pro tier is selected, enables best-of-two provider comparison.
-    #[serde(default)]
-    pub pro_mode_sidecar_url: Option<String>,
 }
 
 /// Auth mechanism for an email account.
@@ -454,7 +449,6 @@ impl AppConfig {
             tier_models: HashMap::new(),
             active_provider_preference: None,
             provider_catalog: HashMap::new(),
-            pro_mode_sidecar_url: None,
         }
     }
 
@@ -485,12 +479,6 @@ impl AppConfig {
             let s = v.trim().to_string();
             if !s.is_empty() {
                 self.local_llm_base_url = Some(s);
-            }
-        }
-        if let Ok(v) = std::env::var("PRO_MODE_SIDECAR_URL") {
-            let s = v.trim().to_string();
-            if !s.is_empty() {
-                self.pro_mode_sidecar_url = Some(s);
             }
         }
     }
@@ -687,11 +675,11 @@ impl AppConfig {
 
         // Migration from v6 to v7
         if self.schema_version < 7 {
-            // v7 adds: active_provider_preference, provider_catalog, pro_mode_sidecar_url
+            // v7 adds: active_provider_preference, provider_catalog
             self.schema_version = 7;
             migrated = true;
             tracing::debug!(
-                "Migrated config from v6 to v7 (provider_catalog, active_provider_preference, pro_mode_sidecar_url)"
+                "Migrated config from v6 to v7 (provider_catalog, active_provider_preference)"
             );
         }
 
@@ -761,7 +749,6 @@ mod tests {
             tier_models: HashMap::new(),
             active_provider_preference: None,
             provider_catalog: HashMap::new(),
-            pro_mode_sidecar_url: None,
         }
     }
 

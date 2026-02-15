@@ -38,7 +38,6 @@ fn test_config(base: &Path) -> AppConfig {
         tier_models: std::collections::HashMap::new(),
         active_provider_preference: None,
         provider_catalog: std::collections::HashMap::new(),
-        pro_mode_sidecar_url: None,
     }
 }
 
