@@ -664,6 +664,137 @@ body {
   }
 }
 
+/* ── Inline provider key management ── */
+.provider-badge-clickable {
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.provider-badge-clickable:hover {
+  background: rgba(63, 185, 80, 0.3);
+}
+
+.provider-add-key-wrap {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.provider-add-key-btn {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  border: 1px dashed var(--accent);
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.provider-add-key-btn:hover {
+  background: var(--glow);
+}
+
+.provider-picker-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 140px;
+  background: var(--panel, #161b22);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.provider-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.4rem 0.65rem;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.provider-picker-item:hover {
+  background: var(--glow);
+}
+
+.provider-picker-item.configured {
+  color: var(--ok);
+}
+
+.provider-picker-check {
+  font-size: 0.7rem;
+  color: var(--ok);
+  margin-left: 0.5rem;
+}
+
+/* ── Hive key button + picker ── */
+.hive-key-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.hive-key-btn {
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  background: transparent;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  margin-right: 0.35rem;
+  transition: background 0.15s;
+}
+
+.hive-key-btn:hover {
+  background: rgba(63, 185, 80, 0.15);
+}
+
+.hive-provider-picker {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 140px;
+  background: var(--panel, #161b22);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.hive-provider-picker .provider-picker-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0.4rem 0.65rem;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.hive-provider-picker .provider-picker-item:hover {
+  background: var(--glow);
+}
+
 /* Chat panel header layout */
 .chat-panel-header {
   display: flex;

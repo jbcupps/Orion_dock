@@ -5,8 +5,11 @@ import {
   loadAgent,
   exportAgent,
   importAgent,
+  setActiveProvider,
   type AgentIdentityInfo,
 } from '../api';
+import { SUPPORTED_PROVIDERS } from '../providers';
+import ApiKeyModal from './ApiKeyModal';
 
 interface HiveScreenProps {
   onAgentSelected: (agentId: string) => void;
@@ -55,6 +58,9 @@ export default function HiveScreen({
   const [importModalName, setImportModalName] = useState(IMPORT_FALLBACK_NAME);
   const [importPrivateKey, setImportPrivateKey] = useState('');
   const importFileRef = useRef<HTMLInputElement>(null);
+  const [keyPickerAgentId, setKeyPickerAgentId] = useState<string | null>(null);
+  const [keyModalAgentId, setKeyModalAgentId] = useState<string | null>(null);
+  const [keyModalProvider, setKeyModalProvider] = useState<string | null>(null);
 
   const fetchAgents = async () => {
     try {
@@ -373,14 +379,49 @@ export default function HiveScreen({
                 </td>
                 <td className="hive-cell-actions">
                   {agent.birth_complete && (
-                    <button
-                      type="button"
-                      className="hive-export-btn"
-                      onClick={(e) => handleExport(e, agent)}
-                      disabled={exportingId === agent.id}
-                    >
-                      {exportingId === agent.id ? 'Exporting...' : 'Export'}
-                    </button>
+                    <>
+                      <span className="hive-key-wrap">
+                        <button
+                          type="button"
+                          className="hive-key-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setKeyPickerAgentId(
+                              keyPickerAgentId === agent.id ? null : agent.id
+                            );
+                          }}
+                        >
+                          API Key
+                        </button>
+                        {keyPickerAgentId === agent.id && (
+                          <div className="hive-provider-picker">
+                            {SUPPORTED_PROVIDERS.map((sp) => (
+                              <button
+                                key={sp.id}
+                                type="button"
+                                className="provider-picker-item"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setKeyPickerAgentId(null);
+                                  setKeyModalAgentId(agent.id);
+                                  setKeyModalProvider(sp.id);
+                                }}
+                              >
+                                {sp.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="hive-export-btn"
+                        onClick={(e) => handleExport(e, agent)}
+                        disabled={exportingId === agent.id}
+                      >
+                        {exportingId === agent.id ? 'Exporting...' : 'Export'}
+                      </button>
+                    </>
                   )}
                 </td>
               </tr>
@@ -475,6 +516,26 @@ export default function HiveScreen({
             </div>
           </div>
         </div>
+      )}
+
+      {keyModalAgentId && keyModalProvider && (
+        <ApiKeyModal
+          agentId={keyModalAgentId}
+          provider={keyModalProvider}
+          onClose={() => {
+            setKeyModalAgentId(null);
+            setKeyModalProvider(null);
+          }}
+          onKeyStored={async (provider) => {
+            const agentId = keyModalAgentId;
+            setKeyModalAgentId(null);
+            setKeyModalProvider(null);
+            try {
+              await setActiveProvider(agentId, provider);
+            } catch { /* ignore */ }
+          }}
+          onError={(msg) => setError(msg)}
+        />
       )}
     </div>
   );

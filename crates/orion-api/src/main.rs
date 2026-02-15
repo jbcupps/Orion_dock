@@ -2134,6 +2134,46 @@ async fn api_connectivity_store_key(
     }))
 }
 
+/// DELETE /api/agents/{id}/connectivity/keys/{provider} — remove a stored provider key.
+async fn api_connectivity_remove_key(
+    Path((id, provider)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let provider = provider.trim().to_lowercase();
+    if provider.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Provider name is required".to_string(),
+        ));
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut vault =
+            SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
+        if !vault.remove_secret(&provider) {
+            return Err(format!("No key stored for provider: {}", provider));
+        }
+        vault.save().map_err(|e| format!("Save vault: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join: {}", e),
+        )
+    })?
+    .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// GET /api/agents/{id}/connectivity/chat/history — return persisted connectivity chat messages.
 async fn api_connectivity_chat_history(
     Path(id): Path<String>,
@@ -5646,6 +5686,10 @@ async fn main() -> std::io::Result<()> {
         .route(
             "/api/agents/{id}/connectivity/keys",
             post(api_connectivity_store_key),
+        )
+        .route(
+            "/api/agents/{id}/connectivity/keys/{provider}",
+            axum::routing::delete(api_connectivity_remove_key),
         )
         .route(
             "/api/agents/{id}/connectivity/chat/history",
