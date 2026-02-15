@@ -26,7 +26,7 @@ image = "0.25"
 zip = "2.2"
 tar = "0.4"
 flate2 = "1.0"
-pdf-extract = "0.7"
+pdf-extract = "0.10"
 
 [features]
 default = []
