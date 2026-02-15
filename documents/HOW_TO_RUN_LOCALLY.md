@@ -97,6 +97,46 @@ The birth flow (Connectivity and Genesis chat stages) uses a **local-first** mod
 
 Both scripts run the same Docker-first validation path.
 
+## Toolbox Sidecar (Extended Agent Capabilities)
+
+The full stack includes an **orion-toolbox** sidecar container pre-loaded with common
+dev tools (git, python3, nodejs, wget, gcc, cmake, jq, etc.). The agent's lean runtime
+image intentionally omits these tools; instead the agent dispatches commands to the
+toolbox sidecar over HTTP.
+
+The toolbox starts automatically as part of the `full` profile. It exposes:
+
+- `POST /exec` -- execute a command (returns stdout/stderr/exit\_code)
+- `GET /health` -- liveness probe
+- `GET /tools` -- list available commands and package managers
+
+Access is authenticated via a shared secret (`TOOLBOX_SECRET`, default: `dev-secret`).
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOOLBOX_URL` | `http://orion-toolbox:9090` | Toolbox sidecar URL (set in orion-api) |
+| `TOOLBOX_SECRET` | `dev-secret` | Bearer token for toolbox authentication |
+
+### Skills that use the toolbox
+
+- **Docker Exec** (`skill-docker-exec`) -- `toolbox_exec`, `toolbox_install`, `toolbox_status` tools
+- **Cooperative Install** (`skill-cooperative-install`) -- automatically tries the toolbox before generating mentor scripts
+
+### Manual toolbox testing
+
+```bash
+# Start full stack (includes toolbox)
+docker compose -f docker/docker-compose.yml --profile full up -d
+
+# Test toolbox directly
+curl -sf http://localhost:9090/health  # (only accessible from within Docker network)
+
+# Or exec into the toolbox container
+docker compose -f docker/docker-compose.yml exec orion-toolbox bash
+```
+
 ## Runtime Data Notes
 
 Runtime artifacts and secrets are managed by the crates in this workspace.

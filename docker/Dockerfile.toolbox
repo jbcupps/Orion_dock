@@ -1,0 +1,27 @@
+# Orion Toolbox sidecar: pre-built container with common dev tools.
+# The agent dispatches commands here via HTTP when its lean runtime image
+# lacks the required utilities.
+#
+# Build: docker build -f docker/Dockerfile.toolbox -t orion-toolbox:local .
+
+FROM debian:bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ make cmake \
+    python3 python3-pip python3-venv \
+    nodejs npm \
+    git wget curl jq \
+    openssh-client rsync zip unzip \
+    ca-certificates libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Shared workspace — mounted as the orion-data volume
+WORKDIR /workspace
+
+# Tiny HTTP exec server (Python, no deps)
+COPY scripts/toolbox-server.py /usr/local/bin/toolbox-server
+RUN chmod +x /usr/local/bin/toolbox-server
+
+EXPOSE 9090
+
+CMD ["python3", "/usr/local/bin/toolbox-server"]

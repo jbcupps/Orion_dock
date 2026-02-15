@@ -1,0 +1,15 @@
+[skill]
+id = "com.orion.skills.docker-exec"
+name = "Docker Exec"
+version = "0.1.0"
+description = "Execute commands in the toolbox sidecar container. Provides access to tools (git, python, wget, gcc, etc.) not present in the lean agent runtime image."
+category = "Capability"
+keywords = ["docker", "toolbox", "exec", "install", "sidecar"]
+
+[[permissions]]
+permission = "ShellExecute"
+reason = "Execute commands in the toolbox sidecar container"
+
+[[permissions]]
+permission = { Network = { Domains = ["orion-toolbox"] } }
+reason = "Communicate with the toolbox sidecar over internal Docker network"

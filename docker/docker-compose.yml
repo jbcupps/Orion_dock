@@ -66,10 +66,14 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgres://orion:orion_dev@postgres:5432/orion}
       - MEMORY_BACKEND=${MEMORY_BACKEND:-postgres}
       - BIRTH_MODEL=${BIRTH_MODEL:-qwen2.5:3b-instruct}
+      - TOOLBOX_URL=${TOOLBOX_URL:-http://orion-toolbox:9090}
+      - TOOLBOX_SECRET=${TOOLBOX_SECRET:-dev-secret}
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+      orion-toolbox:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
@@ -77,6 +81,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+    profiles:
+      - full
+
+  # Toolbox sidecar: pre-built container with common dev tools.
+  # The agent dispatches commands here via HTTP when its lean runtime lacks
+  # required utilities (git, python, wget, gcc, etc.).
+  orion-toolbox:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.toolbox
+    image: orion-toolbox:local
+    volumes:
+      - orion-data:/workspace/data
+    environment:
+      - TOOLBOX_SECRET=${TOOLBOX_SECRET:-dev-secret}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9090/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     profiles:
       - full
 

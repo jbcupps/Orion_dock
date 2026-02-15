@@ -1,5 +1,6 @@
 //! Cooperative install skill: perform direct installs when possible, otherwise
-//! generate mentor-run host scripts for bash or PowerShell.
+//! try the toolbox sidecar, and finally generate mentor-run host scripts for
+//! bash or PowerShell.
 
 use async_trait::async_trait;
 use orion_skills::{
@@ -16,6 +17,15 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
+
+/// Response from the toolbox /exec endpoint (subset of fields we need).
+#[derive(Debug, Clone, Deserialize)]
+struct ToolboxExecResponse {
+    success: bool,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
 
 /// Maximum captured stdout/stderr size per stream.
 const MAX_OUTPUT_BYTES: usize = 65_536;
@@ -956,6 +966,60 @@ if (-not ({check_expr})) {{
         }
     }
 
+    /// Detect whether a toolbox sidecar URL is configured via TOOLBOX_URL env.
+    fn detect_toolbox_url() -> Option<String> {
+        env::var("TOOLBOX_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// Attempt to install packages via the toolbox sidecar HTTP API.
+    /// Returns Ok(ToolboxExecResponse) on HTTP success, Err on connection failure.
+    async fn toolbox_install(
+        toolbox_url: &str,
+        packages: &[String],
+        manager: &str,
+    ) -> Result<ToolboxExecResponse, String> {
+        let secret = env::var("TOOLBOX_SECRET").unwrap_or_default();
+        let package_list = packages.join(" ");
+        let install_cmd = match manager {
+            "apt-get" => format!("apt-get update && apt-get install -y {}", package_list),
+            "apt" => format!("apt update && apt install -y {}", package_list),
+            "pip" | "pip3" => format!("{} install {}", manager, package_list),
+            "npm" => format!("npm install -g {}", package_list),
+            _ => format!("apt-get update && apt-get install -y {}", package_list),
+        };
+
+        let url = format!("{}/exec", toolbox_url);
+        let body = serde_json::json!({
+            "command": install_cmd,
+            "timeout": 180,
+        });
+
+        let mut request = reqwest::Client::new()
+            .post(&url)
+            .json(&body)
+            .timeout(Duration::from_secs(190));
+
+        if !secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", secret));
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Toolbox HTTP request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("Toolbox returned HTTP {}", response.status()));
+        }
+
+        response
+            .json::<ToolboxExecResponse>()
+            .await
+            .map_err(|e| format!("Invalid toolbox response: {}", e))
+    }
+
     async fn cooperative_install(
         &self,
         packages_raw: Vec<String>,
@@ -1018,6 +1082,36 @@ if (-not ({check_expr})) {{
             } else {
                 "No compatible runtime package manager was available for direct install."
                     .to_string()
+            }
+        } else if let Some(toolbox_url) = Self::detect_toolbox_url() {
+            // Containerized but toolbox sidecar is configured — try installing there.
+            let toolbox_manager = requested_manager
+                .as_deref()
+                .unwrap_or("apt-get")
+                .to_string();
+            match Self::toolbox_install(&toolbox_url, &packages, &toolbox_manager).await {
+                Ok(exec) if exec.success => {
+                    return Ok(ToolOutput::success(serde_json::json!({
+                        "formatted": format!(
+                            "Installed {} package(s) in the toolbox sidecar using {}.",
+                            packages.len(),
+                            toolbox_manager
+                        ),
+                        "action_taken": "installed_via_toolbox",
+                        "packages": packages,
+                        "package_manager": toolbox_manager,
+                        "environment": env_snapshot,
+                        "toolbox_url": toolbox_url,
+                        "toolbox_stdout": exec.stdout,
+                        "toolbox_stderr": exec.stderr,
+                    })));
+                }
+                Ok(exec) => format!(
+                    "Toolbox install failed (exit code {}): {}",
+                    exec.exit_code,
+                    exec.stderr.chars().take(200).collect::<String>()
+                ),
+                Err(e) => format!("Toolbox sidecar unavailable: {}", e),
             }
         } else {
             "Orion is running in a containerized environment and cannot modify the host directly."

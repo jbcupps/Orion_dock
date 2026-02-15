@@ -3143,6 +3143,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skill-cooperative-install",
+ "skill-docker-exec",
  "skill-filesystem",
  "skill-http",
  "skill-perplexity-search",
@@ -4510,6 +4511,21 @@ dependencies = [
  "async-trait",
  "chrono",
  "orion-skills",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skill-docker-exec"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "orion-skills",
+ "reqwest 0.11.27",
  "serde",
  "serde_json",
  "tokio",

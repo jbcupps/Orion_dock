@@ -1,5 +1,5 @@
 [package]
-name = "skill-cooperative-install"
+name = "skill-docker-exec"
 version.workspace = true
 edition.workspace = true
 
@@ -9,6 +9,6 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio.workspace = true
 tracing.workspace = true
 reqwest = { version = "0.11", features = ["json"] }
