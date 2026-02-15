@@ -104,9 +104,7 @@ pub async fn validate_model(provider: &str, model: &str, api_key: &str) -> anyho
         "perplexity" => validate_perplexity_model(model),
         _ => {
             let (models, _, _) = fetch_provider_models(&normalized, api_key).await;
-            if models.is_empty() {
-                Ok(())
-            } else if models.iter().any(|m| m == model) {
+            if models.is_empty() || models.iter().any(|m| m == model) {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!(

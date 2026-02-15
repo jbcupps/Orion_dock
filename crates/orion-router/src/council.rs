@@ -7,6 +7,26 @@ use orion_memory::store::EdgeType;
 use orion_memory::{Memory, MemoryStore};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Overall timeout for a full council execution (drafts + critiques + synthesis).
+const COUNCIL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// System prompt for draft nodes.
+const DRAFT_SYSTEM: &str = "You are a helpful, thorough assistant. \
+Provide a complete, independent answer to the user's query. \
+Do not reference other drafts or reviewers.";
+
+/// System prompt for critique nodes.
+const CRITIQUE_SYSTEM: &str = "You are a critical reviewer. \
+Evaluate the draft against the original query for correctness, completeness, \
+and quality. Return STRICT JSON: {\"score\": <number 0-10>, \"rationale\": \"<brief explanation>\"}. \
+Only output the JSON object, nothing else.";
+
+/// System prompt for synthesis node.
+const SYNTHESIS_SYSTEM: &str = "You synthesize multiple expert drafts into a single best answer. \
+Favor content from higher-scored drafts. Resolve conflicts by choosing the most accurate option. \
+Produce a polished, coherent final response.";
 
 /// Artifact payload moving through council DAG nodes.
 pub trait Artifact: Send + Sync {
@@ -162,22 +182,28 @@ impl GraphExecutor {
         messages: &[Message],
         memory: Option<&MemoryStore>,
     ) -> anyhow::Result<CompletionResponse> {
-        let query_text = flatten_messages(messages);
+        // Separate system context from the user query.
+        let (system_context, query_text) = extract_context(messages);
         let query_id = persist(memory, "query", &query_text);
 
-        let mut tasks = Vec::new();
+        // ── Phase 1: Parallel drafting (graceful degradation) ────────────
+        let mut draft_tasks = Vec::new();
         for (idx, node) in self.draft_nodes.iter().enumerate() {
             let node = node.clone();
+            let system = system_context.clone();
             let query = query_text.clone();
-            tasks.push(tokio::spawn(async move {
-                let prompt = Message::new(
-                    "user",
-                    format!(
-                        "Create an independent draft solution. Do not mention other drafts.\n\nQuery:\n{}",
-                        query
-                    ),
-                );
-                let response = node.run(vec![prompt]).await?;
+            draft_tasks.push(tokio::spawn(async move {
+                let mut msgs = Vec::new();
+                if !system.is_empty() {
+                    msgs.push(Message::new(
+                        "system",
+                        format!("{}\n\n{}", DRAFT_SYSTEM, system),
+                    ));
+                } else {
+                    msgs.push(Message::new("system", DRAFT_SYSTEM));
+                }
+                msgs.push(Message::new("user", query));
+                let response = node.run(msgs).await?;
                 Ok::<(usize, Node, TextArtifact), anyhow::Error>((
                     idx,
                     node,
@@ -188,39 +214,74 @@ impl GraphExecutor {
             }));
         }
 
-        let mut drafts = Vec::new();
-        for task in tasks {
-            let (idx, node, artifact) = task.await??;
-            let memory_id = persist(memory, &node.name, artifact.content());
-            if let (Some(from), Some(to), Some(store)) =
-                (query_id.as_deref(), memory_id.as_deref(), memory)
-            {
-                let _ = store.add_edge(
-                    from,
-                    to,
-                    EdgeType::DerivedFrom,
-                    1.0,
-                    serde_json::json!({"node": node.id}),
-                );
+        let mut drafts: Vec<(usize, Node, TextArtifact, Option<String>)> = Vec::new();
+        let mut draft_failures: Vec<String> = Vec::new();
+        for task in draft_tasks {
+            match task.await {
+                Ok(Ok((idx, node, artifact))) => {
+                    let memory_id = persist(memory, &node.name, artifact.content());
+                    if let (Some(from), Some(to), Some(store)) =
+                        (query_id.as_deref(), memory_id.as_deref(), memory)
+                    {
+                        let _ = store.add_edge(
+                            from,
+                            to,
+                            EdgeType::DerivedFrom,
+                            1.0,
+                            serde_json::json!({"node": node.id}),
+                        );
+                    }
+                    drafts.push((idx, node, artifact, memory_id));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "council: draft node failed, skipping");
+                    draft_failures.push(format!("{}", e));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "council: draft task panicked, skipping");
+                    draft_failures.push(format!("task panic: {}", e));
+                }
             }
-            drafts.push((idx, node, artifact, memory_id));
         }
 
+        if drafts.is_empty() {
+            anyhow::bail!(
+                "council: all draft nodes failed ({})",
+                draft_failures.join("; ")
+            );
+        }
+
+        if !draft_failures.is_empty() {
+            tracing::info!(
+                succeeded = drafts.len(),
+                failed = draft_failures.len(),
+                "council: continuing with partial drafts"
+            );
+        }
+
+        // ── Phase 2: Parallel critique (graceful degradation) ────────────
         let mut critique_tasks = Vec::new();
         for (idx, _draft_node, artifact, draft_mem_id) in &drafts {
-            let reviewer = self.critique_nodes[(idx + 1) % self.critique_nodes.len()].clone();
+            let reviewer_idx = (idx + 1) % self.critique_nodes.len();
+            let reviewer = self.critique_nodes[reviewer_idx].clone();
             let draft_content = artifact.content.clone();
             let draft_mem_id = draft_mem_id.clone();
+            let query = query_text.clone();
+            let draft_idx = *idx;
             critique_tasks.push(tokio::spawn(async move {
-                let critique_prompt = Message::new(
-                    "user",
-                    format!(
-                        "Review the draft and score it from 0-10. Return STRICT JSON: {{\"score\": number, \"rationale\": string}}.\n\nDraft:\n{}",
-                        draft_content
+                let msgs = vec![
+                    Message::new("system", CRITIQUE_SYSTEM),
+                    Message::new(
+                        "user",
+                        format!(
+                            "Original query:\n{}\n\n---\n\nDraft to review:\n{}",
+                            query, draft_content
+                        ),
                     ),
-                );
-                let critique = reviewer.run(vec![critique_prompt]).await?;
-                Ok::<(Node, String, Option<String>), anyhow::Error>((
+                ];
+                let critique = reviewer.run(msgs).await?;
+                Ok::<(usize, Node, String, Option<String>), anyhow::Error>((
+                    draft_idx,
                     reviewer,
                     critique.content,
                     draft_mem_id,
@@ -228,36 +289,47 @@ impl GraphExecutor {
             }));
         }
 
-        let mut critiques: Vec<(f32, String, String)> = Vec::new();
-        for (draft_idx, task) in critique_tasks.into_iter().enumerate() {
-            let (reviewer, critique_raw, draft_mem_id) = task.await??;
-            let parsed = parse_score(&critique_raw).unwrap_or(5.0);
-            let critique_mem_id = persist(memory, &reviewer.name, &critique_raw);
-            if let (Some(from), Some(to), Some(store)) =
-                (draft_mem_id.as_deref(), critique_mem_id.as_deref(), memory)
-            {
-                let _ = store.add_edge(
-                    from,
-                    to,
-                    EdgeType::CritiquedBy,
-                    parsed,
-                    serde_json::json!({"draft_index": draft_idx}),
-                );
+        // Map draft_idx → (score, critique_text, reviewer_name)
+        let mut critique_map: std::collections::HashMap<usize, (f32, String, String)> =
+            std::collections::HashMap::new();
+        for task in critique_tasks {
+            match task.await {
+                Ok(Ok((draft_idx, reviewer, critique_raw, draft_mem_id))) => {
+                    let parsed = parse_score(&critique_raw).unwrap_or(5.0);
+                    let critique_mem_id = persist(memory, &reviewer.name, &critique_raw);
+                    if let (Some(from), Some(to), Some(store)) =
+                        (draft_mem_id.as_deref(), critique_mem_id.as_deref(), memory)
+                    {
+                        let _ = store.add_edge(
+                            from,
+                            to,
+                            EdgeType::CritiquedBy,
+                            parsed,
+                            serde_json::json!({"draft_index": draft_idx}),
+                        );
+                    }
+                    critique_map.insert(draft_idx, (parsed, critique_raw, reviewer.name));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "council: critique node failed, using default score");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "council: critique task panicked, using default score");
+                }
             }
-            critiques.push((
-                parsed,
-                critique_raw,
-                self.draft_nodes[draft_idx].name.clone(),
-            ));
         }
 
+        // ── Phase 3: Rank and synthesize ─────────────────────────────────
         let mut ranked: Vec<(f32, String, String)> = drafts
             .iter()
-            .enumerate()
-            .map(|(idx, (_i, node, artifact, _))| {
-                let (score, critique, _) = &critiques[idx];
+            .map(|(idx, node, artifact, _)| {
+                let (score, critique, _reviewer) = critique_map.get(idx).cloned().unwrap_or((
+                    5.0,
+                    "(no critique available)".to_string(),
+                    "none".to_string(),
+                ));
                 (
-                    *score,
+                    score,
                     artifact.content.clone(),
                     format!("{}\n{}", node.name, critique),
                 )
@@ -265,17 +337,20 @@ impl GraphExecutor {
             .collect();
         ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let mut synthesis_input = String::from("Synthesize a single best answer from these drafts. Favor high-score content and resolve conflicts.\n\n");
+        let mut synthesis_input =
+            String::from("Synthesize a single best answer from these ranked drafts. Favor high-score content and resolve conflicts.\n\n");
         for (rank, (score, draft, context)) in ranked.iter().enumerate() {
             synthesis_input.push_str(&format!(
                 "Draft #{rank} (score {score:.1}):\n{draft}\n\nCritique context:\n{context}\n\n",
             ));
         }
 
-        let synthesis = self
-            .synthesis_node
-            .run(vec![Message::new("user", synthesis_input)])
-            .await?;
+        let synthesis_msgs = vec![
+            Message::new("system", SYNTHESIS_SYSTEM),
+            Message::new("user", synthesis_input),
+        ];
+
+        let synthesis = self.synthesis_node.run(synthesis_msgs).await?;
 
         let synthesis_id = persist(memory, &self.synthesis_node.name, &synthesis.content);
         if let (Some(final_id), Some(store)) = (synthesis_id.as_deref(), memory) {
@@ -302,25 +377,72 @@ pub async fn run_council(
     memory: Option<&MemoryStore>,
 ) -> anyhow::Result<CompletionResponse> {
     let executor = GraphExecutor::from_provider_configs(providers)?;
-    executor.execute(messages, memory).await
+    match tokio::time::timeout(COUNCIL_TIMEOUT, executor.execute(messages, memory)).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "council: execution timed out after {}s",
+            COUNCIL_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 fn parse_score(raw: &str) -> Option<f32> {
+    // Try strict JSON first.
     if let Ok(parsed) = serde_json::from_str::<CritiqueScore>(raw) {
         return Some(parsed.score.clamp(0.0, 10.0));
     }
+    // Try extracting JSON from markdown code fences.
+    if let Some(json_start) = raw.find('{') {
+        if let Some(json_end) = raw.rfind('}') {
+            if json_start < json_end {
+                if let Ok(parsed) =
+                    serde_json::from_str::<CritiqueScore>(&raw[json_start..=json_end])
+                {
+                    return Some(parsed.score.clamp(0.0, 10.0));
+                }
+            }
+        }
+    }
+    // Last resort: find a standalone number.
     let digit = raw
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .find_map(|token| token.parse::<f32>().ok())?;
     Some(digit.clamp(0.0, 10.0))
 }
 
-fn flatten_messages(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Extract system context and user query from the message list.
+///
+/// Returns (system_context, query_text) where:
+/// - system_context: concatenation of all system role messages
+/// - query_text: the last user message (the actual query), or a fallback
+///   concatenation of non-system messages if no user message exists.
+fn extract_context(messages: &[Message]) -> (String, String) {
+    let mut system_parts: Vec<&str> = Vec::new();
+    let mut last_user_content: Option<&str> = None;
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => system_parts.push(&msg.content),
+            "user" => last_user_content = Some(&msg.content),
+            _ => {}
+        }
+    }
+
+    let system = system_parts.join("\n\n");
+
+    let query = if let Some(user_msg) = last_user_content {
+        user_msg.to_string()
+    } else {
+        // Fallback: concatenate all non-system messages.
+        messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    (system, query)
 }
 
 fn persist(memory: Option<&MemoryStore>, node: &str, payload: &str) -> Option<String> {
@@ -362,4 +484,73 @@ fn build_provider(cfg: &ProviderConfig) -> anyhow::Result<Arc<dyn LlmProvider>> 
         other => anyhow::bail!("unsupported council provider: {}", other),
     };
     Ok(built)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_score_strict_json() {
+        let raw = r#"{"score": 8.5, "rationale": "good"}"#;
+        assert_eq!(parse_score(raw), Some(8.5));
+    }
+
+    #[test]
+    fn test_parse_score_in_markdown_fence() {
+        let raw = "Here is my review:\n```json\n{\"score\": 7, \"rationale\": \"decent\"}\n```";
+        assert_eq!(parse_score(raw), Some(7.0));
+    }
+
+    #[test]
+    fn test_parse_score_bare_number() {
+        assert_eq!(parse_score("I give this a 9 out of 10"), Some(9.0));
+    }
+
+    #[test]
+    fn test_parse_score_clamped() {
+        let raw = r#"{"score": 15, "rationale": "over"}"#;
+        assert_eq!(parse_score(raw), Some(10.0));
+    }
+
+    #[test]
+    fn test_parse_score_none() {
+        assert_eq!(parse_score("no numbers here"), None);
+    }
+
+    #[test]
+    fn test_extract_context_basic() {
+        let msgs = vec![
+            Message::new("system", "You are helpful"),
+            Message::new("user", "Hello"),
+            Message::new("assistant", "Hi there"),
+            Message::new("user", "What is Rust?"),
+        ];
+        let (system, query) = extract_context(&msgs);
+        assert_eq!(system, "You are helpful");
+        assert_eq!(query, "What is Rust?");
+    }
+
+    #[test]
+    fn test_extract_context_multiple_system() {
+        let msgs = vec![
+            Message::new("system", "First"),
+            Message::new("system", "Second"),
+            Message::new("user", "Query"),
+        ];
+        let (system, query) = extract_context(&msgs);
+        assert_eq!(system, "First\n\nSecond");
+        assert_eq!(query, "Query");
+    }
+
+    #[test]
+    fn test_extract_context_no_user() {
+        let msgs = vec![
+            Message::new("system", "Sys"),
+            Message::new("assistant", "Answer"),
+        ];
+        let (system, query) = extract_context(&msgs);
+        assert_eq!(system, "Sys");
+        assert_eq!(query, "assistant: Answer");
+    }
 }

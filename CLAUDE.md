@@ -123,11 +123,16 @@ Ego model selection is controlled by a three-tier system mapped from router mode
 |-------------|------|---------|
 | `auto` | Fast | Lightweight, low-latency responses |
 | `think_hard` | Standard | Balanced quality/cost |
-| `think_harder` | Pro | Highest capability; optional best-of-two comparison via sidecar |
+| `think_harder` | Pro | Highest capability; multi-provider council with draft → critique → synthesis |
 
-Default tier models are configured per provider (see `curated_provider_models()` in `orion-capabilities`). Mentors can override per-provider mappings via the API. The `active_provider_preference` config field controls which Ego provider is used.
+Default tier models are configured per provider (see `curated_provider_models()` in `orion-core`). Mentors can override per-provider mappings via the API. The `active_provider_preference` config field controls which Ego provider is used.
 
-**Pro mode sidecar:** When Pro tier is active and `PRO_MODE_SIDECAR_URL` is set with 2+ providers available, the system sends the prompt to the top two providers in parallel via the LangChain sidecar (`services/pro-router/`), selects the best response by content quality and latency, and returns it. Falls back to standard Ego routing on sidecar failure.
+**Pro mode council:** When Pro tier is active with 2+ connected providers, the system runs a Rust-native Mixture-of-Agents (MoA) council DAG (`crates/orion-router/src/council.rs`). The council:
+1. **Draft phase**: Each provider generates an independent draft in parallel.
+2. **Critique phase**: Each provider critiques a different provider's draft (cross-provider review), returning a 0-10 JSON score.
+3. **Synthesis phase**: The preferred provider synthesizes the ranked drafts into a single best answer.
+
+The council has a 90-second overall timeout and degrades gracefully — if a provider fails during drafting or critique, the remaining providers continue. Falls back to standard Ego routing if the council fails entirely or fewer than 2 providers are available.
 
 ### Cognitive Discipline (Karpathy Principles)
 
@@ -156,7 +161,7 @@ These principles appear at multiple layers:
 | `orion-birth` | Birth stage machine, chat runtime, prompts, Genesis path enum and dispatch |
 | `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction) |
 | `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules, provider model catalog |
-| `orion-router` | IdEgoRouter, tier-aware model override, ego model override |
+| `orion-router` | IdEgoRouter, tier-aware model override, ego model override, Pro council DAG |
 | `orion-email` | Email authentication (OAuth2, PKCE, IMAP) |
 | `orion-api` | Axum HTTP API server |
 | `orion-uat` | Headless UAT driver |
@@ -164,18 +169,12 @@ These principles appear at multiple layers:
 | `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
 | `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, proton-mail) |
 
-**Services:**
-
-| Service | Role |
-|---------|------|
-| `services/pro-router/` | Python FastAPI sidecar for Pro-tier best-of-two provider comparison (LangChain) |
-
 Orchestration is currently implemented as an MVP module at `crates/orion-api/src/orchestration.rs` (not yet split into a dedicated crate).
 
 ### Runtime Surfaces
 
 - **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.
-- **Pro Sidecar**: `services/pro-router/` — Python FastAPI on port 8100. LangChain-based parallel provider comparison for Pro tier. Independent service; optional.
+- **Pro Council**: Rust-native MoA council DAG in `crates/orion-router/src/council.rs`. Multi-provider draft → critique → synthesis with 90s timeout and graceful degradation. No external sidecar needed.
 - **Orchestration**: In-process scheduler loop in API (UTC cron semantics), scanning per-agent jobs and triggering Id checks or agentic runs.
 - **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize.
 - **Dev**: `orion-dev` container with bind-mounted source.
@@ -226,7 +225,7 @@ Darkness → Ignition → Connectivity → Genesis → Emergence
 - **Tier config**: `crates/orion-core/src/config.rs` — `TierModels`, `ProviderCatalogEntry`, `effective_tier_model()`, `curated_provider_models()`
 - **Model catalog**: `crates/orion-capabilities/src/cognitive/model_catalog.rs` — Provider catalog fetching (OpenAI, Anthropic, Google, xAI, Perplexity)
 - **Default templates**: `crates/orion-core/src/templates.rs` — `DEFAULT_PURPOSE`, `DEFAULT_PERSONALITY`, `fill_soul_template_default()`
-- **Pro sidecar**: `services/pro-router/main.py` — FastAPI `/compare` endpoint, LangChain parallel invocation
+- **Pro council**: `crates/orion-router/src/council.rs` — `GraphExecutor`, `run_council()`, MoA draft→critique→synthesis DAG
 
 ### Modular Genesis Paths
 
@@ -298,7 +297,7 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 - Operational mentor chat with skill tool execution and separate activity logging.
 - Tier-based model orchestration: Fast/Standard/Pro mapped to per-provider model selections.
 - Provider model catalog: API-fetched and curated catalogs with validation and lifecycle warnings.
-- Pro mode sidecar: best-of-two provider comparison via LangChain Python service.
+- Pro mode council: Rust-native MoA DAG with multi-provider draft, cross-provider critique, and synthesis.
 - Active provider preference: mentor selects preferred Ego provider per agent.
 - Agentic loop with SSE timeline, mentor ask/confirm controls, run history, and cancellation.
 - Orchestration MVP: scheduled jobs, significance policy, escalation decisions, and job logs.
@@ -307,7 +306,7 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 - Promote orchestration from API module to dedicated crate when interfaces stabilize.
 - Persist active agentic task state beyond in-memory process lifetime.
 - Expand orchestration UI ergonomics (filters, richer per-job analytics, trend views).
-- Extend Pro sidecar to support configurable selection strategies beyond content-length heuristic.
+- Extend Pro council with configurable selection strategies, weighted scoring, and provider-specific policies.
 
 ---
 
@@ -325,7 +324,6 @@ See `example.env` for the full list. Key variables:
 | `ORION_DATA_DIR` | Agent data directory |
 | `EXTERNAL_PUBKEY_PATH` | Explicit public key path override |
 | `ORION_MASTER_KEY` | Encrypts secrets on Linux/macOS/Docker (ChaCha20-Poly1305). Without it, secrets are plaintext. |
-| `PRO_MODE_SIDECAR_URL` | Pro-mode LangChain sidecar URL (e.g. `http://localhost:8100`) |
 | `MCP_SERVER_URLS` | Comma-separated MCP server URLs |
 | `VITE_API_URL` | Frontend API base URL (empty = use proxy) |
 
