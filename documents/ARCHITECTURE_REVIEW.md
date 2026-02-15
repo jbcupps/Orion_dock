@@ -30,7 +30,7 @@ Additionally: LLM health check added before agentic runs (pre-flight verificatio
 | Memory | SQLite/Postgres store | Semantic graphs, ephemeral/long-term split | Competitive. DB schema supports vector/graph; retrieval logic is basic. |
 | Routing | Tier-aware Id/Ego with Superego pre-check, per-provider model selection, Pro sidecar comparison | Learned routing, model cascading | **Competitive+.** Tier system (Fast/Standard/Pro) with provider catalogs and best-of-two Pro comparison addresses model cascading. |
 | Identity | Crypto-native (Ed25519) | Config-based / stateless | **Leading.** Signed constitutional documents are unique. |
-| Self-Improvement | None | Meta-prompting, strategy optimization | Missing. No feedback loop modifies agent behavior. |
+| Self-Improvement | MCP skill registration | Meta-prompting, strategy optimization | Partial. Agent can register new MCP tools at runtime via `register_mcp_skill`. Full feedback loop (strategy optimization) remains planned. |
 | Persistence | Volatile tasks, disk summaries | Checkpointing / replayability | Minimal. Container restart kills active agentic runs. |
 
 ---
@@ -58,6 +58,8 @@ Additionally: LLM health check added before agentic runs (pre-flight verificatio
 **Files:** `crates/orion-skills/src/executor.rs`, `crates/orion-skills/src/sandbox.rs`, `crates/orion-skills/src/runtime/wasm.rs` (stub)
 
 **Interim controls:** Trust tier filtering strips dangerous permissions from untrusted skills. Audit logging tracks all sandbox decisions.
+
+**Note:** AgentBuilt MCP skills (registered via `register_mcp_skill`) run out-of-process — the MCP server is a separate process or container communicating over HTTP JSON-RPC. This provides stronger isolation than in-process native skills, as the MCP server cannot directly access the API's memory space. The `McpTrustPolicy` restricts which hosts MCP servers can connect to.
 
 **Roadmap:** Implement Wasmtime-based WASM runtime for Untrusted and AgentBuilt tier skills. The `WasmRuntimeStub` in `runtime/wasm.rs` provides the integration point.
 
@@ -116,6 +118,9 @@ Additionally: LLM health check added before agentic runs (pre-flight verificatio
 
 ### Phase 3: Isolation & Architecture
 
+- [x] Dynamic MCP skill registration via `register_mcp_skill` agentic tool (AgentBuilt tier, MCP trust policy, mid-run tool refresh)
+- [ ] Council-to-agentic bridge for autonomous capability building
+- [ ] Sub-task spawning (`spawn_subtask`) for agentic decomposition
 - [ ] Wasmtime-based WASM runtime for untrusted skills (via `runtime/wasm.rs`)
 - [ ] WIT interface definitions for skill capabilities (Network, FileSystem)
 - [ ] Graph-based orchestration (StateGraph with Plan/Act/Observe nodes)

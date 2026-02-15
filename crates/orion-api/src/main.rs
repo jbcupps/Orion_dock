@@ -2657,7 +2657,7 @@ async fn api_operational_chat_history(
 }
 
 /// Build SkillToolEntry list from the skill registry for system prompt injection.
-fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
+pub(crate) fn build_skill_tool_entries(registry: &SkillRegistry) -> Vec<SkillToolEntry> {
     let mut entries = Vec::new();
     if let Ok(skills) = registry.list_with_tiers() {
         for (manifest, tier) in skills {
@@ -4618,6 +4618,58 @@ async fn launch_agentic_task_internal(
 
     // Sync agent secrets into the shared skill vault so plugins can see them.
     sync_agent_vault_to_skills(&config.data_dir, &state.skill_vault);
+
+    // Load persisted agent-registered MCP servers into the shared registry.
+    for mcp_def in &config.mcp_servers {
+        if mcp_def.transport == "http" && !mcp_def.command_or_url.is_empty() {
+            let sid = orion_skills::manifest::SkillId(mcp_def.id.clone());
+            // Skip if already registered (e.g. from a previous agent load in the same process).
+            if state.skill_registry.get_skill(&sid).is_ok() {
+                continue;
+            }
+            let mut runtime = orion_skills::protocol::mcp::McpSkillRuntime::new(
+                &mcp_def.id,
+                &mcp_def.name,
+                &mcp_def.command_or_url,
+            );
+            let skill_cfg = orion_skills::skill::SkillConfig {
+                values: Default::default(),
+                secrets: Default::default(),
+                limits: orion_skills::ResourceLimits::default(),
+                permissions: vec![],
+                event_sender: None,
+            };
+            match runtime.initialize(skill_cfg).await {
+                Ok(()) => {
+                    if let Err(e) = state.skill_registry.register_with_tier(
+                        sid,
+                        Arc::new(runtime),
+                        TrustTier::AgentBuilt,
+                    ) {
+                        tracing::warn!(
+                            mcp_id = %mcp_def.id,
+                            error = %e,
+                            "Failed to register persisted MCP skill"
+                        );
+                    } else {
+                        tracing::info!(
+                            mcp_id = %mcp_def.id,
+                            url = %mcp_def.command_or_url,
+                            "Loaded persisted MCP skill (AgentBuilt)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mcp_id = %mcp_def.id,
+                        url = %mcp_def.command_or_url,
+                        error = %e,
+                        "Failed to initialize persisted MCP skill (server may be offline)"
+                    );
+                }
+            }
+        }
+    }
 
     let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
     let stored_providers: Vec<String> = {

@@ -174,8 +174,9 @@ Orchestration is currently implemented as an MVP module at `crates/orion-api/src
 ### Runtime Surfaces
 
 - **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.
-- **Pro Council**: Rust-native MoA council DAG in `crates/orion-router/src/council.rs`. Multi-provider draft → critique → synthesis with 90s timeout and graceful degradation. No external sidecar needed.
+- **Pro Council**: Rust-native MoA council DAG in `crates/orion-router/src/council.rs`. Multi-provider draft → critique → synthesis with 90s timeout and graceful degradation. All three phases receive the full agent system prompt (identity, ethics, instincts, operational awareness) and conversation history. No external sidecar needed.
 - **Orchestration**: In-process scheduler loop in API (UTC cron semantics), scanning per-agent jobs and triggering Id checks or agentic runs.
+- **Dynamic Skill Registration**: Agentic runs can connect MCP servers at runtime via `register_mcp_skill` synthetic tool. Registered skills persist in `config.mcp_servers` and reload on agent startup.
 - **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize.
 - **Dev**: `orion-dev` container with bind-mounted source.
 
@@ -285,6 +286,7 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 - **Document signing**: Format `{doc_name}|{tier}|{content}` → signature. `.sig` files store base64 signature, tier, timestamp. Verified on boot via `orion-core` verifier.
 - **Secrets**: API keys in SecretsVault. DPAPI (Windows) for mentor keyring; plaintext stub on other platforms.
 - **Local LLM URL**: Validated to localhost/127.0.0.1 to prevent SSRF.
+- **MCP trust policy**: `McpTrustPolicy` restricts which hosts agent-registered MCP servers can connect to. Default allows localhost, `orion-toolbox`, and Docker-internal hostnames. Cloud metadata endpoints (169.254.169.254) are unconditionally blocked. `AgentBuilt` tier applies sandbox resource limits to dynamically registered skills.
 
 ---
 
@@ -297,12 +299,17 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 - Operational mentor chat with skill tool execution and separate activity logging.
 - Tier-based model orchestration: Fast/Standard/Pro mapped to per-provider model selections.
 - Provider model catalog: API-fetched and curated catalogs with validation and lifecycle warnings.
-- Pro mode council: Rust-native MoA DAG with multi-provider draft, cross-provider critique, and synthesis.
+- Pro mode council: Rust-native MoA DAG with multi-provider draft, cross-provider critique, and synthesis. All three council phases receive full agent context (identity, ethics, instincts, operational awareness) and conversation history.
 - Active provider preference: mentor selects preferred Ego provider per agent.
 - Agentic loop with SSE timeline, mentor ask/confirm controls, run history, and cancellation.
 - Orchestration MVP: scheduled jobs, significance policy, escalation decisions, and job logs.
+- Dynamic MCP skill registration: agentic runs can connect to MCP servers and register new tools mid-run via `register_mcp_skill` synthetic tool. Registered skills persist across restarts.
 
 ### Near-term evolution areas
+- Council-to-agentic bridge: parse Pro council output for capability-building directives and auto-dispatch as agentic runs.
+- Sub-task spawning: `spawn_subtask` synthetic tool for agentic decomposition with depth limits.
+- Script-as-tool wrapper: `register_script_tool` for lightweight non-MCP tool creation.
+- WASM runtime: complete `WasmRuntimeStub` for sandboxed agent-built code execution.
 - Promote orchestration from API module to dedicated crate when interfaces stabilize.
 - Persist active agentic task state beyond in-memory process lifetime.
 - Expand orchestration UI ergonomics (filters, richer per-job analytics, trend views).

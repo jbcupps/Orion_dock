@@ -189,6 +189,62 @@ pub struct McpTrustPolicy {
     pub allowed_http_hosts: Vec<String>,
 }
 
+/// Default hostnames always permitted for MCP connections (Docker-internal).
+const MCP_DEFAULT_ALLOWED_HOSTS: &[&str] = &[
+    "localhost",
+    "127.0.0.1",
+    "orion-toolbox",
+    "host.docker.internal",
+];
+
+/// Cloud metadata IP ranges that must never be contacted.
+const MCP_BLOCKED_HOSTS: &[&str] = &["169.254.169.254", "metadata.google.internal"];
+
+impl McpTrustPolicy {
+    /// Validate an MCP server URL against this trust policy.
+    ///
+    /// Returns `Ok(())` if the URL is allowed, or an error message describing
+    /// why the URL was rejected.
+    pub fn validate_url(&self, url: &str) -> Result<(), String> {
+        // Parse URL to extract host.
+        let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {}", e))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "URL has no host".to_string())?;
+
+        // Block dangerous metadata endpoints unconditionally.
+        for blocked in MCP_BLOCKED_HOSTS {
+            if host == *blocked {
+                return Err(format!("host '{}' is blocked (cloud metadata endpoint)", host));
+            }
+        }
+
+        // If allow_list_only, the host must appear in allowed_http_hosts.
+        if self.allow_list_only {
+            if !self.allowed_http_hosts.iter().any(|h| h == host) {
+                return Err(format!(
+                    "host '{}' not in allowed list (allow_list_only is enabled)",
+                    host
+                ));
+            }
+            return Ok(());
+        }
+
+        // Otherwise, allow defaults + any configured hosts.
+        let in_defaults = MCP_DEFAULT_ALLOWED_HOSTS.iter().any(|h| *h == host);
+        let in_configured = self.allowed_http_hosts.iter().any(|h| h == host);
+        if in_defaults || in_configured {
+            return Ok(());
+        }
+
+        Err(format!(
+            "host '{}' is not in the default or configured allowed hosts. \
+             Add it to mcp_trust_policy.allowed_http_hosts in agent config.",
+            host
+        ))
+    }
+}
+
 /// Trinity configuration: maps providers to Superego/Ego/Id roles.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrinityConfig {
@@ -945,5 +1001,68 @@ mod tests {
         assert_eq!(acc.status, EmailAccountStatus::Active);
         assert_eq!(acc.imap_host.as_deref(), Some("mail.proton.me"));
         assert_eq!(acc.imap_port, Some(993));
+    }
+
+    // ── MCP trust policy URL validation ─────────────────────────────────
+
+    #[test]
+    fn test_mcp_trust_default_allows_localhost() {
+        let policy = McpTrustPolicy::default();
+        assert!(policy.validate_url("http://localhost:9090/mcp").is_ok());
+        assert!(policy.validate_url("http://127.0.0.1:8080").is_ok());
+        assert!(policy
+            .validate_url("http://orion-toolbox:9090/mcp")
+            .is_ok());
+        assert!(policy
+            .validate_url("http://host.docker.internal:3000")
+            .is_ok());
+    }
+
+    #[test]
+    fn test_mcp_trust_blocks_metadata_endpoints() {
+        let policy = McpTrustPolicy::default();
+        assert!(policy
+            .validate_url("http://169.254.169.254/latest/meta-data")
+            .is_err());
+        assert!(policy
+            .validate_url("http://metadata.google.internal/v1")
+            .is_err());
+    }
+
+    #[test]
+    fn test_mcp_trust_rejects_unknown_hosts() {
+        let policy = McpTrustPolicy::default();
+        assert!(policy.validate_url("http://evil.example.com/mcp").is_err());
+    }
+
+    #[test]
+    fn test_mcp_trust_allow_list_only() {
+        let policy = McpTrustPolicy {
+            allow_list_only: true,
+            allowed_http_hosts: vec!["myserver.local".to_string()],
+        };
+        assert!(policy.validate_url("http://myserver.local:8080").is_ok());
+        assert!(policy.validate_url("http://localhost:9090").is_err());
+    }
+
+    #[test]
+    fn test_mcp_trust_configured_hosts() {
+        let policy = McpTrustPolicy {
+            allow_list_only: false,
+            allowed_http_hosts: vec!["custom.internal".to_string()],
+        };
+        // Configured host allowed
+        assert!(policy.validate_url("http://custom.internal:5000").is_ok());
+        // Default hosts still allowed
+        assert!(policy.validate_url("http://localhost:9090").is_ok());
+        // Unknown still rejected
+        assert!(policy.validate_url("http://other.example.com").is_err());
+    }
+
+    #[test]
+    fn test_mcp_trust_rejects_invalid_urls() {
+        let policy = McpTrustPolicy::default();
+        assert!(policy.validate_url("not-a-url").is_err());
+        assert!(policy.validate_url("").is_err());
     }
 }
