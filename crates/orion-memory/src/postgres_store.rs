@@ -1,6 +1,6 @@
 //! PostgreSQL-backed memory store implementation. Requires feature "postgres".
 
-use crate::store::{Memory, MemoryWeight, Result, StoreError};
+use crate::store::{EdgeType, Memory, MemoryWeight, Result, StoreError};
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use sqlx::postgres::PgRow;
@@ -203,20 +203,22 @@ impl PostgresStore {
         &self,
         from_memory_id: &str,
         to_memory_id: &str,
-        edge_type: &str,
+        edge_type: EdgeType,
         weight: f32,
+        metadata: serde_json::Value,
     ) -> Result<()> {
         let pool = &self.pool;
         self.block_on(
             sqlx::query(
-                "INSERT INTO memory_edges (from_memory_id, to_memory_id, edge_type, weight) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (from_memory_id, to_memory_id, edge_type) DO UPDATE SET weight = $4",
+                "INSERT INTO memory_edges (from_memory_id, to_memory_id, edge_type, weight, metadata) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (from_memory_id, to_memory_id, edge_type) DO UPDATE SET weight = $4, metadata = $5",
             )
             .bind(from_memory_id)
             .bind(to_memory_id)
-            .bind(edge_type)
+            .bind(edge_type.as_str())
             .bind(weight)
+            .bind(sqlx::types::Json(metadata))
             .execute(pool),
         )
         .map_err(|e| StoreError::Postgres(e.to_string()))?;

@@ -427,6 +427,11 @@ struct ModelValidationResult {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct CognitiveRegistryResponse {
+    registry: orion_capabilities::cognitive::model_catalog::CognitiveRegistry,
+}
+
 #[derive(Deserialize)]
 struct SetActiveProviderRequest {
     provider: String,
@@ -568,6 +573,21 @@ async fn check_birth_model_ready(base_url: &str, birth_model: &str) -> bool {
         }
     }
     false
+}
+
+async fn api_cognitive_registry(
+    State(state): State<AppState>,
+) -> Result<Json<CognitiveRegistryResponse>, (axum::http::StatusCode, String)> {
+    let mut registry = orion_capabilities::cognitive::model_catalog::CognitiveRegistry::new();
+    registry
+        .refresh(
+            std::env::var("OPENAI_API_KEY").ok().as_deref(),
+            state.local_llm_base_url.as_deref(),
+            state.local_llm_base_url.as_deref(),
+        )
+        .await;
+
+    Ok(Json(CognitiveRegistryResponse { registry }))
 }
 
 async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -5600,6 +5620,7 @@ async fn main() -> std::io::Result<()> {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/api/status", get(api_status))
+        .route("/api/cognitive/registry", get(api_cognitive_registry))
         .route("/api/identities", get(api_identities))
         .route("/api/agents", post(api_create_agent))
         .route("/api/agents/import", post(api_import_agent))
