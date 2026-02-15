@@ -1,0 +1,15 @@
+[skill]
+id = "com.orion.skills.cooperative-install"
+name = "Cooperative Install"
+version = "0.1.0"
+description = "Install packages and configure host systems cooperatively. Tries direct execution first, then generates mentor-run bash or PowerShell scripts when direct changes are not possible."
+category = "Capability"
+keywords = ["install", "package", "setup", "script", "cooperative"]
+
+[[permissions]]
+permission = "ShellExecute"
+reason = "Attempt direct package installation when possible"
+
+[[permissions]]
+permission = { FileSystem = { Write = ["~"] } }
+reason = "Save generated mentor scripts to ORION_DATA_DIR/mentor-scripts"

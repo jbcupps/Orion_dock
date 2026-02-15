@@ -3881,6 +3881,11 @@ fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
         skill_shell::ShellSkill::default_manifest()
     ));
 
+    // Cooperative install: direct install attempt with mentor script fallback
+    register_skill!(skill_cooperative_install::CooperativeInstallSkill::new(
+        skill_cooperative_install::CooperativeInstallSkill::default_manifest(),
+    ));
+
     // Filesystem operations — sandbox to agent data dir
     let fs_roots = vec![
         data_root().unwrap_or_else(|| PathBuf::from(".")),
