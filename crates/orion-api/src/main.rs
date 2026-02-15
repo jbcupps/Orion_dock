@@ -1846,7 +1846,7 @@ async fn api_agent_tier_models_refresh(
         vault
             .list_providers()
             .into_iter()
-            .map(|p| AppConfig::normalize_provider_name(p))
+            .map(AppConfig::normalize_provider_name)
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };
@@ -1854,11 +1854,8 @@ async fn api_agent_tier_models_refresh(
     let mut refreshed: Vec<String> = Vec::new();
     for provider in &targets {
         if let Some(key) = vault.get_secret(provider) {
-            let entry = orion_capabilities::cognitive::model_catalog::refresh_catalog(
-                provider,
-                &key.to_string(),
-            )
-            .await;
+            let entry =
+                orion_capabilities::cognitive::model_catalog::refresh_catalog(provider, key).await;
             config.provider_catalog.insert(provider.clone(), entry);
             refreshed.push(provider.clone());
         }
@@ -1908,7 +1905,7 @@ async fn api_agent_tier_models_validate(
         vault
             .list_providers()
             .into_iter()
-            .map(|p| AppConfig::normalize_provider_name(p))
+            .map(AppConfig::normalize_provider_name)
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };

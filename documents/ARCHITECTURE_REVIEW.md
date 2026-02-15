@@ -28,7 +28,7 @@ Additionally: LLM health check added before agentic runs (pre-flight verificatio
 | Orchestration | Linear loop | Graph-based (DAG), hierarchical | Partial. Lacks graph definitions for complex workflows. |
 | Sandboxing | In-process capability checks | Docker/WASM/MicroVM isolation | Minimal. Native skills share memory space. |
 | Memory | SQLite/Postgres store | Semantic graphs, ephemeral/long-term split | Competitive. DB schema supports vector/graph; retrieval logic is basic. |
-| Routing | Static Id/Ego with Superego pre-check | Learned routing, model cascading | Competitive. The Id/Ego/Superego pattern is architecturally sound. |
+| Routing | Tier-aware Id/Ego with Superego pre-check, per-provider model selection, Pro sidecar comparison | Learned routing, model cascading | **Competitive+.** Tier system (Fast/Standard/Pro) with provider catalogs and best-of-two Pro comparison addresses model cascading. |
 | Identity | Crypto-native (Ed25519) | Config-based / stateless | **Leading.** Signed constitutional documents are unique. |
 | Self-Improvement | None | Meta-prompting, strategy optimization | Missing. No feedback loop modifies agent behavior. |
 | Persistence | Volatile tasks, disk summaries | Checkpointing / replayability | Minimal. Container restart kills active agentic runs. |

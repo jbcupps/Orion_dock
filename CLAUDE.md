@@ -112,8 +112,22 @@ The **birth process is the key differentiator**: cryptographic identity, convers
 
 - **Id** — Local LLM (Ollama, LM Studio). Used for birth, lightweight periodic checks, simple/low-latency work, and privacy-sensitive flows.
 - **Orchestration** — In `orion-api` (MVP module): evaluates job significance, applies escalation policy, and controls scheduled/background execution.
-- **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Primary path for mentor-facing operational chat and deep reasoning, with Id fallback.
+- **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Primary path for mentor-facing operational chat and deep reasoning, with Id fallback. Model selection is tier-aware (Fast/Standard/Pro).
 - **Superego** — Safety pre-check support exists in router; dedicated ethical oversight model remains planned.
+
+### Tier Model System (Fast / Standard / Pro)
+
+Ego model selection is controlled by a three-tier system mapped from router modes:
+
+| Router Mode | Tier | Purpose |
+|-------------|------|---------|
+| `auto` | Fast | Lightweight, low-latency responses |
+| `think_hard` | Standard | Balanced quality/cost |
+| `think_harder` | Pro | Highest capability; optional best-of-two comparison via sidecar |
+
+Default tier models are configured per provider (see `curated_provider_models()` in `orion-capabilities`). Mentors can override per-provider mappings via the API. The `active_provider_preference` config field controls which Ego provider is used.
+
+**Pro mode sidecar:** When Pro tier is active and `PRO_MODE_SIDECAR_URL` is set with 2+ providers available, the system sends the prompt to the top two providers in parallel via the LangChain sidecar (`services/pro-router/`), selects the best response by content quality and latency, and returns it. Falls back to standard Ego routing on sidecar failure.
 
 ### Cognitive Discipline (Karpathy Principles)
 
@@ -141,8 +155,8 @@ These principles appear at multiple layers:
 | `orion-memory` | SQLite (default) and Postgres (feature: `postgres`) store, migrations |
 | `orion-birth` | Birth stage machine, chat runtime, prompts, Genesis path enum and dispatch |
 | `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction) |
-| `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules |
-| `orion-router` | IdEgoRouter |
+| `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules, provider model catalog |
+| `orion-router` | IdEgoRouter, tier-aware model override, ego model override |
 | `orion-email` | Email authentication (OAuth2, PKCE, IMAP) |
 | `orion-api` | Axum HTTP API server |
 | `orion-uat` | Headless UAT driver |
@@ -150,11 +164,18 @@ These principles appear at multiple layers:
 | `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
 | `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, proton-mail) |
 
+**Services:**
+
+| Service | Role |
+|---------|------|
+| `services/pro-router/` | Python FastAPI sidecar for Pro-tier best-of-two provider comparison (LangChain) |
+
 Orchestration is currently implemented as an MVP module at `crates/orion-api/src/orchestration.rs` (not yet split into a dedicated crate).
 
 ### Runtime Surfaces
 
 - **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.
+- **Pro Sidecar**: `services/pro-router/` — Python FastAPI on port 8100. LangChain-based parallel provider comparison for Pro tier. Independent service; optional.
 - **Orchestration**: In-process scheduler loop in API (UTC cron semantics), scanning per-agent jobs and triggering Id checks or agentic runs.
 - **TUI**: `soul-forge` binary — Boot → Intro → 3 ethical scenarios → Crystallize.
 - **Dev**: `orion-dev` container with bind-mounted source.
@@ -171,6 +192,12 @@ Orchestration is currently implemented as an MVP module at `crates/orion-api/src
 - `/api/agents/:id/agent/*` — Agentic runs (start, stream, status, respond, confirm, cancel, list)
 - `/api/agents/:id/orchestration/*` — Scheduled jobs CRUD, run-now, and orchestration logs
 - `/api/genesis/paths` + `/api/agents/:id/genesis/*` — Genesis path selection and progression
+- `/api/agents/:id/tier-models` (GET/PUT) — Read/update per-provider tier model mappings
+- `/api/agents/:id/tier-models/refresh` (POST) — Refresh provider catalogs from upstream APIs
+- `/api/agents/:id/tier-models/validate` (POST) — Validate selected tier models against catalogs
+- `/api/agents/:id/tier-models/reset` (POST) — Reset provider tier models to built-in defaults
+- `/api/agents/:id/active-provider` (PUT) — Set preferred Ego provider for routing
+- `POST /api/agents` with `quick_start: true` — Quick-start birth (auto identity + standard docs)
 
 ---
 
@@ -196,6 +223,10 @@ Darkness → Ignition → Connectivity → Genesis → Emergence
 - **Birth chat/tools**: `crates/orion-birth/src/chat.rs` — `build_birth_messages()`, `birth_chat_turn()`, `parse_tool_requests()`, `execute_store_provider_key()`
 - **Stage prompts**: `crates/orion-birth/src/prompts.rs` — `CONNECTIVITY_SYSTEM_PROMPT`, `GENESIS_SYSTEM_PROMPT`, `BIRTH_TOOLS_DEFINITION`
 - **Keypair generation**: `crates/orion-core/src/keyring.rs` — `generate_external_keypair()`, `sign_constitutional_documents()`
+- **Tier config**: `crates/orion-core/src/config.rs` — `TierModels`, `ProviderCatalogEntry`, `effective_tier_model()`, `curated_provider_models()`
+- **Model catalog**: `crates/orion-capabilities/src/cognitive/model_catalog.rs` — Provider catalog fetching (OpenAI, Anthropic, Google, xAI, Perplexity)
+- **Default templates**: `crates/orion-core/src/templates.rs` — `DEFAULT_PURPOSE`, `DEFAULT_PERSONALITY`, `fill_soul_template_default()`
+- **Pro sidecar**: `services/pro-router/main.py` — FastAPI `/compare` endpoint, LangChain parallel invocation
 
 ### Modular Genesis Paths
 
@@ -208,6 +239,17 @@ Every Genesis path must produce `(name, purpose, personality)`. The caller uses 
 | **Soul Forge** | Three ethical dilemmas → Triangle Ethic weights, deterministic archetype, SHA-256 soul hash, visual sigil. (~2 min) |
 
 New paths plug in by: (1) extending `GenesisPath` enum in orion-birth, (2) adding path-specific engine if needed, (3) producing soul_content + growth_content and calling `crystallize_soul`.
+
+### Quick-Start Birth
+
+An alternative to the interactive birth flow. When `POST /api/agents` includes `quick_start: true`:
+
+1. Generates Ed25519 identity keypair automatically.
+2. Fills soul template with `DEFAULT_PURPOSE` and `DEFAULT_PERSONALITY` from `orion-core::templates`.
+3. Signs constitutional documents (soul.md, ethics.md, instincts.md).
+4. Sets `birth_complete: true` immediately — no interactive stages.
+
+Useful for testing, automation, or when the mentor wants a pre-configured agent quickly.
 
 ### Constitutional Documents
 
@@ -251,8 +293,13 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 
 ### Implemented now
 - Full five-stage birth flow (Darkness → Emergence) with web UI progression and API support.
+- Quick-start birth: auto identity + standard constitutional docs from agent name alone.
 - Modular Genesis paths (Direct Discovery, Soul Crystallization depth option, Soul Forge).
 - Operational mentor chat with skill tool execution and separate activity logging.
+- Tier-based model orchestration: Fast/Standard/Pro mapped to per-provider model selections.
+- Provider model catalog: API-fetched and curated catalogs with validation and lifecycle warnings.
+- Pro mode sidecar: best-of-two provider comparison via LangChain Python service.
+- Active provider preference: mentor selects preferred Ego provider per agent.
 - Agentic loop with SSE timeline, mentor ask/confirm controls, run history, and cancellation.
 - Orchestration MVP: scheduled jobs, significance policy, escalation decisions, and job logs.
 
@@ -260,6 +307,7 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 - Promote orchestration from API module to dedicated crate when interfaces stabilize.
 - Persist active agentic task state beyond in-memory process lifetime.
 - Expand orchestration UI ergonomics (filters, richer per-job analytics, trend views).
+- Extend Pro sidecar to support configurable selection strategies beyond content-length heuristic.
 
 ---
 
@@ -277,6 +325,7 @@ See `example.env` for the full list. Key variables:
 | `ORION_DATA_DIR` | Agent data directory |
 | `EXTERNAL_PUBKEY_PATH` | Explicit public key path override |
 | `ORION_MASTER_KEY` | Encrypts secrets on Linux/macOS/Docker (ChaCha20-Poly1305). Without it, secrets are plaintext. |
+| `PRO_MODE_SIDECAR_URL` | Pro-mode LangChain sidecar URL (e.g. `http://localhost:8100`) |
 | `MCP_SERVER_URLS` | Comma-separated MCP server URLs |
 | `VITE_API_URL` | Frontend API base URL (empty = use proxy) |
 

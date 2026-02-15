@@ -7,7 +7,7 @@ This document defines the canonical test path for this repository. See [TEST_MAT
 All automated verification runs through Docker. No host Cargo or Node is required for the fast or full suite.
 
 - **Fast suite** (default): Formatting, clippy, build, workspace tests, frontend typecheck + build, then (on host) docs check.
-- **Full suite**: Same as fast, plus Postgres-backed integration tests, full-stack UAT probes (API health, status, Genesis path listing, create/forge flow, frontend smoke), and optionally `orion-uat` once per Genesis path when `TEST_LLM_KEY` and `TEST_SEARCH_KEY` are set.
+- **Full suite**: Same as fast, plus Postgres-backed integration tests, full-stack UAT probes (API health, status, Genesis path listing, create/forge flow, tier-model endpoints, frontend smoke), and optionally `orion-uat` once per Genesis path when `TEST_LLM_KEY` and `TEST_SEARCH_KEY` are set.
 
 The single runner is `scripts/docker-test-suite.sh`, invoked by the `orion-build` container with `UAT_MODE=fast` or `UAT_MODE=full`. It runs:
 

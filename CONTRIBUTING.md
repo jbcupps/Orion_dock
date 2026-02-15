@@ -7,6 +7,7 @@ This repository follows a Docker-first development and CI model.
 
 - Docker + Compose v2
 - Git
+- Python 3.11+ (only if working on `services/pro-router/`)
 
 ## Development Setup
 
@@ -23,6 +24,16 @@ For an interactive shell:
 ```bash
 docker compose -f docker/docker-compose.yml up -d orion-dev
 docker compose -f docker/docker-compose.yml exec orion-dev bash
+```
+
+### Pro Router Sidecar (optional)
+
+The `services/pro-router/` directory contains a Python FastAPI service for Pro-tier provider comparison. To develop on it:
+
+```bash
+cd services/pro-router
+pip install -r requirements.txt
+uvicorn main:app --port 8100
 ```
 
 ## Branch and Commit Conventions

@@ -83,12 +83,61 @@ Migrations for Postgres (pgvector, memories, birth, embeddings, edges) run autom
 
 To only pull the birth model when Ollama is already running: `./scripts/pull-birth-model.sh` (or set `BIRTH_MODEL` and run `ollama pull $BIRTH_MODEL`).
 
+## Quick-Start Birth
+
+For rapid setup without the interactive ceremony, create an agent with `quick_start: true`:
+
+```bash
+curl -X POST http://localhost:8080/api/agents \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "MyAgent", "quick_start": true}'
+```
+
+This auto-generates identity, fills standard constitutional documents, signs them, and marks birth complete in one call.
+
 ## Birth sequence (local-first, then cloud)
 
-The birth flow (Connectivity and Genesis chat stages) uses a **local-first** model: the Id (local LLM) is used with a pinned birth model (`BIRTH_MODEL`, default `qwen2.5:3b-instruct`). When you add a cloud API key (e.g. during Connectivity via the birth chat or config), the router enables Ego (cloud) and uses **Ego-primary with local fallback**: it tries the cloud provider first and falls back to the local model if the cloud call fails. So birth runs on local only until a key is present; after that, cloud is used when available and local covers failures.
+The interactive birth flow (Connectivity and Genesis chat stages) uses a **local-first** model: the Id (local LLM) is used with a pinned birth model (`BIRTH_MODEL`, default `qwen2.5:3b-instruct`). When you add a cloud API key (e.g. during Connectivity via the birth chat or config), the router enables Ego (cloud) and uses **Ego-primary with local fallback**: it tries the cloud provider first and falls back to the local model if the cloud call fails. So birth runs on local only until a key is present; after that, cloud is used when available and local covers failures.
 
 - Set `LOCAL_LLM_BASE_URL` and optionally `BIRTH_MODEL` for birth stages.
 - Set `OPENAI_API_KEY` (or use Trinity config) to enable cloud routing; the birth chat adapter and soul-forge path use `build_birth_router(config)`, which picks up keys from config and vault.
+
+## Tier Model Configuration
+
+After birth, Ego model selection follows the tier system:
+
+| Tier | Purpose | Example (OpenAI) |
+|------|---------|-------------------|
+| Fast | Lightweight, low-latency | `gpt-4o-mini` |
+| Standard | Balanced quality/cost | `gpt-4o` |
+| Pro | Highest capability | `o1` |
+
+Manage tier models via the API:
+
+```bash
+# View current tier-model mappings
+curl http://localhost:8080/api/agents/<id>/tier-models
+
+# Refresh provider catalogs from upstream APIs
+curl -X POST http://localhost:8080/api/agents/<id>/tier-models/refresh
+
+# Set preferred provider
+curl -X PUT http://localhost:8080/api/agents/<id>/active-provider \
+  -H 'Content-Type: application/json' \
+  -d '{"provider": "anthropic"}'
+```
+
+## Pro Mode Sidecar (optional)
+
+For Pro-tier best-of-two provider comparison, run the LangChain sidecar:
+
+```bash
+cd services/pro-router
+pip install -r requirements.txt
+uvicorn main:app --port 8100
+```
+
+Then set `PRO_MODE_SIDECAR_URL=http://localhost:8100` in your `.env`. When Pro tier is selected with 2+ providers configured, the sidecar compares responses and returns the best one.
 
 ## Local Verification Script
 

@@ -47,9 +47,12 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - birth-stage interactions,
   - lightweight periodic checks,
   - privacy-sensitive/local-only reasoning.
-- **Ego (cloud model)**:
+- **Ego (cloud model, tier-aware)**:
   - primary mentor-facing operational conversation,
-  - deeper reasoning/tool-planning tasks.
+  - deeper reasoning/tool-planning tasks,
+  - model selected by tier: Fast (lightweight), Standard (balanced), Pro (highest capability),
+  - per-provider model mappings with catalog validation,
+  - Pro tier optionally uses best-of-two provider comparison via sidecar.
 - **Orchestration (policy + scheduler)**:
   - runs scheduled UTC cron jobs,
   - scores significance (`low`, `medium`, `high`),
@@ -61,16 +64,21 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
 
 1. **Birth flow**: Darkness -> Ignition -> Connectivity -> Genesis -> Emergence  
    Produces cryptographic identity and signed constitutional docs.
-2. **Operational chat**: Mentor chats with the agent (Ego-primary).
-3. **Agentic run**: Mentor starts autonomous multi-step tasks with timeline + approvals.
-4. **Scheduled orchestration jobs**: Periodic jobs run in background and escalate only when needed.
+2. **Quick-start birth**: One-call agent creation (`quick_start: true`) with auto identity and standard constitutional documents. Skips interactive stages.
+3. **Operational chat**: Mentor chats with the agent (Ego-primary, tier-aware model selection).
+4. **Agentic run**: Mentor starts autonomous multi-step tasks with timeline + approvals.
+5. **Scheduled orchestration jobs**: Periodic jobs run in background and escalate only when needed.
+6. **Provider management**: Mentor configures per-provider tier models, validates against catalogs, sets active provider preference.
 
 ## Key Backend Areas
 
 - `crates/orion-api/src/main.rs`:
   - HTTP routes,
-  - operational chat handler,
-  - agentic endpoints,
+  - operational chat handler (tier-aware model resolution),
+  - agentic endpoints (tier-aware model resolution),
+  - tier-model and provider catalog management endpoints,
+  - quick-start birth endpoint,
+  - Pro sidecar integration,
   - orchestration endpoints + scheduler startup.
 - `crates/orion-api/src/agentic.rs`:
   - autonomous loop,
@@ -80,10 +88,17 @@ See `CLAUDE.md` for more commands (UAT, lint, single-crate tests, postgres tests
   - job models/persistence,
   - cron scheduling helpers,
   - significance and decision engine.
+- `crates/orion-core/src/config.rs`:
+  - config schema v7: tier models, provider catalog, active provider preference.
+- `crates/orion-capabilities/src/cognitive/model_catalog.rs`:
+  - provider model catalog fetching (OpenAI, Anthropic, Google, xAI, Perplexity),
+  - curated fallback catalogs, lifecycle warnings.
 - `crates/orion-router/src/router.rs`:
-  - Id/Ego routing and fallback behavior.
+  - Id/Ego routing, fallback behavior, tier-aware ego model override.
 - `crates/orion-skills/src/*`:
   - skill registry, executor, sandbox, trust tiers.
+- `services/pro-router/main.py`:
+  - Pro-tier LangChain sidecar for parallel provider comparison.
 
 ## Frontend Areas
 
@@ -104,7 +119,7 @@ Per-agent data is stored under `ORION_DATA_DIR/identities/<agent_id>/`.
 
 Important files include:
 
-- `config.json` (agent config and routing-related state)
+- `config.json` (agent config, routing state, tier models, provider catalog cache, active provider preference)
 - `operational_chat.json` (chat history)
 - `agentic_runs/*.json` (agentic summaries, including run source)
 - `orchestration_jobs.json` (scheduled jobs)
@@ -127,8 +142,10 @@ Important files include:
 
 The current architecture favors:
 
-- Ego for mentor conversation quality,
+- Ego for mentor conversation quality, with **tier-based model selection** (Fast/Standard/Pro) for cost/quality balance,
 - Id for lightweight autonomous checks,
-- orchestration as the control plane for when and how autonomy escalates.
+- orchestration as the control plane for when and how autonomy escalates,
+- **provider catalog management** so mentors can validate and customize model choices,
+- **Pro sidecar** for highest-tier best-of-two provider comparison when multiple providers are available.
 
-This keeps the system capable without overloading the local lightweight model.
+This keeps the system capable without overloading the local lightweight model, while giving mentors granular control over model selection and provider preference.

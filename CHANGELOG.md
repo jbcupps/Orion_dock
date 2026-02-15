@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Abigail are documented in this file.
+All notable changes to Orion Dock are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- **Tier-based model orchestration**: Fast/Standard/Pro thinking modes mapped to per-provider model selections (OpenAI, Anthropic, Google, xAI, Perplexity)
+- **Provider model catalog**: API-fetched and curated catalogs with validation, lifecycle warnings, and refresh support
+- **Pro-mode sidecar** (`services/pro-router/`): Python FastAPI + LangChain service for best-of-two provider comparison on Pro tier
+- **Quick-start birth**: One-call agent creation with auto identity generation and standard constitutional documents
+- **Active provider preference**: Mentor-selectable preferred Ego provider per agent
+- **Tier model API endpoints**: GET/PUT tier-models, refresh/validate/reset catalogs, set active provider
+- **Config schema v7**: `tier_models`, `active_provider_preference`, `provider_catalog`, `pro_mode_sidecar_url`
+- **Default soul templates**: `DEFAULT_PURPOSE`, `DEFAULT_PERSONALITY`, `fill_soul_template_default()` for quick-start birth
+- **Router ego model override**: `build_ego_provider()` accepts optional model override for tier-based selection
+- **Frontend tier UI**: Fast/Standard/Pro labels in chat and agentic panels, catalog management, validation badges, provider selection
+- Cooperative skill install with mentor script fallback
+- Attachment support and file ingestion in chat
+- Karpathy cognitive discipline integration into agent model
+- Architecture security review with mitigations for 5 critical findings
+- Orchestration MVP: scheduled jobs, significance policy, escalation, and job logs
+- Agent export, autonomous agentic loop with SSE streaming
+- Full five-stage birth flow with web UI and modular Genesis paths
 - Public release readiness: LICENSE, CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md
 - CI workflow for pull request validation (cargo fmt, clippy, test, frontend build)
 - CodeQL static analysis workflow
@@ -19,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Enhanced README.md with badges, system requirements, and troubleshooting
 - Updated .gitignore with additional patterns for generated and data files
+- Router now threads tier-based model selection through both operational chat and agentic loop
+- OpenAiProvider supports `.with_model()` for configurable model selection
 
 ## [0.0.1] - 2026-02-03
 
@@ -40,5 +59,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Security audit CI (cargo audit, npm audit)
 - Dependabot configuration for Cargo, npm, and GitHub Actions
 
-[Unreleased]: https://github.com/jbcupps/abigail/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/jbcupps/abigail/releases/tag/v0.0.1
+[Unreleased]: https://github.com/jbcupps/Orion_dock/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/jbcupps/Orion_dock/releases/tag/v0.0.1
