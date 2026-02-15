@@ -5,6 +5,7 @@
 //! optional Superego safety pre-checks, and provider auto-detection from API
 //! key prefixes.
 
+pub mod council;
 pub mod router;
 
 pub use router::{EgoProvider, IdEgoRouter, RoutingMode, SuperegoResult};

@@ -6,9 +6,12 @@ edition.workspace = true
 [dependencies]
 orion-core = { path = "../orion-core" }
 orion-capabilities = { path = "../orion-capabilities" }
+orion-memory = { path = "../orion-memory" }
 async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true
+
+serde_json.workspace = true

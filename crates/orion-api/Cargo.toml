@@ -14,6 +14,7 @@ orion-core = { path = "../orion-core" }
 orion-birth = { path = "../orion-birth" }
 orion-capabilities = { path = "../orion-capabilities" }
 orion-router = { path = "../orion-router" }
+orion-memory = { path = "../orion-memory" }
 orion-skills = { path = "../orion-skills" }
 soul-forge = { path = "../soul-forge" }
 uuid = { workspace = true }

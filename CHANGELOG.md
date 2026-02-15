@@ -10,11 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Tier-based model orchestration**: Fast/Standard/Pro thinking modes mapped to per-provider model selections (OpenAI, Anthropic, Google, xAI, Perplexity)
 - **Provider model catalog**: API-fetched and curated catalogs with validation, lifecycle warnings, and refresh support
-- **Pro-mode sidecar** (`services/pro-router/`): Python FastAPI + LangChain service for best-of-two provider comparison on Pro tier
+- **Council engine** (`crates/orion-router/src/council.rs`): native Rust MoA DAG for Pro-tier multi-provider debate and synthesis
 - **Quick-start birth**: One-call agent creation with auto identity generation and standard constitutional documents
 - **Active provider preference**: Mentor-selectable preferred Ego provider per agent
 - **Tier model API endpoints**: GET/PUT tier-models, refresh/validate/reset catalogs, set active provider
-- **Config schema v7**: `tier_models`, `active_provider_preference`, `provider_catalog`, `pro_mode_sidecar_url`
+- **Config schema v7**: `tier_models`, `active_provider_preference`, `provider_catalog`
 - **Default soul templates**: `DEFAULT_PURPOSE`, `DEFAULT_PERSONALITY`, `fill_soul_template_default()` for quick-start birth
 - **Router ego model override**: `build_ego_provider()` accepts optional model override for tier-based selection
 - **Frontend tier UI**: Fast/Standard/Pro labels in chat and agentic panels, catalog management, validation badges, provider selection
