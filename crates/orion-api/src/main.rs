@@ -4458,6 +4458,11 @@ fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
         skill_cooperative_install::CooperativeInstallSkill::default_manifest(),
     ));
 
+    // Docker exec: dispatch commands to toolbox sidecar container
+    register_skill!(skill_docker_exec::DockerExecSkill::new(
+        skill_docker_exec::DockerExecSkill::default_manifest(),
+    ));
+
     // Filesystem operations — sandbox to agent data dir
     let fs_roots = vec![
         data_root().unwrap_or_else(|| PathBuf::from(".")),

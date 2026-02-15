@@ -35,6 +35,7 @@ skill-filesystem = { path = "../../skills/skill-filesystem" }
 skill-http = { path = "../../skills/skill-http" }
 skill-shell = { path = "../../skills/skill-shell" }
 skill-cooperative-install = { path = "../../skills/skill-cooperative-install" }
+skill-docker-exec = { path = "../../skills/skill-docker-exec" }
 skill-web-search = { path = "../../skills/skill-web-search" }
 skill-web-browse = { path = "../../skills/skill-web-browse", features = ["browser"] }
 skill-perplexity-search = { path = "../../skills/skill-perplexity-search" }
