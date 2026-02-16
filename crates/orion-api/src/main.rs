@@ -3473,7 +3473,6 @@ async fn api_operational_chat(
 
     // Build structured tool definitions for tool-aware routing.
     let tool_defs = tool_extraction::build_tool_definitions(&skill_tool_entries);
-
     // Redact API keys from user message before storing
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
