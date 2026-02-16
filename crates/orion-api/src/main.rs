@@ -3166,10 +3166,12 @@ fn lookup_context_window(model: &str) -> usize {
         128_000
     } else if m.contains("gpt-3.5") {
         16_384
-    } else if m.contains("claude-opus") || m.contains("claude-sonnet") || m.contains("claude-haiku")
+    } else if m.contains("claude-opus")
+        || m.contains("claude-sonnet")
+        || m.contains("claude-haiku")
+        || m.contains("o3")
+        || m.contains("o4")
     {
-        200_000
-    } else if m.contains("o3") || m.contains("o4") {
         200_000
     } else if m.contains("gemini") {
         1_000_000
@@ -3335,7 +3337,7 @@ async fn api_operational_chat(
     };
 
     // Load raw image bytes for vision model support
-    let vision_images: Vec<orion_capabilities::cognitive::ImageContent> = if has_attachments {
+    let vision_images: Vec<orion_capabilities::cognitive::ImageContent> = if has_attachment_context {
         load_image_attachments(&dir, &attachment_ids)
             .into_iter()
             .map(|img| orion_capabilities::cognitive::ImageContent {
@@ -4113,6 +4115,7 @@ async fn api_operational_chat_stream(
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ChatStreamEvent {
     Status { phase: String },
     Token { text: String },

@@ -336,6 +336,7 @@ fn attachments_root(agent_dir: &Path) -> PathBuf {
 
 /// Describes raw image data from a stored attachment for vision models.
 pub struct AttachmentImageData {
+    #[allow(dead_code)]
     pub attachment_id: String,
     pub media_type: String,
     pub data: Vec<u8>,
