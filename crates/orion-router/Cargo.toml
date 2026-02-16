@@ -7,6 +7,7 @@ edition.workspace = true
 orion-core = { path = "../orion-core" }
 orion-capabilities = { path = "../orion-capabilities" }
 orion-memory = { path = "../orion-memory" }
+orion-skills = { path = "../orion-skills" }
 async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

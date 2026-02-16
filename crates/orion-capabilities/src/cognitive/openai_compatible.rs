@@ -138,7 +138,7 @@ impl OpenAiCompatibleProvider {
                 });
                 ChatMessage {
                     role: m.role.clone(),
-                    content: m.content.clone(),
+                    content: serde_json::Value::String(m.content.clone()),
                     tool_call_id: m.tool_call_id.clone(),
                     tool_calls,
                 }
@@ -179,7 +179,7 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

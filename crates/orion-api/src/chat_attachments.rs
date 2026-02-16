@@ -307,6 +307,58 @@ fn attachments_root(agent_dir: &Path) -> PathBuf {
     agent_dir.join(ATTACHMENTS_DIR)
 }
 
+/// Describes raw image data from a stored attachment for vision models.
+pub struct AttachmentImageData {
+    pub attachment_id: String,
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+/// Load raw image bytes from stored attachments that are images.
+/// Returns image data suitable for base64-encoding and sending to vision models.
+pub fn load_image_attachments(
+    agent_dir: &Path,
+    attachment_ids: &[String],
+) -> Vec<AttachmentImageData> {
+    let ids = normalize_attachment_ids(attachment_ids);
+    if ids.is_empty() {
+        return Vec::new();
+    }
+
+    let root = attachments_root(agent_dir);
+    let index_path = root.join(ATTACHMENTS_INDEX_FILE);
+    let index = match read_index(&index_path) {
+        Ok(idx) => idx,
+        Err(_) => return Vec::new(),
+    };
+    let by_id: HashMap<String, AttachmentIndexRecord> = index
+        .into_iter()
+        .map(|record| (record.attachment_id.clone(), record))
+        .collect();
+
+    let image_mimes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+    let mut results = Vec::new();
+
+    for id in ids {
+        if let Some(record) = by_id.get(&id) {
+            if image_mimes.iter().any(|m| record.detected_mime.starts_with(m))
+                || record.detected_kind == "image"
+            {
+                let source_path = root.join(&id).join(SOURCE_FILE);
+                if let Ok(data) = std::fs::read(&source_path) {
+                    results.push(AttachmentImageData {
+                        attachment_id: record.attachment_id.clone(),
+                        media_type: record.detected_mime.clone(),
+                        data,
+                    });
+                }
+            }
+        }
+    }
+
+    results
+}
+
 fn sanitize_file_name(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     let leaf = normalized.rsplit('/').next().map(str::trim).unwrap_or("");
