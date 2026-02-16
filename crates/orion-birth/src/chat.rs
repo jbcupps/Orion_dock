@@ -84,6 +84,23 @@ pub async fn build_birth_router(config: &AppConfig) -> IdEgoRouter {
 }
 
 fn ego_from_config(config: &AppConfig) -> (Option<String>, Option<String>) {
+    // First try vault (namespaced provider keys)
+    if let Ok(vault) = SecretsVault::load(config.data_dir.clone()) {
+        if let Some(ref trinity) = config.trinity {
+            if let Some(ref provider) = trinity.ego_provider {
+                if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
+                    return (Some(provider.clone()), Some(key.to_string()));
+                }
+            }
+        }
+        // Fallback: check vault for preferred providers
+        for provider in &["anthropic", "openai"] {
+            if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
+                return (Some(provider.to_string()), Some(key.to_string()));
+            }
+        }
+    }
+    // Legacy fallback: config fields (pre-v8 migration)
     if let Some(ref trinity) = config.trinity {
         if let Some(ref key) = trinity.ego_api_key {
             if !key.is_empty() {
@@ -157,7 +174,18 @@ pub fn extract_api_keys_from_text(text: &str) -> Vec<(&'static str, String)> {
     results
 }
 
-/// Execute the store_provider_key tool: resolve provider (including "auto"), store in vault, update config, save config.
+/// Known provider names accepted by the store_provider_key tool.
+const ALLOWED_PROVIDERS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "perplexity",
+    "xai",
+    "google",
+    "tavily",
+];
+
+/// Execute the store_provider_key tool: resolve provider (including "auto"), store in vault
+/// with namespaced key (`provider:{name}`), update config provider name (not the key), save.
 /// Returns the resolved provider name so the caller can rebuild the router.
 pub fn execute_store_provider_key(
     vault: &mut SecretsVault,
@@ -179,21 +207,24 @@ pub fn execute_store_provider_key(
             })?,
         p => p.to_string(),
     };
-    vault.set_secret(&resolved, key);
+    if !ALLOWED_PROVIDERS.contains(&resolved.as_str()) {
+        anyhow::bail!(
+            "Unknown provider '{}'. Allowed: {}",
+            resolved,
+            ALLOWED_PROVIDERS.join(", ")
+        );
+    }
+    vault.set_secret(&format!("provider:{}", resolved), key);
     vault
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save vault: {}", e))?;
 
-    // Update config so next build_birth_router() picks up Ego.
-    if resolved == "openai" {
-        config.openai_api_key = Some(key.to_string());
-    }
+    // Update config with provider name only (no key stored in config).
     if config.trinity.is_none() {
         config.trinity = Some(TrinityConfig::default());
     }
     if let Some(ref mut trinity) = config.trinity {
         trinity.ego_provider = Some(resolved.clone());
-        trinity.ego_api_key = Some(key.to_string());
     }
     config
         .save(&config.config_path())
@@ -380,8 +411,15 @@ mod tests {
         let resolved =
             execute_store_provider_key(&mut vault, &mut config, "openai", "sk-test-key").unwrap();
         assert_eq!(resolved, "openai");
-        assert_eq!(config.openai_api_key.as_deref(), Some("sk-test-key"));
-        assert_eq!(vault.get_secret("openai"), Some("sk-test-key"));
+        // Key stored in vault with provider: namespace, not in config
+        assert_eq!(config.openai_api_key, None);
+        assert_eq!(vault.get_secret("provider:openai"), Some("sk-test-key"));
+        // Config records the provider name (not the key)
+        assert_eq!(
+            config.trinity.as_ref().unwrap().ego_provider.as_deref(),
+            Some("openai")
+        );
+        assert_eq!(config.trinity.as_ref().unwrap().ego_api_key, None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

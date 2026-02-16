@@ -7,9 +7,8 @@
 #
 # Once running:
 #   Web UI:  http://localhost:3000
-#   API:     http://localhost:8080
-#   Postgres: localhost:5432  (orion / orion_dev)
-#   Ollama:   localhost:11434
+#   Postgres: localhost:5432  (orion / orion_dev)  — loopback only
+#   Ollama:   localhost:11434                      — loopback only
 
 param(
     [switch]$Down,
@@ -33,6 +32,18 @@ function Invoke-Docker {
 try {
     $compose = "docker compose -f docker/docker-compose.yml"
 
+    # --- Check ORION_MASTER_KEY ---
+    if (-not $env:ORION_MASTER_KEY) {
+        Write-Host "`n  WARNING: ORION_MASTER_KEY is not set." -ForegroundColor Yellow
+        Write-Host "  The full stack requires this for secrets encryption." -ForegroundColor Yellow
+        Write-Host "  Generate one with: openssl rand -base64 32`n" -ForegroundColor Yellow
+        $answer = Read-Host "  Continue without ORION_MASTER_KEY? (y/N)"
+        if ($answer -ne "y" -and $answer -ne "Y") {
+            Write-Host "  Aborted. Set ORION_MASTER_KEY and retry.`n" -ForegroundColor Red
+            return
+        }
+    }
+
     # --- Tear down ---
     if ($Down) {
         Write-Host "`n  Tearing down Orion stack...`n" -ForegroundColor Yellow
@@ -53,19 +64,19 @@ try {
     Write-Host "`n  Starting full stack (postgres, ollama, orion-api, frontend)...`n" -ForegroundColor Cyan
     Invoke-Docker "$compose --profile full up -d"
 
-    # --- Wait for API health ---
+    # --- Wait for API health (via docker inspect, port not published) ---
     Write-Host "  Waiting for API to become healthy..." -ForegroundColor Gray
     $maxWait = 60
     $ready = $false
     for ($i = 1; $i -le $maxWait; $i++) {
         try {
-            $r = Invoke-WebRequest -Uri "http://localhost:8080/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($r.StatusCode -eq 200) { $ready = $true; break }
+            $status = docker inspect --format='{{.State.Health.Status}}' (docker compose -f docker/docker-compose.yml ps -q orion-api) 2>$null
+            if ($status -eq "healthy") { $ready = $true; break }
         } catch {}
         Start-Sleep -Seconds 1
     }
     if (-not $ready) {
-        Write-Host "`n  WARNING: API did not respond within ${maxWait}s. Check 'docker compose logs orion-api'.`n" -ForegroundColor Yellow
+        Write-Host "`n  WARNING: API did not become healthy within ${maxWait}s. Check 'docker compose logs orion-api'.`n" -ForegroundColor Yellow
     }
 
     # --- Ensure birth model is available in Ollama ---
@@ -102,10 +113,9 @@ try {
     Write-Host "  ============================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "   Web UI:    http://localhost:3000" -ForegroundColor White
-    Write-Host "   API:       http://localhost:8080" -ForegroundColor White
-    Write-Host "   Health:    http://localhost:8080/health" -ForegroundColor White
-    Write-Host "   Postgres:  localhost:5432  (orion / orion_dev)" -ForegroundColor DarkGray
-    Write-Host "   Ollama:    localhost:11434" -ForegroundColor DarkGray
+    Write-Host "   Health:    http://localhost:3000/health (via nginx)" -ForegroundColor White
+    Write-Host "   Postgres:  127.0.0.1:5432  (orion / orion_dev)" -ForegroundColor DarkGray
+    Write-Host "   Ollama:    127.0.0.1:11434" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "   Tear down: .\scripts\dev-stack.ps1 -Down" -ForegroundColor DarkGray
     Write-Host "   Logs:      docker compose -f docker/docker-compose.yml logs -f orion-api" -ForegroundColor DarkGray

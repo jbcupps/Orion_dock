@@ -17,9 +17,12 @@ FROM nginx:alpine
 
 RUN apk add --no-cache curl
 
-# Default nginx.conf serves static and proxies /api, /health, /ready to orion-api
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx config template — ORION_API_TOKEN is substituted at container start
+COPY frontend/nginx.conf.template /etc/nginx/nginx.conf.template
+COPY frontend/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
