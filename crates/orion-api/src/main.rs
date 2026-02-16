@@ -1,5 +1,6 @@
 mod agentic;
 mod chat_attachments;
+mod governed_chat;
 mod orchestration;
 pub(crate) mod tool_extraction;
 
@@ -16,7 +17,7 @@ use orion_birth::{
     redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
 };
 use orion_core::system_prompt::{
-    build_system_prompt, build_system_prompt_with_skills, SkillToolEntry,
+    build_system_prompt, build_system_prompt_with_skills, RuntimeContext, SkillToolEntry,
 };
 use orion_core::templates::{fill_soul_template, GROWTH_MD};
 use orion_core::{
@@ -45,8 +46,9 @@ use agentic::{
     MentorResponseRequest,
 };
 use chat_attachments::{
-    build_attachment_context_block, build_attachment_storage_note, has_attachments,
-    load_attachment_context, normalize_attachment_ids, should_block_tool_on_attachment_turn,
+    build_attachment_context_block, build_attachment_storage_note, load_attachment_context,
+    load_image_attachments, has_attachments, normalize_attachment_ids,
+    should_block_tool_on_attachment_turn,
     store_uploaded_attachments, ChatAttachmentUploadResponse, UploadedAttachmentInput,
 };
 use orchestration::{
@@ -76,6 +78,8 @@ struct AppState {
     agentic_tasks: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<AgenticTask>>>>>,
     /// Shared secrets vault for skill plugins — synced per-request from agent vault.
     skill_vault: Arc<Mutex<SecretsVault>>,
+    /// Shared email account list for the email skill — synced per-request from agent config.
+    email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
     /// Scheduler interval for orchestration periodic jobs.
     orchestration_tick_seconds: u64,
     /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
@@ -214,6 +218,12 @@ struct AgentIdentityInfo {
     directory: String,
     birth_complete: bool,
     birth_date: Option<String>,
+}
+
+#[derive(Serialize)]
+struct IdentitiesResponse {
+    agents: Vec<AgentIdentityInfo>,
+    mentor_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -624,8 +634,8 @@ async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
-async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::StatusCode, String)>
-{
+async fn api_identities(
+) -> Result<Json<IdentitiesResponse>, (axum::http::StatusCode, String)> {
     let root = data_root().ok_or_else(|| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -642,7 +652,10 @@ async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::S
             )
         })?
     } else {
-        return Ok(Json(Vec::new()));
+        return Ok(Json(IdentitiesResponse {
+            agents: Vec::new(),
+            mentor_name: None,
+        }));
     };
 
     let mut agents = Vec::new();
@@ -672,7 +685,74 @@ async fn api_identities() -> Result<Json<Vec<AgentIdentityInfo>>, (axum::http::S
             birth_date,
         });
     }
-    Ok(Json(agents))
+    Ok(Json(IdentitiesResponse {
+        agents,
+        mentor_name: gc.mentor_name,
+    }))
+}
+
+// ---- Mentor Name API ----
+
+#[derive(Serialize)]
+struct MentorNameResponse {
+    mentor_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetMentorNameRequest {
+    mentor_name: String,
+}
+
+async fn api_get_mentor_name(
+) -> Result<Json<MentorNameResponse>, (axum::http::StatusCode, String)> {
+    let root = data_root().ok_or_else(|| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ORION_DATA_DIR not set".to_string(),
+        )
+    })?;
+    let gc_path = GlobalConfig::config_path(&root);
+    let mentor_name = if gc_path.exists() {
+        GlobalConfig::load(&root)
+            .ok()
+            .and_then(|gc| gc.mentor_name)
+    } else {
+        None
+    };
+    Ok(Json(MentorNameResponse { mentor_name }))
+}
+
+async fn api_set_mentor_name(
+    Json(body): Json<SetMentorNameRequest>,
+) -> Result<Json<MentorNameResponse>, (axum::http::StatusCode, String)> {
+    let root = data_root().ok_or_else(|| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ORION_DATA_DIR not set".to_string(),
+        )
+    })?;
+    let gc_path = GlobalConfig::config_path(&root);
+    let mut gc = if gc_path.exists() {
+        GlobalConfig::load(&root).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load global config: {}", e),
+            )
+        })?
+    } else {
+        GlobalConfig::new(&root)
+    };
+    let name = body.mentor_name.trim().to_string();
+    gc.mentor_name = if name.is_empty() { None } else { Some(name) };
+    gc.save(&root).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save global config: {}", e),
+        )
+    })?;
+    Ok(Json(MentorNameResponse {
+        mentor_name: gc.mentor_name,
+    }))
 }
 
 async fn api_create_agent(
@@ -1733,15 +1813,20 @@ async fn api_birth_chat(
             "No messages to send".to_string(),
         ));
     }
+    let router = build_birth_router(&config).await;
+    let has_ego = router.has_ego();
+    let ego_provider = router.ego_provider_name().map(|p| format!("{:?}", p));
     tracing::info!(
         agent = %id,
         local_llm = ?config.local_llm_base_url,
         birth_model = %config.effective_birth_model(),
+        has_ego = has_ego,
+        ego_provider = ?ego_provider,
         message_count = messages.len(),
-        "genesis_chat: building router"
+        "genesis_chat: routing (ego_primary={}, provider={})",
+        has_ego,
+        ego_provider.as_deref().unwrap_or("local-only"),
     );
-    let router = build_birth_router(&config).await;
-    tracing::info!(agent = %id, "genesis_chat: sending chat turn");
     let response = birth_chat_turn(&router, messages).await.map_err(|e| {
         tracing::error!(agent = %id, error = %e, "genesis_chat: chat turn failed");
         (
@@ -2739,6 +2824,10 @@ struct OperationalChatRequest {
     router_mode: Option<agentic::AgenticRouterMode>,
     #[serde(default)]
     attachment_ids: Vec<String>,
+    /// When true, routes through the Execution Governor for structured planning,
+    /// loop detection, and recovery. Requires skills to be registered.
+    #[serde(default)]
+    use_governor: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -2752,6 +2841,24 @@ struct OperationalChatResponseBody {
     tool_log: Option<Vec<OperationalToolLogEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_notice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_warning: Option<ContextWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_archived: Option<AutoArchivedInfo>,
+}
+
+#[derive(Serialize, Clone)]
+struct ContextWarning {
+    estimated_tokens: usize,
+    context_window: usize,
+    usage_percent: u8,
+    model: String,
+}
+
+#[derive(Serialize, Clone)]
+struct AutoArchivedInfo {
+    archive_id: String,
+    message_count: usize,
 }
 
 #[derive(Serialize)]
@@ -2855,6 +2962,224 @@ async fn api_operational_chat_history(
         })
         .collect();
     Ok(Json(serde_json::json!({ "messages": display_messages })))
+}
+
+// ---- Chat Archive API ----
+
+#[derive(Serialize)]
+struct ChatArchiveInfo {
+    archive_id: String,
+    timestamp: String,
+    message_count: usize,
+    preview: String,
+}
+
+/// POST /api/agents/{id}/chat/archive — archive the current conversation.
+async fn api_archive_chat(
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let chat_path = dir.join("operational_chat.json");
+    if !chat_path.exists() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "No conversation to archive".to_string(),
+        ));
+    }
+    let content = std::fs::read_to_string(&chat_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Read chat: {}", e),
+        )
+    })?;
+    let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
+    if messages.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "No messages to archive".to_string(),
+        ));
+    }
+
+    let archive_dir = dir.join("chat_archives");
+    std::fs::create_dir_all(&archive_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Create archive dir: {}", e),
+        )
+    })?;
+
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let archive_id = format!("{}_{}", ts, messages.len());
+    let archive_path = archive_dir.join(format!("{}.json", archive_id));
+
+    let archive_content = serde_json::to_string_pretty(&messages).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialize archive: {}", e),
+        )
+    })?;
+    std::fs::write(&archive_path, archive_content).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Write archive: {}", e),
+        )
+    })?;
+
+    // Clear current conversation
+    std::fs::write(&chat_path, "[]").map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Clear chat: {}", e),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "archive_id": archive_id,
+        "message_count": messages.len(),
+    })))
+}
+
+/// GET /api/agents/{id}/chat/archives — list available archives.
+async fn api_list_chat_archives(
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ChatArchiveInfo>>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let archive_dir = dir.join("chat_archives");
+    if !archive_dir.exists() {
+        return Ok(Json(Vec::new()));
+    }
+    let mut archives = Vec::new();
+    let entries = std::fs::read_dir(&archive_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Read archive dir: {}", e),
+        )
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let archive_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let messages: Vec<BirthChatMessage> =
+                serde_json::from_str(&content).unwrap_or_default();
+            let preview = messages
+                .first()
+                .map(|m| {
+                    let text = strip_tool_result_block(&m.content);
+                    if text.len() > 100 {
+                        format!("{}...", &text[..100])
+                    } else {
+                        text
+                    }
+                })
+                .unwrap_or_default();
+            // Parse timestamp from archive_id (YYYYMMDD_HHMMSS_count)
+            let timestamp = archive_id
+                .get(..15)
+                .and_then(|s| {
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d_%H%M%S")
+                        .ok()
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                })
+                .unwrap_or_else(|| archive_id.clone());
+            archives.push(ChatArchiveInfo {
+                archive_id,
+                timestamp,
+                message_count: messages.len(),
+                preview,
+            });
+        }
+    }
+    archives.sort_by(|a, b| b.archive_id.cmp(&a.archive_id));
+    Ok(Json(archives))
+}
+
+/// GET /api/agents/{id}/chat/archives/{archive_id} — load a specific archive.
+async fn api_get_chat_archive(
+    Path((id, archive_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let archive_path = dir
+        .join("chat_archives")
+        .join(format!("{}.json", archive_id));
+    if !archive_path.exists() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Archive not found".to_string(),
+        ));
+    }
+    let content = std::fs::read_to_string(&archive_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Read archive: {}", e),
+        )
+    })?;
+    let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
+    let display_messages: Vec<BirthChatMessage> = messages
+        .into_iter()
+        .map(|mut m| {
+            if m.role == "assistant" {
+                m.content = strip_tool_result_block(&m.content);
+            }
+            m
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "archive_id": archive_id,
+        "messages": display_messages,
+    })))
+}
+
+/// Estimate token count using character-based heuristic.
+fn estimate_token_count(messages: &[orion_capabilities::cognitive::Message]) -> usize {
+    messages
+        .iter()
+        .map(|m| (m.content.len() / 4) + 4)
+        .sum()
+}
+
+/// Look up context window size for a model by name (well-known defaults).
+fn lookup_context_window(model: &str) -> usize {
+    let m = model.to_lowercase();
+    if m.contains("gpt-4") || m.contains("gpt4") {
+        128_000
+    } else if m.contains("gpt-3.5") {
+        16_384
+    } else if m.contains("claude-opus") || m.contains("claude-sonnet") || m.contains("claude-haiku")
+    {
+        200_000
+    } else if m.contains("o3") || m.contains("o4") {
+        200_000
+    } else if m.contains("gemini") {
+        1_000_000
+    } else if m.contains("grok") {
+        131_072
+    } else if m.contains("llama") || m.contains("qwen") || m.contains("mistral") {
+        32_768
+    } else {
+        8_192
+    }
 }
 
 /// Build SkillToolEntry list from the skill registry for system prompt injection.
@@ -2989,6 +3314,14 @@ async fn api_operational_chat(
     // Sync agent secrets into the shared skill vault so plugins can see them.
     sync_agent_vault_to_skills(&config.data_dir, &state.skill_vault);
 
+    // Sync email accounts from agent config into the shared email skill accounts list.
+    sync_email_accounts(&config, &state.email_accounts, &state.skill_vault).await;
+
+    let runtime_ctx = RuntimeContext {
+        agent_id: id.clone(),
+        data_dir: config.data_dir.to_string_lossy().to_string(),
+    };
+
     let system_prompt = if skill_tool_entries.is_empty() {
         build_system_prompt(&config.docs_dir, &config.agent_name)
     } else {
@@ -2997,7 +3330,21 @@ async fn api_operational_chat(
             &config.agent_name,
             &skill_tool_entries,
             &vault_providers,
+            Some(&runtime_ctx),
         )
+    };
+
+    // Load raw image bytes for vision model support
+    let vision_images: Vec<orion_capabilities::cognitive::ImageContent> = if has_attachments {
+        load_image_attachments(&dir, &attachment_ids)
+            .into_iter()
+            .map(|img| orion_capabilities::cognitive::ImageContent {
+                data: BASE64.encode(&img.data),
+                media_type: img.media_type,
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
 
     // Build message list: system + history + user
@@ -3011,10 +3358,19 @@ async fn api_operational_chat(
             &m.role, &m.content,
         ));
     }
-    messages.push(orion_capabilities::cognitive::Message::new(
-        "user",
-        &message_for_model,
-    ));
+    let vision_images_count = vision_images.len();
+    if vision_images.is_empty() {
+        messages.push(orion_capabilities::cognitive::Message::new(
+            "user",
+            &message_for_model,
+        ));
+    } else {
+        messages.push(orion_capabilities::cognitive::Message::with_images(
+            "user",
+            &message_for_model,
+            vision_images,
+        ));
+    }
 
     // Build operational router from config + SecretsVault
     let (ego_name, ego_key) = {
@@ -3051,6 +3407,10 @@ async fn api_operational_chat(
         "operational_chat: building router"
     );
 
+    let active_model_name = ego_model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
     let router = orion_router::IdEgoRouter::with_provider_auto_detect(
         config.local_llm_base_url.clone(),
         ego_name.as_deref(),
@@ -3060,13 +3420,186 @@ async fn api_operational_chat(
     )
     .await;
 
+    // Context window tracking: estimate usage and detect if near limit
+    let estimated_tokens = estimate_token_count(&messages);
+    let context_window = lookup_context_window(&active_model_name);
+
+    let usage_percent = ((estimated_tokens as f64 / context_window as f64) * 100.0).min(100.0) as u8;
+
+    // Auto-archive at 90%+ context usage
+    let mut auto_archived: Option<AutoArchivedInfo> = None;
+    if usage_percent >= 90 && history.len() >= 4 {
+        let archive_dir = dir.join("chat_archives");
+        let _ = std::fs::create_dir_all(&archive_dir);
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let archive_id = format!("{}_{}", ts, history.len());
+        let archive_path = archive_dir.join(format!("{}.json", archive_id));
+        if let Ok(archive_json) = serde_json::to_string_pretty(&history) {
+            if std::fs::write(&archive_path, archive_json).is_ok() {
+                // Clear history and rebuild messages with only the user message
+                let _ = std::fs::write(&chat_path, "[]");
+                messages.retain(|m| m.role == "system");
+                if vision_images_count > 0 {
+                    messages.push(orion_capabilities::cognitive::Message::with_images(
+                        "user",
+                        &message_for_model,
+                        Vec::new(), // Images already consumed above
+                    ));
+                } else {
+                    messages.push(orion_capabilities::cognitive::Message::new(
+                        "user",
+                        &message_for_model,
+                    ));
+                }
+                auto_archived = Some(AutoArchivedInfo {
+                    archive_id,
+                    message_count: history.len(),
+                });
+                tracing::info!(agent = %id, usage_percent, "auto-archived chat due to context window pressure");
+            }
+        }
+    }
+
+    let context_warning = if usage_percent >= 75 && auto_archived.is_none() {
+        Some(ContextWarning {
+            estimated_tokens,
+            context_window,
+            usage_percent,
+            model: active_model_name.clone(),
+        })
+    } else {
+        None
+    };
+
     // Build structured tool definitions for tool-aware routing.
     let tool_defs = tool_extraction::build_tool_definitions(&skill_tool_entries);
 
     // Redact API keys from user message before storing
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
-    tracing::info!(agent = %id, tool_def_count = tool_defs.len(), "operational_chat: sending chat turn");
+    // ═══════════════════════════════════════════════════════════════════════
+    // GOVERNED EXECUTION PATH: when skills are available and the user request
+    // looks like it involves tool usage, route through the Execution Governor
+    // for structured planning, loop detection, and recovery.
+    // ═══════════════════════════════════════════════════════════════════════
+    let use_governor = !skill_tool_entries.is_empty()
+        && ego_name.is_some()
+        && body.use_governor.unwrap_or(false);
+
+    if use_governor {
+        tracing::info!(agent = %id, "operational_chat: using Execution Governor path");
+
+        let governor = governed_chat::build_governor(
+            &config,
+            ego_name.as_deref().unwrap_or("openai"),
+            &{
+                let vault = SecretsVault::load(config.data_dir.clone())
+                    .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+                resolve_ego_credentials_with_preference(
+                    &vault,
+                    config.active_provider_preference.as_deref(),
+                )
+                .1
+                .unwrap_or_default()
+            },
+            state.skill_registry.clone(),
+            state.skill_executor.clone(),
+        );
+
+        if let Some(governor) = governor {
+            let user_request = orion_router::cognitive::UserRequest {
+                message: message_for_model.clone(),
+                available_tools: governed_chat::build_planner_tool_descriptors(
+                    &state.skill_registry,
+                ),
+                known_constraints: governed_chat::load_persistent_constraints(&config.data_dir),
+                agent_state_summary: format!(
+                    "Agent: {}, Birth complete: true",
+                    config.agent_name.as_deref().unwrap_or("unknown")
+                ),
+            };
+
+            let session_ctx = orion_router::cognitive::SessionContext {
+                agent_id: id.clone(),
+                agent_name: config.agent_name.clone().unwrap_or_default(),
+                system_prompt: system_prompt.clone(),
+                conversation_history: history
+                    .iter()
+                    .map(|m| {
+                        orion_capabilities::cognitive::Message::new(&m.role, &m.content)
+                    })
+                    .collect(),
+            };
+
+            let governed_result = governor.execute(user_request, &session_ctx).await;
+
+            // Persist any newly discovered constraints
+            // Persist any newly discovered constraints from the execution
+            match &governed_result {
+                orion_router::governor::GovernedResult::MaxIterationsReached { state, .. }
+                | orion_router::governor::GovernedResult::Incomplete { state, .. }
+                | orion_router::governor::GovernedResult::NeedsInput { state, .. }
+                | orion_router::governor::GovernedResult::Aborted { state, .. }
+                | orion_router::governor::GovernedResult::TimeBudgetExceeded { state } => {
+                    governed_chat::save_discovered_constraints(
+                        &config.data_dir,
+                        &state.constraints_discovered,
+                    );
+                }
+                orion_router::governor::GovernedResult::Success(_) => {}
+            }
+
+            let assistant_content = governed_chat::governed_result_to_content(&governed_result);
+            let redacted_response = redact_api_keys(&assistant_content);
+
+            // Persist conversation
+            let _ = tokio::task::spawn_blocking({
+                let chat_path = chat_path.clone();
+                let redacted_user = redacted_user_message.clone();
+                let redacted_assistant = redact_api_keys(&assistant_content);
+                move || -> Result<(), String> {
+                    let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
+                        let content = std::fs::read_to_string(&chat_path)
+                            .map_err(|e| format!("Read: {}", e))?;
+                        serde_json::from_str(&content).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    updated.push(BirthChatMessage {
+                        role: "user".to_string(),
+                        content: redacted_user,
+                    });
+                    updated.push(BirthChatMessage {
+                        role: "assistant".to_string(),
+                        content: redacted_assistant,
+                    });
+                    std::fs::write(
+                        &chat_path,
+                        serde_json::to_string_pretty(&updated).unwrap(),
+                    )
+                    .map_err(|e| format!("Write: {}", e))?;
+                    Ok(())
+                }
+            })
+            .await;
+
+            return Ok(Json(OperationalChatResponseBody {
+                assistant_content: redacted_response,
+                tool_executed: None,
+                stored_providers: None,
+                tool_log: None,
+                attachment_notice: None,
+                context_warning,
+                auto_archived,
+            }));
+        }
+    }
+
+    tracing::info!(
+        agent = %id,
+        tool_def_count = tool_defs.len(),
+        "operational_chat: sending chat turn"
+    );
 
     // Pro-mode council path: for Pro tier with 2+ providers, run MoA DAG in Rust.
     // Council does not support structured tool-calling; falls back to tool-aware route on failure.
@@ -3201,7 +3734,19 @@ async fn api_operational_chat(
                 for (k, v) in map {
                     tool_params = tool_params.with(k, v.clone());
                 }
+            } else {
+                tracing::warn!(
+                    tool = %tr.name,
+                    args = %tr.arguments,
+                    "operational_chat: tool arguments not a JSON object"
+                );
             }
+            tracing::info!(
+                tool = %tr.name,
+                skill = %skill_id,
+                arg_keys = ?tool_params.values.keys().collect::<Vec<_>>(),
+                "operational_chat: executing skill tool"
+            );
             match state
                 .skill_executor
                 .execute(&skill_id, &tr.name, tool_params)
@@ -3477,7 +4022,104 @@ async fn api_operational_chat(
             Some(skill_tool_log)
         },
         attachment_notice,
+        context_warning,
+        auto_archived,
     }))
+}
+
+/// POST /api/agents/{id}/chat/stream — SSE-streamed operational chat.
+/// Emits status events during processing, then the final response as done.
+async fn api_operational_chat_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<OperationalChatRequest>,
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (axum::http::StatusCode, String),
+> {
+    // Validate agent exists
+    let _ = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(32);
+
+    // Spawn the chat processing in a background task
+    let state_clone = state.clone();
+    let id_clone = id.clone();
+    tokio::spawn(async move {
+        let _ = tx
+            .send(ChatStreamEvent::Status {
+                phase: "routing".to_string(),
+            })
+            .await;
+
+        // Delegate to the existing handler
+        let result = api_operational_chat(
+            State(state_clone),
+            Path(id_clone),
+            Json(body),
+        )
+        .await;
+
+        match result {
+            Ok(Json(response)) => {
+                let _ = tx
+                    .send(ChatStreamEvent::Done {
+                        response: serde_json::to_value(&response).unwrap_or_default(),
+                    })
+                    .await;
+            }
+            Err((_, err)) => {
+                let _ = tx
+                    .send(ChatStreamEvent::Error {
+                        message: err,
+                    })
+                    .await;
+            }
+        }
+    });
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(event) = rx.recv().await {
+            let (event_name, data) = match &event {
+                ChatStreamEvent::Status { phase } => {
+                    ("status", serde_json::json!({"phase": phase}).to_string())
+                }
+                ChatStreamEvent::Token { text } => {
+                    ("token", serde_json::json!({"text": text}).to_string())
+                }
+                ChatStreamEvent::ToolLog { entry } => {
+                    ("tool_log", serde_json::to_string(entry).unwrap_or_default())
+                }
+                ChatStreamEvent::Done { response } => {
+                    ("done", response.to_string())
+                }
+                ChatStreamEvent::Error { message } => {
+                    ("error", serde_json::json!({"message": message}).to_string())
+                }
+            };
+            yield Ok(Event::default().event(event_name).data(data));
+            if matches!(event, ChatStreamEvent::Done { .. } | ChatStreamEvent::Error { .. }) {
+                break;
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Debug, Clone)]
+enum ChatStreamEvent {
+    Status { phase: String },
+    Token { text: String },
+    ToolLog { entry: serde_json::Value },
+    Done { response: serde_json::Value },
+    Error { message: String },
 }
 
 // ============================================================================
@@ -4713,6 +5355,113 @@ async fn api_skills_missing_secrets(
     Ok(Json(missing))
 }
 
+/// POST /api/agents/{id}/email/accounts — register an email account for the email skill.
+async fn api_register_email_account(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RegisterEmailAccountRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let dir = agent_dir(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent not found".to_string(),
+        )
+    })?;
+    let config_path = agent_config_path(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "Agent config not found".to_string(),
+        )
+    })?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Load config: {}", e),
+        )
+    })?;
+
+    let account_id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let account = orion_core::config::EmailAccountConfig {
+        id: account_id.clone(),
+        provider: body.provider,
+        auth_type: body.auth_type,
+        address: body.address.clone(),
+        imap_host: body.imap_host,
+        imap_port: body.imap_port,
+        smtp_host: body.smtp_host,
+        smtp_port: body.smtp_port,
+        scopes_granted: Vec::new(),
+        status: orion_core::config::EmailAccountStatus::Active,
+        last_verified_at: None,
+    };
+
+    // Remove existing account with same id if present, then add
+    config.email_accounts.retain(|a| a.id != account_id);
+    config.email_accounts.push(account.clone());
+    config.save(&config_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Save config: {}", e),
+        )
+    })?;
+
+    // Store the password in the vault under the email:{id}:password key
+    if let Some(password) = &body.password {
+        let vault_path = dir.clone();
+        let mut vault = SecretsVault::load(vault_path.clone())
+            .unwrap_or_else(|_| SecretsVault::new(vault_path));
+        let email_key = format!("email:{}:password", account_id);
+        vault.set_secret(&email_key, password);
+        let _ = vault.save();
+
+        // Also sync to the shared skill vault
+        if let Ok(mut shared) = state.skill_vault.lock() {
+            shared.set_secret(&email_key, password);
+        }
+    }
+
+    // Update the shared accounts list immediately
+    {
+        let mut accounts = state.email_accounts.write().await;
+        accounts.retain(|a| a.id != account_id);
+        accounts.push(account);
+    }
+
+    tracing::info!(
+        agent = %id,
+        account_id = %account_id,
+        address = %body.address,
+        "Registered email account"
+    );
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "account_id": account_id,
+    })))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RegisterEmailAccountRequest {
+    /// Optional account id; auto-generated if not provided.
+    #[serde(default)]
+    id: Option<String>,
+    provider: orion_core::config::EmailProvider,
+    auth_type: orion_core::config::EmailAuthType,
+    address: String,
+    #[serde(default)]
+    imap_host: Option<String>,
+    #[serde(default)]
+    imap_port: Option<u16>,
+    #[serde(default)]
+    smtp_host: Option<String>,
+    #[serde(default)]
+    smtp_port: Option<u16>,
+    /// Password/token for this account. Stored under email:{id}:password in vault.
+    #[serde(default)]
+    password: Option<String>,
+}
+
 /// Copy all secrets from the agent's vault into the shared skill vault.
 /// This ensures skills see the agent's actual API keys at execution time.
 fn sync_agent_vault_to_skills(
@@ -4754,9 +5503,61 @@ fn sync_agent_vault_to_skills(
     );
 }
 
+/// Sync email account configurations from the agent's AppConfig into the shared
+/// email accounts list used by the email skill. Also ensures the vault password
+/// is stored under the `email:{id}:password` key pattern that the skill expects.
+async fn sync_email_accounts(
+    config: &AppConfig,
+    email_accounts: &tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>,
+    skill_vault: &Arc<Mutex<SecretsVault>>,
+) {
+    let mut accounts = email_accounts.write().await;
+    if config.email_accounts.is_empty() {
+        return;
+    }
+
+    *accounts = config.email_accounts.clone();
+
+    // Also migrate vault secrets: if the agent has protonmail_bridge_password but
+    // no email:{id}:password key, create the mapping so the email skill can find it.
+    if let Ok(mut vault) = skill_vault.lock() {
+        for acct in &config.email_accounts {
+            let email_key = format!("email:{}:password", acct.id);
+            if vault.get_secret(&email_key).is_none() {
+                // Try common vault key patterns for the password
+                let candidate_keys = [
+                    "protonmail_bridge_password".to_string(),
+                    format!("{}_bridge_password", acct.id),
+                    format!("{}_password", acct.id),
+                ];
+                for candidate in &candidate_keys {
+                    if let Some(pw) = vault.get_secret(candidate).map(|s| s.to_string()) {
+                        vault.set_secret(&email_key, &pw);
+                        tracing::info!(
+                            account = %acct.id,
+                            "Mapped vault secret {} -> {}",
+                            candidate,
+                            email_key
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::debug!(
+        count = accounts.len(),
+        "Synced email accounts from agent config"
+    );
+}
+
 /// Initialize the skill registry: instantiate all built-in skill plugins
 /// and register them as Verified (first-party, shipped with the repo).
-fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
+fn init_skill_registry(
+    vault: Arc<Mutex<SecretsVault>>,
+    email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
+) -> Arc<SkillRegistry> {
     let registry = SkillRegistry::with_secrets(Arc::clone(&vault));
 
     let mut registered = 0u32;
@@ -4836,10 +5637,11 @@ fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
         )
     );
 
-    // Proton Mail (IMAP — lazy-connects on first tool call using vault credentials)
-    register_skill!(skill_proton_mail::ProtonMailSkill::with_secrets(
-        skill_proton_mail::ProtonMailSkill::default_manifest(),
+    // Generic Email (IMAP/SMTP — supports multiple accounts/providers via config)
+    register_skill!(skill_email::EmailSkill::with_secrets(
+        skill_email::EmailSkill::default_manifest(),
         Arc::clone(&vault),
+        Arc::clone(&email_accounts),
     ));
 
     tracing::info!(
@@ -4921,6 +5723,9 @@ async fn launch_agentic_task_internal(
     // Sync agent secrets into the shared skill vault so plugins can see them.
     sync_agent_vault_to_skills(&config.data_dir, &state.skill_vault);
 
+    // Sync email accounts from agent config.
+    sync_email_accounts(&config, &state.email_accounts, &state.skill_vault).await;
+
     // Load persisted agent-registered MCP servers into the shared registry.
     for mcp_def in &config.mcp_servers {
         if mcp_def.transport == "http" && !mcp_def.command_or_url.is_empty() {
@@ -4982,6 +5787,7 @@ async fn launch_agentic_task_internal(
 
     let loop_config = AgenticLoopConfig {
         task_id: task_id.clone(),
+        agent_id: agent_id.to_string(),
         goal,
         max_turns,
         auto_approve_safe_tools: body.auto_approve_safe_tools,
@@ -5881,7 +6687,9 @@ async fn auth_middleware(
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "orion_api=info,tower_http=info".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "orion_api=info,orion_router=info,orion_birth=info,orion_capabilities=warn,tower_http=info".into()
+            }),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -5950,8 +6758,12 @@ async fn main() -> std::io::Result<()> {
         ))
     };
 
+    // Shared email accounts list — synced from agent config per request
+    let email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>> =
+        Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
     // Initialize skill registry and executor
-    let skill_registry = init_skill_registry(Arc::clone(&skill_vault));
+    let skill_registry = init_skill_registry(Arc::clone(&skill_vault), Arc::clone(&email_accounts));
     let skill_executor = Arc::new(SkillExecutor::new(Arc::clone(&skill_registry)));
 
     let state = AppState {
@@ -5966,6 +6778,7 @@ async fn main() -> std::io::Result<()> {
         skill_executor,
         agentic_tasks: Arc::new(TokioMutex::new(HashMap::new())),
         skill_vault,
+        email_accounts,
         orchestration_tick_seconds: 30,
         skill_confirm_nonces: Arc::new(TokioMutex::new(HashMap::new())),
     };
@@ -6018,6 +6831,10 @@ async fn main() -> std::io::Result<()> {
         .route("/api/status", get(api_status))
         .route("/api/cognitive/registry", get(api_cognitive_registry))
         .route("/api/identities", get(api_identities))
+        .route(
+            "/api/mentor-name",
+            get(api_get_mentor_name).put(api_set_mentor_name),
+        )
         .route("/api/agents", post(api_create_agent))
         .route("/api/agents/import", post(api_import_agent))
         .route("/api/agents/{id}/load", post(api_load_agent))
@@ -6102,6 +6919,26 @@ async fn main() -> std::io::Result<()> {
             )),
         )
         .route("/api/agents/{id}/chat", post(api_operational_chat))
+        .route(
+            "/api/agents/{id}/chat/stream",
+            post(api_operational_chat_stream),
+        )
+        .route(
+            "/api/agents/{id}/chat/archive",
+            post(api_archive_chat),
+        )
+        .route(
+            "/api/agents/{id}/chat/archives",
+            get(api_list_chat_archives),
+        )
+        .route(
+            "/api/agents/{id}/chat/archives/{archive_id}",
+            get(api_get_chat_archive),
+        )
+        .route(
+            "/api/agents/{id}/email/accounts",
+            post(api_register_email_account),
+        )
         .route("/api/agents/{id}/skills", get(api_list_skills))
         .route(
             "/api/agents/{id}/skills/missing-secrets",

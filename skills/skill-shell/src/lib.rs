@@ -8,9 +8,9 @@
 
 use async_trait::async_trait;
 use orion_skills::{
-    CapabilityDescriptor, CostEstimate, ExecutionContext, HealthStatus, Permission, Skill,
-    SkillConfig, SkillError, SkillHealth, SkillManifest, SkillResult, ToolDescriptor, ToolOutput,
-    ToolParams, TriggerDescriptor,
+    structured_failure::StructuredFailure, CapabilityDescriptor, CostEstimate, ExecutionContext,
+    HealthStatus, Permission, Skill, SkillConfig, SkillError, SkillHealth, SkillManifest,
+    SkillResult, ToolDescriptor, ToolOutput, ToolParams, TriggerDescriptor,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -111,7 +111,13 @@ impl ShellSkill {
     ) -> SkillResult<ToolOutput> {
         // Safety check
         if let Err(reason) = self.check_safety(command) {
-            return Ok(ToolOutput::error(reason));
+            return Ok(ToolOutput::structured_error(
+                &reason,
+                StructuredFailure::PermissionDenied {
+                    path: command.to_string(),
+                    allowed_paths: vec!["Commands without dangerous patterns are allowed".to_string()],
+                },
+            ));
         }
 
         let timeout = Duration::from_secs(
@@ -137,10 +143,13 @@ impl ShellSkill {
         if let Some(dir) = working_dir {
             let dir_path = std::path::Path::new(dir);
             if !dir_path.is_dir() {
-                return Ok(ToolOutput::error(format!(
-                    "Working directory '{}' does not exist",
-                    dir
-                )));
+                return Ok(ToolOutput::structured_error(
+                    format!("Working directory '{}' does not exist", dir),
+                    StructuredFailure::ResourceNotFound {
+                        resource: format!("directory:{}", dir),
+                        setup_steps: vec![format!("Create directory '{}' first", dir)],
+                    },
+                ));
             }
             cmd.current_dir(dir);
         }
@@ -200,14 +209,17 @@ impl ShellSkill {
                     "stderr_truncated": stderr_truncated,
                 })))
             }
-            Ok(Err(e)) => Ok(ToolOutput::error(format!(
-                "Failed to execute command: {}",
-                e
-            ))),
-            Err(_) => Ok(ToolOutput::error(format!(
-                "Command timed out after {} seconds",
-                timeout.as_secs()
-            ))),
+            Ok(Err(e)) => Ok(ToolOutput::structured_error(
+                format!("Failed to execute command: {}", e),
+                StructuredFailure::Unknown(format!("Command execution failed: {}", e)),
+            )),
+            Err(_) => Ok(ToolOutput::structured_error(
+                format!("Command timed out after {} seconds", timeout.as_secs()),
+                StructuredFailure::Timeout {
+                    elapsed_ms: timeout.as_millis() as u64,
+                    operation: format!("shell: {}", command),
+                },
+            )),
         }
     }
 }

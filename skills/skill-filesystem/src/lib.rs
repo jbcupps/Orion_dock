@@ -5,19 +5,23 @@
 
 use async_trait::async_trait;
 use orion_skills::{
-    CapabilityDescriptor, CostEstimate, ExecutionContext, FileSystemPermission, HealthStatus,
-    Permission, Skill, SkillConfig, SkillError, SkillHealth, SkillManifest, SkillResult,
-    ToolDescriptor, ToolOutput, ToolParams, TriggerDescriptor,
+    structured_failure::StructuredFailure, CapabilityDescriptor, CostEstimate, ExecutionContext,
+    FileSystemPermission, HealthStatus, Permission, Skill, SkillConfig, SkillError, SkillHealth,
+    SkillManifest, SkillResult, ToolDescriptor, ToolOutput, ToolParams, TriggerDescriptor,
 };
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Filesystem skill with sandboxed directory access.
 pub struct FilesystemSkill {
     manifest: SkillManifest,
     /// Root directories where file operations are allowed.
     allowed_roots: Vec<PathBuf>,
+    /// Temporary storage for structured failure data from the last permission error.
+    /// Populated by `permission_denied()`, consumed by `execute_tool()`.
+    last_structured_failure: Mutex<Option<StructuredFailure>>,
 }
 
 impl FilesystemSkill {
@@ -32,7 +36,38 @@ impl FilesystemSkill {
         Self {
             manifest,
             allowed_roots,
+            last_structured_failure: Mutex::new(None),
         }
+    }
+
+    /// Return allowed root directories as display strings (for structured failure reporting).
+    fn allowed_paths_display(&self) -> Vec<String> {
+        self.allowed_roots
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// Build a PermissionDenied SkillError that also carries a StructuredFailure.
+    /// The StructuredFailure is stored in the error message with a sentinel prefix
+    /// so the executor can extract it, but the Display impl still shows a human message.
+    fn permission_denied(&self, path_str: &str, reason: &str) -> SkillError {
+        // Store the structured failure as JSON in the error detail so it
+        // can be surfaced by the executor when converting to ToolOutput.
+        let sf = StructuredFailure::PermissionDenied {
+            path: path_str.to_string(),
+            allowed_paths: self.allowed_paths_display(),
+        };
+        let detail = format!(
+            "{}. Allowed directories: {:?}",
+            reason, self.allowed_paths_display()
+        );
+        // Stash the StructuredFailure JSON in metadata for the execute_tool wrapper
+        // to extract. The SkillError type stays backward-compatible.
+        if let Ok(mut guard) = self.last_structured_failure.lock() {
+            *guard = Some(sf);
+        }
+        SkillError::PermissionDenied(detail)
     }
 
     /// Validate that a path is within one of the allowed roots.
@@ -43,9 +78,7 @@ impl FilesystemSkill {
         // Reject obviously malicious patterns
         let normalized = path_str.replace('\\', "/");
         if normalized.contains("../") || normalized.contains("/..") {
-            return Err(SkillError::PermissionDenied(
-                "Path traversal (../) is not allowed".to_string(),
-            ));
+            return Err(self.permission_denied(path_str, "Path traversal (../) is not allowed"));
         }
 
         // For existing paths, canonicalize and check containment
@@ -56,10 +89,10 @@ impl FilesystemSkill {
             if self.is_within_allowed_roots(&canonical) {
                 return Ok(canonical);
             }
-            return Err(SkillError::PermissionDenied(format!(
-                "Path '{}' is outside allowed directories",
-                path_str
-            )));
+            return Err(self.permission_denied(
+                path_str,
+                &format!("Path '{}' is outside allowed directories", path_str),
+            ));
         }
 
         // For new paths (write_file), check parent exists and is allowed
@@ -74,10 +107,10 @@ impl FilesystemSkill {
             }
         }
 
-        Err(SkillError::PermissionDenied(format!(
-            "Path '{}' is outside allowed directories",
-            path_str
-        )))
+        Err(self.permission_denied(
+            path_str,
+            &format!("Path '{}' is outside allowed directories", path_str),
+        ))
     }
 
     /// Strip the Windows extended-length path prefix (`\\?\`) if present.
@@ -453,7 +486,12 @@ impl Skill for FilesystemSkill {
         params: ToolParams,
         _context: &ExecutionContext,
     ) -> SkillResult<ToolOutput> {
-        match tool_name {
+        // Clear any previous structured failure
+        if let Ok(mut guard) = self.last_structured_failure.lock() {
+            guard.take();
+        }
+
+        let result = match tool_name {
             "read_file" => {
                 let path: String = params.get("path").ok_or_else(|| {
                     SkillError::ToolFailed("Missing required parameter: path".to_string())
@@ -485,6 +523,19 @@ impl Skill for FilesystemSkill {
                 self.search_files(&pattern, &root)
             }
             other => Err(SkillError::ToolFailed(format!("Unknown tool: {}", other))),
+        };
+
+        // If we got a PermissionDenied error and have structured failure data,
+        // convert to a ToolOutput with the structured failure attached.
+        match result {
+            Err(SkillError::PermissionDenied(msg)) => {
+                let sf = self.last_structured_failure.lock().ok().and_then(|mut g| g.take());
+                match sf {
+                    Some(structured) => Ok(ToolOutput::structured_error(msg, structured)),
+                    None => Err(SkillError::PermissionDenied(msg)),
+                }
+            }
+            other => other,
         }
     }
 

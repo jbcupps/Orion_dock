@@ -168,20 +168,37 @@ These principles appear at multiple layers:
 
 | Crate | Role |
 |-------|------|
-| `orion-core` | Config, keyring, DPAPI, templates, vault, verifier, secrets, document signing |
+| `orion-core` | Config, keyring, DPAPI, templates, vault, verifier, secrets, document signing, email auth, provider presets |
 | `orion-memory` | SQLite (default) and Postgres (feature: `postgres`) store, migrations |
 | `orion-birth` | Birth stage machine, chat runtime, prompts, Genesis path enum and dispatch |
 | `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction) |
 | `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules, provider model catalog |
 | `orion-router` | IdEgoRouter, tier-aware model override, ego model override, Pro council DAG |
-| `orion-email` | Email authentication (OAuth2, PKCE, IMAP) |
+| `orion-email` | Email OAuth2 adapters (Gmail, Outlook) with PKCE |
 | `orion-api` | Axum HTTP API server |
 | `orion-uat` | Headless UAT driver |
-| `orion-skills` | Skill framework, MCP protocol, WASM runtime, sandbox |
+| `orion-skills` | Skill framework, MCP protocol, WASM runtime, sandbox, transport layer (IMAP, SMTP, service discovery) |
 | `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
-| `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, proton-mail) |
+| `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, email, proton-mail) |
 
 Orchestration is currently implemented as an MVP module at `crates/orion-api/src/orchestration.rs` (not yet split into a dedicated crate).
+
+### Capability / Skill Taxonomy
+
+The project distinguishes **capabilities** from **skills**:
+
+- **Capabilities** are protocol-level, reusable implementations with no agent-facing tools. They live in `orion-capabilities/` (cognitive, sensory), `orion-skills/src/transport/` (IMAP, SMTP, service discovery), and `orion-email/` (OAuth2 adapters).
+- **Skills** are agent-facing tool wrappers that compose capabilities into tools with parameters, confirmations, and events. They live in `skills/`. Each skill's `skill.toml` declares which capabilities it uses via `[[capabilities]]`.
+
+Capability categories (tracked in `CapabilityDescriptor.category`):
+
+| Category | Where | Examples |
+|----------|-------|----------|
+| `protocol` | `orion-skills/transport/`, `orion-email/` | IMAP, SMTP, STARTTLS, OAuth2, MCP, service discovery |
+| `cognitive` | `orion-capabilities/cognitive/` | OpenAI, Anthropic, local LLM providers |
+| `sensory` | `orion-capabilities/sensory/` | Web search, browser automation, vision, file ingestion |
+
+**Connection process pattern:** Skills follow a discover → configure → connect → operate lifecycle. The `discover_email_service` tool pattern (DNS probing, autoconfig, presets) can be reused for other skills needing service configuration.
 
 ### Runtime Surfaces
 

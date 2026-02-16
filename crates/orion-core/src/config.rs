@@ -409,6 +409,74 @@ pub enum EmailProvider {
     ImapFallback,
 }
 
+/// TLS negotiation mode for mail transport connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// TLS from connection start (IMAP port 993, SMTP port 465).
+    #[default]
+    Implicit,
+    /// Plaintext connection upgraded via STARTTLS (IMAP port 143, SMTP port 587).
+    Starttls,
+    /// No encryption — testing and localhost only.
+    None,
+}
+
+/// Well-known server settings for a mail provider.
+#[derive(Debug, Clone)]
+pub struct EmailServerPreset {
+    pub imap_host: &'static str,
+    pub imap_port: u16,
+    pub imap_tls: TlsMode,
+    pub smtp_host: &'static str,
+    pub smtp_port: u16,
+    pub smtp_tls: TlsMode,
+    pub auth: EmailAuthType,
+}
+
+/// Return well-known server settings for a provider, if available.
+pub fn provider_preset(provider: EmailProvider) -> Option<EmailServerPreset> {
+    match provider {
+        EmailProvider::Gmail => Some(EmailServerPreset {
+            imap_host: "imap.gmail.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.gmail.com",
+            smtp_port: 587,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::OAuth2,
+        }),
+        EmailProvider::Outlook => Some(EmailServerPreset {
+            imap_host: "outlook.office365.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.office365.com",
+            smtp_port: 587,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::OAuth2,
+        }),
+        EmailProvider::Proton => Some(EmailServerPreset {
+            imap_host: "127.0.0.1",
+            imap_port: 1143,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "127.0.0.1",
+            smtp_port: 1025,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::AppPassword,
+        }),
+        EmailProvider::Fastmail => Some(EmailServerPreset {
+            imap_host: "imap.fastmail.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.fastmail.com",
+            smtp_port: 465,
+            smtp_tls: TlsMode::Implicit,
+            auth: EmailAuthType::AppPassword,
+        }),
+        EmailProvider::ImapFallback => Option::None,
+    }
+}
+
 /// Status of an email account (for reconnect/reauth UX).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

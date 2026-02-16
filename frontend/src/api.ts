@@ -62,7 +62,12 @@ export async function fetchStatus(): Promise<StatusResponse> {
   return res.json();
 }
 
-export async function fetchIdentities(): Promise<AgentIdentityInfo[]> {
+export interface IdentitiesResponse {
+  agents: AgentIdentityInfo[];
+  mentor_name: string | null;
+}
+
+export async function fetchIdentities(): Promise<IdentitiesResponse> {
   const base = getBaseUrl();
   const res = await apiFetch(`${base}/api/identities`);
   if (!res.ok) throw new Error(`Identities failed: ${res.status}`);
@@ -616,6 +621,18 @@ export async function fetchChatHistory(
   return res.json();
 }
 
+export interface ContextWarning {
+  estimated_tokens: number;
+  context_window: number;
+  usage_percent: number;
+  model: string;
+}
+
+export interface AutoArchivedInfo {
+  archive_id: string;
+  message_count: number;
+}
+
 export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
@@ -627,6 +644,8 @@ export interface OperationalChatResponse {
     success: boolean;
     output: string;
   }[];
+  context_warning?: ContextWarning;
+  auto_archived?: AutoArchivedInfo;
 }
 
 export interface ChatAttachmentUploadItem {

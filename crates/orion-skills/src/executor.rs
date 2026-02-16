@@ -164,6 +164,7 @@ impl SkillExecutor {
                             success: output.success,
                             data: Some(sanitized),
                             error: output.error.clone(),
+                            structured_failure: output.structured_failure.clone(),
                             metadata: output.metadata.clone(),
                         });
                     }

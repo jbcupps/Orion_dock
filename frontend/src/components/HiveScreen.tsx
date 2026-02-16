@@ -65,8 +65,8 @@ export default function HiveScreen({
   const fetchAgents = async () => {
     try {
       setLoading(true);
-      const list = await fetchIdentities();
-      setAgents(list);
+      const resp = await fetchIdentities();
+      setAgents(resp.agents);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load identities');
