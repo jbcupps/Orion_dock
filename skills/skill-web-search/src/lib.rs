@@ -134,7 +134,7 @@ impl Skill for WebSearchSkill {
         let verdict = superego::check_search_query(&query);
         if !verdict.allowed {
             let reason = verdict
-                .reason
+                .reason_text
                 .unwrap_or_else(|| "Query blocked by safety check".to_string());
             tracing::warn!("Superego blocked search query: {}", reason);
             return Ok(ToolOutput::error(format!("Search blocked: {}", reason)));

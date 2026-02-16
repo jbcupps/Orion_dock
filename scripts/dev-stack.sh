@@ -31,17 +31,26 @@ if [[ "$ACTION" == "down" ]]; then
   exit 0
 fi
 
-# --- Check ORION_MASTER_KEY ---
+# --- Ensure ORION_MASTER_KEY (generate on first run, persist for copy/backup) ---
+ORION_KEY_FILE="$REPO_ROOT/.orion-master-key"
 if [[ -z "${ORION_MASTER_KEY:-}" ]]; then
-  echo ""
-  echo "  WARNING: ORION_MASTER_KEY is not set."
-  echo "  The full stack requires this for secrets encryption."
-  echo "  Generate one with: openssl rand -base64 32"
-  echo ""
-  read -r -p "  Continue without ORION_MASTER_KEY? (y/N) " answer
-  if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
-    echo "  Aborted. Set ORION_MASTER_KEY and retry."
-    exit 1
+  if [[ -f "$ORION_KEY_FILE" ]]; then
+    ORION_MASTER_KEY=$(cat "$ORION_KEY_FILE")
+    export ORION_MASTER_KEY
+  else
+    ORION_MASTER_KEY=$(openssl rand -base64 32)
+    printf '%s' "$ORION_MASTER_KEY" > "$ORION_KEY_FILE"
+    export ORION_MASTER_KEY
+    echo ""
+    echo "  ================================================================"
+    echo "   ORION_MASTER_KEY generated (first run). Copy and store securely."
+    echo "  ================================================================"
+    echo ""
+    echo "   $ORION_MASTER_KEY"
+    echo ""
+    echo "   Saved to: $ORION_KEY_FILE"
+    echo "   You need this key to decrypt secrets. Back it up safely."
+    echo ""
   fi
 fi
 

@@ -18,4 +18,6 @@ pub mod governor;
 pub mod planner;
 pub mod router;
 
-pub use router::{build_ego_provider, EgoProvider, IdEgoRouter, RoutingMode, SuperegoResult};
+pub use router::{
+    build_ego_provider, EgoProvider, IdEgoRouter, RoutingMode, SuperegoL2Mode, SuperegoResult,
+};

@@ -32,15 +32,26 @@ function Invoke-Docker {
 try {
     $compose = "docker compose -f docker/docker-compose.yml"
 
-    # --- Check ORION_MASTER_KEY ---
+    # --- Ensure ORION_MASTER_KEY (generate on first run, persist for copy/backup) ---
+    $keyFile = Join-Path $RepoRoot ".orion-master-key"
     if (-not $env:ORION_MASTER_KEY) {
-        Write-Host "`n  WARNING: ORION_MASTER_KEY is not set." -ForegroundColor Yellow
-        Write-Host "  The full stack requires this for secrets encryption." -ForegroundColor Yellow
-        Write-Host "  Generate one with: openssl rand -base64 32`n" -ForegroundColor Yellow
-        $answer = Read-Host "  Continue without ORION_MASTER_KEY? (y/N)"
-        if ($answer -ne "y" -and $answer -ne "Y") {
-            Write-Host "  Aborted. Set ORION_MASTER_KEY and retry.`n" -ForegroundColor Red
-            return
+        if (Test-Path $keyFile) {
+            $env:ORION_MASTER_KEY = (Get-Content $keyFile -Raw).Trim()
+        } else {
+            $bytes = New-Object byte[] 32
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+            $key = [Convert]::ToBase64String($bytes)
+            $key | Set-Content $keyFile -NoNewline
+            $env:ORION_MASTER_KEY = $key
+            Write-Host ""
+            Write-Host "  ================================================================" -ForegroundColor Cyan
+            Write-Host "   ORION_MASTER_KEY generated (first run). Copy and store securely." -ForegroundColor Cyan
+            Write-Host "  ================================================================" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "   $key" -ForegroundColor White
+            Write-Host ""
+            Write-Host "   Saved to: $keyFile" -ForegroundColor Gray
+            Write-Host "   You need this key to decrypt secrets. Back it up safely.`n" -ForegroundColor Gray
         }
     }
 

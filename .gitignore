@@ -5,6 +5,7 @@
 .claude/settings.local.json
 secrets.bin
 keys.bin
+.orion-master-key
 
 # Rust
 target/

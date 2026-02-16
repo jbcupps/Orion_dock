@@ -199,8 +199,9 @@ impl WebBrowseSkill {
     async fn search_fallback(&self, query: &str, max_results: u32) -> SkillResult<ToolOutput> {
         let verdict = check_search_query(query);
         if !verdict.allowed {
+            let reason = verdict.reason_text.unwrap_or_default();
             return Ok(ToolOutput::success(serde_json::json!({
-                "formatted": format!("Search blocked: {}", verdict.reason.unwrap_or_default()),
+                "formatted": format!("Search blocked: {}", reason),
                 "strategy_used": "search_fallback",
                 "error_class": "search_blocked",
                 "answer": null,

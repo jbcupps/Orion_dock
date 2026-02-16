@@ -369,7 +369,9 @@ pub fn load_image_attachments(
 
     for id in ids {
         if let Some(record) = by_id.get(&id) {
-            if image_mimes.iter().any(|m| record.detected_mime.starts_with(m))
+            if image_mimes
+                .iter()
+                .any(|m| record.detected_mime.starts_with(m))
                 || record.detected_kind == "image"
             {
                 let source_path = root.join(&id).join(SOURCE_FILE);

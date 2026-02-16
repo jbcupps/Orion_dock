@@ -60,9 +60,9 @@ pub fn extract_tool_calls(response: &CompletionResponse) -> ExtractionResult {
     let mut legacy_idx: u32 = 0;
     for tr in text_calls {
         // De-duplicate: skip if we already have a structured call with the same name+args.
-        let dominated = calls.iter().any(|c| {
-            c.name == tr.name && c.arguments == tr.arguments
-        });
+        let dominated = calls
+            .iter()
+            .any(|c| c.name == tr.name && c.arguments == tr.arguments);
         if dominated {
             continue;
         }
@@ -127,7 +127,8 @@ pub fn build_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<ToolDefinit
 
     defs.push(ToolDefinition {
         name: "store_vault_secret".to_string(),
-        description: "Store a named secret (non-API-key credential) in the agent's vault.".to_string(),
+        description: "Store a named secret (non-API-key credential) in the agent's vault."
+            .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -173,7 +174,8 @@ pub fn build_agentic_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<Too
 
     defs.push(ToolDefinition {
         name: "register_mcp_skill".to_string(),
-        description: "Connect to an MCP server and register its tools for use in subsequent turns.".to_string(),
+        description: "Connect to an MCP server and register its tools for use in subsequent turns."
+            .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

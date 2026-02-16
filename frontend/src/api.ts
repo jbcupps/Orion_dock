@@ -633,6 +633,16 @@ export interface AutoArchivedInfo {
   message_count: number;
 }
 
+export interface RoutingTelemetry {
+  mode_profile: string;
+  tools_profile: string;
+  requested_router_mode: string;
+  routing_mode: string;
+  active_provider?: string;
+  active_model?: string;
+  governor_enabled: boolean;
+}
+
 export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
@@ -646,6 +656,7 @@ export interface OperationalChatResponse {
   }[];
   context_warning?: ContextWarning;
   auto_archived?: AutoArchivedInfo;
+  routing_telemetry?: RoutingTelemetry;
 }
 
 export interface ChatAttachmentUploadItem {
