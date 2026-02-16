@@ -18,8 +18,8 @@ pub use local_http::{stub_heartbeat, LocalHttpProvider};
 pub use openai::OpenAiProvider;
 pub use openai_compatible::{CompatibleProvider, OpenAiCompatibleProvider};
 pub use provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, Message, StreamEvent, ToolCall,
-    ToolDefinition,
+    CompletionRequest, CompletionResponse, ImageContent, LlmProvider, Message, StreamEvent,
+    ToolCall, ToolDefinition,
 };
 pub use types::*;
 

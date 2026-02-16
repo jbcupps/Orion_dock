@@ -10,6 +10,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod signing;
 pub mod skill;
+pub mod structured_failure;
 pub mod transport;
 pub mod watcher;
 

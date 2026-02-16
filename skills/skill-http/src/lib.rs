@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 use orion_skills::{
-    CapabilityDescriptor, CostEstimate, ExecutionContext, HealthStatus, NetworkPermission,
-    Permission, Skill, SkillConfig, SkillError, SkillHealth, SkillManifest, SkillResult,
-    ToolDescriptor, ToolOutput, ToolParams, TriggerDescriptor,
+    structured_failure::StructuredFailure, CapabilityDescriptor, CostEstimate, ExecutionContext,
+    HealthStatus, NetworkPermission, Permission, Skill, SkillConfig, SkillError, SkillHealth,
+    SkillManifest, SkillResult, ToolDescriptor, ToolOutput, ToolParams, TriggerDescriptor,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -384,7 +384,7 @@ impl Skill for HttpSkill {
         params: ToolParams,
         _context: &ExecutionContext,
     ) -> SkillResult<ToolOutput> {
-        match tool_name {
+        let result = match tool_name {
             "http_get" => {
                 let url: String = params.get("url").ok_or_else(|| {
                     SkillError::ToolFailed("Missing required parameter: url".to_string())
@@ -403,6 +403,33 @@ impl Skill for HttpSkill {
                     .await
             }
             other => Err(SkillError::ToolFailed(format!("Unknown tool: {}", other))),
+        };
+
+        // Convert connection failures to structured errors
+        match result {
+            Err(SkillError::ToolFailed(ref msg))
+                if msg.contains("Request failed") || msg.contains("response body") =>
+            {
+                Ok(ToolOutput::structured_error(
+                    msg,
+                    StructuredFailure::ConnectionFailed {
+                        host: "http-target".to_string(),
+                        port: 0,
+                        error_detail: msg.clone(),
+                        alternatives: vec![],
+                    },
+                ))
+            }
+            Err(SkillError::ToolFailed(ref msg)) if msg.contains("blocked") => {
+                Ok(ToolOutput::structured_error(
+                    msg,
+                    StructuredFailure::PermissionDenied {
+                        path: msg.clone(),
+                        allowed_paths: vec!["Only public HTTP/HTTPS URLs are allowed".to_string()],
+                    },
+                ))
+            }
+            other => other,
         }
     }
 

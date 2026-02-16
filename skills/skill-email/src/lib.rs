@@ -12,6 +12,7 @@ use orion_core::config::{
 use orion_core::email_auth;
 use orion_core::secrets::SecretsVault;
 use orion_skills::channel::{SkillEvent, TriggerDescriptor, TriggerFrequency, TriggerPriority};
+use orion_skills::structured_failure::StructuredFailure;
 use orion_skills::manifest::{
     CapabilityDescriptor, NetworkPermission, Permission, SkillId, SkillManifest,
 };
@@ -455,7 +456,7 @@ impl Skill for EmailSkill {
         params: ToolParams,
         _context: &ExecutionContext,
     ) -> SkillResult<ToolOutput> {
-        match tool_name {
+        let result: SkillResult<ToolOutput> = match tool_name {
             "discover_email_service" => {
                 let raw = params
                     .get::<String>("domain")
@@ -589,6 +590,48 @@ impl Skill for EmailSkill {
                 "Unknown tool: {}",
                 tool_name
             ))),
+        };
+
+        // Convert known error patterns to ToolOutput with StructuredFailure
+        match result {
+            Err(SkillError::ToolFailed(ref msg)) if msg.contains("No email accounts configured") => {
+                Ok(ToolOutput::structured_error(
+                    msg,
+                    StructuredFailure::ResourceNotFound {
+                        resource: "email_accounts".to_string(),
+                        setup_steps: vec![
+                            "Use discover_email_service to find email server settings".to_string(),
+                            "Configure an account via the API with credentials".to_string(),
+                        ],
+                    },
+                ))
+            }
+            Err(SkillError::MissingSecret(ref msg)) => {
+                Ok(ToolOutput::structured_error(
+                    msg,
+                    StructuredFailure::AuthenticationFailed {
+                        service: "email".to_string(),
+                        user_action_required: Some(format!(
+                            "Store the required credential: {}",
+                            msg
+                        )),
+                    },
+                ))
+            }
+            Err(SkillError::ToolFailed(ref msg))
+                if msg.contains("IMAP") || msg.contains("SMTP") || msg.contains("connect") =>
+            {
+                Ok(ToolOutput::structured_error(
+                    msg,
+                    StructuredFailure::ConnectionFailed {
+                        host: "email-server".to_string(),
+                        port: 0,
+                        error_detail: msg.clone(),
+                        alternatives: vec![],
+                    },
+                ))
+            }
+            other => other,
         }
     }
 

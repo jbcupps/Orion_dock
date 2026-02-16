@@ -3283,6 +3283,7 @@ dependencies = [
  "orion-capabilities",
  "orion-core",
  "orion-memory",
+ "orion-skills",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

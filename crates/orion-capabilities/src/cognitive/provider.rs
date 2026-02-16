@@ -1,6 +1,15 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Image content for vision-capable models (base64-encoded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageContent {
+    /// Base64-encoded image data.
+    pub data: String,
+    /// MIME type, e.g. "image/png", "image/jpeg".
+    pub media_type: String,
+}
+
 /// A tool the LLM can call (function-calling / tool-use).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -35,6 +44,9 @@ pub struct Message {
     /// For assistant messages that invoked tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Images attached to this message for vision-capable models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageContent>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +73,22 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            images: None,
+        }
+    }
+
+    /// Create a text message with attached images for vision models.
+    pub fn with_images(
+        role: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<ImageContent>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+            images: if images.is_empty() { None } else { Some(images) },
         }
     }
 
@@ -71,6 +99,7 @@ impl Message {
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: None,
+            images: None,
         }
     }
 }

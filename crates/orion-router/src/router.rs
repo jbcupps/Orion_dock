@@ -635,7 +635,9 @@ pub struct RouterStatusInfo {
 // ── Helper functions for building providers ──────────────────────────
 
 /// Build the Ego (cloud) provider from a provider name and API key.
-fn build_ego_provider(
+/// Build an Ego LLM provider from provider name, API key, and optional model override.
+/// Returns (provider, ego_provider_enum) or (None, None) if key is missing.
+pub fn build_ego_provider(
     provider_name: Option<&str>,
     api_key: Option<String>,
     model_override: Option<String>,

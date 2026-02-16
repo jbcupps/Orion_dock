@@ -6,6 +6,7 @@ import {
   fetchForgeState,
   fetchGenesisState,
   fetchHealth,
+  fetchMentorName,
   fetchStatus,
   fetchStoredProviders,
   fetchTierModels,
@@ -13,6 +14,7 @@ import {
   resetTierModels,
   setActiveProvider,
   setIgnition,
+  setMentorName as apiSetMentorName,
   updateTierModels,
   validateTierModels,
   type BirthStateResponse,
@@ -77,6 +79,7 @@ function App() {
   const [routerMode, setRouterMode] = useState<'auto' | 'think_hard' | 'think_harder'>('auto');
   const [chatBusy, setChatBusy] = useState(false);
   const [agenticBusy, setAgenticBusy] = useState(false);
+  const [mentorName, setMentorName] = useState<string | null>(null);
   const cloudBusy = (chatBusy || agenticBusy) && storedProviders.length > 0;
 
   useEffect(() => {
@@ -93,6 +96,28 @@ function App() {
       }
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchMentorName();
+        if (!cancelled) setMentorName(res.mentor_name);
+      } catch {
+        // Mentor name is optional; ignore errors
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSetMentorName = useCallback(async (name: string) => {
+    try {
+      const res = await apiSetMentorName(name);
+      setMentorName(res.mentor_name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to set mentor name');
+    }
   }, []);
 
   useEffect(() => {
@@ -824,6 +849,8 @@ function App() {
                   <OperationalChat
                     agentId={currentAgentId}
                     agentName={status.agent_name ?? undefined}
+                    mentorName={mentorName ?? undefined}
+                    onSetMentorName={handleSetMentorName}
                     routerMode={routerMode}
                     onError={setError}
                     onBusyChange={setChatBusy}

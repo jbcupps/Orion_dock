@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 use orion_birth::parse_tool_requests;
 use orion_capabilities::cognitive::Message;
-use orion_core::system_prompt::{build_agentic_system_prompt, SkillToolEntry};
+use orion_core::system_prompt::{build_agentic_system_prompt, RuntimeContext, SkillToolEntry};
 use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
 use orion_skills::manifest::SkillId;
 use orion_skills::protocol::mcp::McpSkillRuntime;
@@ -194,6 +194,7 @@ pub fn find_skill_for_tool(
 /// Configuration bundle passed to [`run_agentic_loop`] when spawning an autonomous task.
 pub struct AgenticLoopConfig {
     pub task_id: String,
+    pub agent_id: String,
     pub goal: String,
     pub max_turns: u32,
     pub auto_approve_safe_tools: bool,
@@ -213,11 +214,16 @@ pub struct AgenticLoopConfig {
 
 /// Run the autonomous agentic loop. Call from `tokio::spawn`.
 pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
+    let runtime_ctx = RuntimeContext {
+        agent_id: cfg.agent_id.clone(),
+        data_dir: cfg.agent_dir.to_string_lossy().to_string(),
+    };
     let system_prompt = build_agentic_system_prompt(
         &cfg.config.docs_dir,
         &cfg.config.agent_name,
         &cfg.skill_tool_entries,
         &cfg.stored_providers,
+        Some(&runtime_ctx),
     );
 
     let mut messages: Vec<Message> = vec![
@@ -289,6 +295,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 &cfg.config.agent_name,
                 &refreshed_entries,
                 &cfg.stored_providers,
+                Some(&runtime_ctx),
             );
             if !messages.is_empty() {
                 messages[0] = Message::new("system", &refreshed_prompt);
@@ -578,6 +585,40 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             // Process remaining tool requests in this turn (don't skip to next turn).
         }
 
+        // Check for manage_job synthetic tool
+        if let Some(mj) = tool_requests.iter().find(|t| t.name == "manage_job") {
+            let result_msg = handle_manage_job(&cfg.agent_dir, &mj.arguments);
+            let success = !result_msg.starts_with("manage_job failed");
+            let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                turn,
+                tool_name: "manage_job".to_string(),
+                success,
+                output: result_msg.clone(),
+            });
+            record_step(&cfg.task_handle, turn, "manage_job", &result_msg).await;
+            messages.push(Message::new(
+                "user",
+                format!("## Tool Result: manage_job\n\n{}", result_msg),
+            ));
+        }
+
+        // Check for write_review synthetic tool
+        if let Some(wr) = tool_requests.iter().find(|t| t.name == "write_review") {
+            let result_msg = handle_write_review(&cfg.agent_dir, &wr.arguments);
+            let success = !result_msg.starts_with("write_review failed");
+            let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                turn,
+                tool_name: "write_review".to_string(),
+                success,
+                output: result_msg.clone(),
+            });
+            record_step(&cfg.task_handle, turn, "write_review", &result_msg).await;
+            messages.push(Message::new(
+                "user",
+                format!("## Tool Result: write_review\n\n{}", result_msg),
+            ));
+        }
+
         // No tool calls and no synthetic tools — nudge the LLM
         if tool_requests.is_empty() {
             messages.push(Message::new(
@@ -594,6 +635,8 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             if tr.name == "task_complete"
                 || tr.name == "ask_mentor"
                 || tr.name == "register_mcp_skill"
+                || tr.name == "manage_job"
+                || tr.name == "write_review"
             {
                 continue;
             }
@@ -1062,6 +1105,230 @@ async fn register_mcp_skill_impl(
     );
 
     Ok(tool_names)
+}
+
+// ---------------------------------------------------------------------------
+// manage_job synthetic tool
+// ---------------------------------------------------------------------------
+
+fn handle_manage_job(agent_dir: &Path, args: &serde_json::Value) -> String {
+    use crate::orchestration::{
+        create_job, delete_job, list_jobs, save_jobs, set_job_enabled,
+        CreateOrchestrationJobRequest, OrchestrationJobMode, SignificancePolicy,
+    };
+
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match action.as_str() {
+        "create" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cron = args
+                .get("cron")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mode_str = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("id_check");
+            let mode = match mode_str {
+                "agentic_run" => OrchestrationJobMode::AgenticRun,
+                _ => OrchestrationJobMode::IdCheck,
+            };
+            let goal_template = args
+                .get("goal_template")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let enabled = args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let escalate_medium = args
+                .get("escalate_medium")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let flag_high = args
+                .get("flag_high_to_mentor")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            if name.is_empty() || cron.is_empty() || goal_template.is_empty() {
+                return "manage_job failed: name, cron, and goal_template are required for create."
+                    .to_string();
+            }
+
+            let request = CreateOrchestrationJobRequest {
+                name: name.clone(),
+                cron,
+                mode,
+                goal_template,
+                enabled,
+                significance_policy: SignificancePolicy {
+                    escalate_medium,
+                    flag_high_to_mentor: flag_high,
+                    ..Default::default()
+                },
+            };
+
+            let mut jobs = match list_jobs(agent_dir) {
+                Ok(j) => j,
+                Err(e) => return format!("manage_job failed: {}", e),
+            };
+
+            match create_job(&mut jobs, request, chrono::Utc::now()) {
+                Ok(job) => {
+                    if let Err(e) = save_jobs(agent_dir, &jobs) {
+                        return format!("manage_job failed: job created but save failed: {}", e);
+                    }
+                    format!(
+                        "Job '{}' created (id: {}, cron: {}, mode: {:?}, enabled: {}).",
+                        job.name, job.job_id, job.cron, job.mode, job.enabled
+                    )
+                }
+                Err(e) => format!("manage_job failed: {}", e),
+            }
+        }
+
+        "list" => match list_jobs(agent_dir) {
+            Ok(jobs) => {
+                if jobs.is_empty() {
+                    "No orchestration jobs configured.".to_string()
+                } else {
+                    let lines: Vec<String> = jobs
+                        .iter()
+                        .map(|j| {
+                            format!(
+                                "- {} (id: {}, cron: {}, mode: {:?}, enabled: {}, last_status: {})",
+                                j.name,
+                                j.job_id,
+                                j.cron,
+                                j.mode,
+                                j.enabled,
+                                j.last_status.as_deref().unwrap_or("never run"),
+                            )
+                        })
+                        .collect();
+                    format!("Orchestration jobs ({}):\n{}", jobs.len(), lines.join("\n"))
+                }
+            }
+            Err(e) => format!("manage_job failed: {}", e),
+        },
+
+        "enable" => {
+            let job_id = args
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let enabled = args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            if job_id.is_empty() {
+                return "manage_job failed: job_id is required for enable.".to_string();
+            }
+
+            let mut jobs = match list_jobs(agent_dir) {
+                Ok(j) => j,
+                Err(e) => return format!("manage_job failed: {}", e),
+            };
+
+            match set_job_enabled(&mut jobs, job_id, enabled, chrono::Utc::now()) {
+                Ok(job) => {
+                    if let Err(e) = save_jobs(agent_dir, &jobs) {
+                        return format!("manage_job failed: save failed: {}", e);
+                    }
+                    format!(
+                        "Job '{}' {} (id: {}).",
+                        job.name,
+                        if enabled { "enabled" } else { "disabled" },
+                        job.job_id
+                    )
+                }
+                Err(e) => format!("manage_job failed: {}", e),
+            }
+        }
+
+        "delete" => {
+            let job_id = args
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if job_id.is_empty() {
+                return "manage_job failed: job_id is required for delete.".to_string();
+            }
+
+            let mut jobs = match list_jobs(agent_dir) {
+                Ok(j) => j,
+                Err(e) => return format!("manage_job failed: {}", e),
+            };
+
+            if delete_job(&mut jobs, job_id) {
+                if let Err(e) = save_jobs(agent_dir, &jobs) {
+                    return format!("manage_job failed: delete succeeded but save failed: {}", e);
+                }
+                format!("Job {} deleted.", job_id)
+            } else {
+                format!("manage_job failed: no job with id '{}'.", job_id)
+            }
+        }
+
+        other => format!(
+            "manage_job failed: unknown action '{}'. Use create, list, enable, or delete.",
+            other
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// write_review synthetic tool
+// ---------------------------------------------------------------------------
+
+fn handle_write_review(agent_dir: &Path, args: &serde_json::Value) -> String {
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if content.is_empty() {
+        return "write_review failed: content is required.".to_string();
+    }
+
+    let reviews_path = agent_dir.join("reviews.md");
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+
+    let entry = if reviews_path.exists() {
+        format!("\n\n---\n_Recorded {}_\n\n{}", timestamp, content)
+    } else {
+        format!("# Self-Reviews\n\n_Recorded {}_\n\n{}", timestamp, content)
+    };
+
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&reviews_path)
+    {
+        Ok(mut f) => match f.write_all(entry.as_bytes()) {
+            Ok(_) => format!(
+                "Review entry appended to {} ({} chars).",
+                reviews_path.display(),
+                content.len()
+            ),
+            Err(e) => format!("write_review failed: {}", e),
+        },
+        Err(e) => format!("write_review failed: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------

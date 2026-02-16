@@ -39,10 +39,35 @@ export async function fetchStatus(): Promise<StatusResponse> {
   return res.json();
 }
 
-export async function fetchIdentities(): Promise<AgentIdentityInfo[]> {
+export interface IdentitiesResponse {
+  agents: AgentIdentityInfo[];
+  mentor_name: string | null;
+}
+
+export async function fetchIdentities(): Promise<IdentitiesResponse> {
   const base = getBaseUrl();
   const res = await fetch(`${base}/api/identities`);
   if (!res.ok) throw new Error(`Identities failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMentorName(): Promise<{ mentor_name: string | null }> {
+  const base = getBaseUrl();
+  const res = await fetch(`${base}/api/mentor-name`);
+  if (!res.ok) throw new Error(`Mentor name fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setMentorName(
+  mentorName: string
+): Promise<{ mentor_name: string | null }> {
+  const base = getBaseUrl();
+  const res = await fetch(`${base}/api/mentor-name`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mentor_name: mentorName }),
+  });
+  if (!res.ok) throw new Error(`Set mentor name failed: ${res.status}`);
   return res.json();
 }
 
@@ -573,6 +598,18 @@ export async function fetchChatHistory(
   return res.json();
 }
 
+export interface ContextWarning {
+  estimated_tokens: number;
+  context_window: number;
+  usage_percent: number;
+  model: string;
+}
+
+export interface AutoArchivedInfo {
+  archive_id: string;
+  message_count: number;
+}
+
 export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
@@ -584,6 +621,8 @@ export interface OperationalChatResponse {
     success: boolean;
     output: string;
   }[];
+  context_warning?: ContextWarning;
+  auto_archived?: AutoArchivedInfo;
 }
 
 export interface ChatAttachmentUploadItem {
@@ -652,6 +691,147 @@ export async function sendChat(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Chat failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface ChatStreamCallbacks {
+  onStatus?: (phase: string) => void;
+  onToken?: (text: string) => void;
+  onToolLog?: (entry: { tool_name: string; skill_name?: string; success: boolean; output: string }) => void;
+  onDone?: (response: OperationalChatResponse) => void;
+  onError?: (message: string) => void;
+}
+
+export function sendChatStream(
+  agentId: string,
+  message: string,
+  routerMode?: 'auto' | 'think_hard' | 'think_harder',
+  attachmentIds: string[] = [],
+  callbacks?: ChatStreamCallbacks
+): AbortController {
+  const base = getBaseUrl();
+  const controller = new AbortController();
+  const payload: Record<string, unknown> = { message: message.trim() };
+  if (routerMode) payload.router_mode = routerMode;
+  if (attachmentIds.length > 0) payload.attachment_ids = attachmentIds;
+
+  (async () => {
+    try {
+      const res = await fetch(
+        `${base}/api/agents/${encodeURIComponent(agentId)}/chat/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }
+      );
+      if (!res.ok) {
+        const err = await res.text();
+        callbacks?.onError?.(err || `Chat stream failed: ${res.status}`);
+        return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) { callbacks?.onError?.('No response body'); return; }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            try {
+              const parsed = JSON.parse(data);
+              switch (eventType) {
+                case 'status':
+                  callbacks?.onStatus?.(parsed.phase);
+                  break;
+                case 'token':
+                  callbacks?.onToken?.(parsed.text);
+                  break;
+                case 'tool_log':
+                  callbacks?.onToolLog?.(parsed);
+                  break;
+                case 'done':
+                  callbacks?.onDone?.(parsed as OperationalChatResponse);
+                  break;
+                case 'error':
+                  callbacks?.onError?.(parsed.message);
+                  break;
+              }
+            } catch {
+              // ignore parse errors
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        callbacks?.onError?.((e as Error).message || 'Stream failed');
+      }
+    }
+  })();
+
+  return controller;
+}
+
+// ---- Chat Archive API ----
+
+export interface ChatArchiveInfo {
+  archive_id: string;
+  timestamp: string;
+  message_count: number;
+  preview: string;
+}
+
+export async function archiveChat(
+  agentId: string
+): Promise<{ archive_id: string; message_count: number }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archive`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Archive failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchChatArchives(
+  agentId: string
+): Promise<ChatArchiveInfo[]> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archives`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch archives failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchChatArchive(
+  agentId: string,
+  archiveId: string
+): Promise<{ archive_id: string; messages: BirthChatMessageItem[] }> {
+  const base = getBaseUrl();
+  const res = await fetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archives/${encodeURIComponent(archiveId)}`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch archive failed: ${res.status}`);
   }
   return res.json();
 }
