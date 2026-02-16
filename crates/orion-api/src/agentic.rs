@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
-use orion_birth::parse_tool_requests;
+use orion_birth::BirthToolRequest;
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, SkillToolEntry};
 use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
@@ -18,6 +18,8 @@ use orion_skills::manifest::SkillId;
 use orion_skills::protocol::mcp::McpSkillRuntime;
 use orion_skills::skill::{Skill, ToolDescriptor};
 use orion_skills::{SkillExecutor, SkillRegistry, TrustTier};
+
+use crate::tool_extraction;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -254,6 +256,9 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     )
     .await;
 
+    // Build structured tool definitions for tool-aware routing (includes synthetic agentic tools).
+    let mut tool_defs = tool_extraction::build_agentic_tool_definitions(&cfg.skill_tool_entries);
+
     // Pre-flight: verify at least one LLM is reachable before entering the loop.
     if let Err(e) = router.heartbeat().await {
         let err_msg = format!("LLM health check failed before starting task: {}", e);
@@ -281,7 +286,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     let mut tools_changed = false;
 
     loop {
-        // Refresh system prompt when tools have been added mid-run.
+        // Refresh system prompt and tool definitions when tools have been added mid-run.
         if tools_changed {
             let refreshed_entries = crate::build_skill_tool_entries(&cfg.skill_registry);
             let refreshed_prompt = build_agentic_system_prompt(
@@ -293,6 +298,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             if !messages.is_empty() {
                 messages[0] = Message::new("system", &refreshed_prompt);
             }
+            tool_defs = tool_extraction::build_agentic_tool_definitions(&refreshed_entries);
             cfg.skill_tool_entries = refreshed_entries;
             tools_changed = false;
             tracing::info!(agent_dir = %cfg.agent_dir.display(), "agentic: refreshed tool list after skill registration");
@@ -352,8 +358,8 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         // Trim context if conversation is getting long
         trim_context(&mut messages, context_token_budget(cfg.router_mode));
 
-        // LLM call
-        let response = match router.route(messages.clone()).await {
+        // LLM call with structured tool definitions for reliable tool invocation.
+        let response = match router.route_with_tools(messages.clone(), tool_defs.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = format!("LLM call failed: {}", e);
@@ -376,7 +382,14 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             }
         };
 
-        let (clean_content, tool_requests) = parse_tool_requests(&response.content);
+        // Unified tool extraction: structured first, legacy text fallback.
+        let extraction = tool_extraction::extract_tool_calls(&response);
+        let clean_content = extraction.clean_content;
+        let tool_requests: Vec<BirthToolRequest> = extraction
+            .tool_calls
+            .iter()
+            .map(BirthToolRequest::from)
+            .collect();
 
         // Emit thinking event
         if !clean_content.trim().is_empty() {

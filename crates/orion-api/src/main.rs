@@ -1,6 +1,7 @@
 mod agentic;
 mod chat_attachments;
 mod orchestration;
+pub(crate) mod tool_extraction;
 
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
@@ -12,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use orion_birth::{
     birth_chat_turn, build_birth_messages, build_birth_router, build_genesis_messages,
     detect_provider_from_key, execute_store_provider_key, extract_api_keys_from_text,
-    parse_tool_requests, redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
+    redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
 };
 use orion_core::system_prompt::{
     build_system_prompt, build_system_prompt_with_skills, SkillToolEntry,
@@ -44,8 +45,8 @@ use agentic::{
     MentorResponseRequest,
 };
 use chat_attachments::{
-    build_attachment_context_block, build_attachment_storage_note, load_attachment_context,
-    normalize_attachment_ids, should_block_tool_execution_for_attachments,
+    build_attachment_context_block, build_attachment_storage_note, has_attachments,
+    load_attachment_context, normalize_attachment_ids, should_block_tool_on_attachment_turn,
     store_uploaded_attachments, ChatAttachmentUploadResponse, UploadedAttachmentInput,
 };
 use orchestration::{
@@ -78,6 +79,7 @@ struct AppState {
     /// Scheduler interval for orchestration periodic jobs.
     orchestration_tick_seconds: u64,
     /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
+    #[allow(clippy::type_complexity)]
     skill_confirm_nonces:
         Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
 }
@@ -2919,8 +2921,8 @@ async fn api_operational_chat(
         load_attachment_context(&dir, &attachment_ids)
             .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?
     };
-    let has_attachments = !attachment_context_entries.is_empty();
-    let attachment_context_block = if has_attachments {
+    let has_attachment_context = !attachment_context_entries.is_empty();
+    let attachment_context_block = if has_attachment_context {
         Some(build_attachment_context_block(&attachment_context_entries))
     } else {
         None
@@ -3058,12 +3060,16 @@ async fn api_operational_chat(
     )
     .await;
 
+    // Build structured tool definitions for tool-aware routing.
+    let tool_defs = tool_extraction::build_tool_definitions(&skill_tool_entries);
+
     // Redact API keys from user message before storing
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
-    tracing::info!(agent = %id, "operational_chat: sending chat turn");
+    tracing::info!(agent = %id, tool_def_count = tool_defs.len(), "operational_chat: sending chat turn");
 
     // Pro-mode council path: for Pro tier with 2+ providers, run MoA DAG in Rust.
+    // Council does not support structured tool-calling; falls back to tool-aware route on failure.
     let response = if tier == ThinkingModelTier::Pro {
         let vault_for_pro = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
@@ -3111,8 +3117,8 @@ async fn api_operational_chat(
             {
                 Ok(council_response) => council_response,
                 Err(e) => {
-                    tracing::warn!(agent = %id, error = %e, "operational_chat: council failed, falling back to standard Ego");
-                    router.route(messages.clone()).await.map_err(|e| {
+                    tracing::warn!(agent = %id, error = %e, "operational_chat: council failed, falling back to tool-aware Ego");
+                    router.route_with_tools(messages.clone(), tool_defs.clone()).await.map_err(|e| {
                         (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             format!("Chat failed: {}", e),
@@ -3121,7 +3127,7 @@ async fn api_operational_chat(
                 }
             }
         } else {
-            router.route(messages.clone()).await.map_err(|e| {
+            router.route_with_tools(messages.clone(), tool_defs.clone()).await.map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Chat failed: {}", e),
@@ -3129,7 +3135,7 @@ async fn api_operational_chat(
             })?
         }
     } else {
-        router.route(messages.clone()).await.map_err(|e| {
+        router.route_with_tools(messages.clone(), tool_defs.clone()).await.map_err(|e| {
             tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -3138,8 +3144,14 @@ async fn api_operational_chat(
         })?
     };
 
-    // Parse tool_request blocks from LLM response
-    let (clean_content, tool_requests) = parse_tool_requests(&response.content);
+    // Unified tool extraction: structured tool_calls first, then legacy text blocks as fallback.
+    let extraction = tool_extraction::extract_tool_calls(&response);
+    let clean_content = extraction.clean_content;
+    let tool_requests: Vec<BirthToolRequest> = extraction
+        .tool_calls
+        .iter()
+        .map(BirthToolRequest::from)
+        .collect();
 
     tracing::info!(
         agent = %id,
@@ -3149,16 +3161,8 @@ async fn api_operational_chat(
         "operational_chat: chat turn complete"
     );
 
-    let block_tool_execution = should_block_tool_execution_for_attachments(&attachment_ids);
+    let attachment_turn = has_attachments(&attachment_ids);
     let mut blocked_tool_count: usize = 0;
-    if block_tool_execution && !tool_requests.is_empty() {
-        blocked_tool_count = tool_requests.len();
-        tracing::info!(
-            agent = %id,
-            blocked_tool_count = blocked_tool_count,
-            "operational_chat: blocked tool execution for attachment turn"
-        );
-    }
 
     // Execute skill tool requests (async — must happen outside spawn_blocking).
     // Supports multiple tool calls per turn for autonomous multi-step actions.
@@ -3166,7 +3170,15 @@ async fn api_operational_chat(
     let mut skill_tool_outputs: Vec<String> = Vec::new();
     let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
     for tr in &tool_requests {
-        if block_tool_execution {
+        // Risk-based attachment policy: block high-risk tools on attachment turns,
+        // allow read-only/low-risk tools so the agent can still act autonomously.
+        if attachment_turn && should_block_tool_on_attachment_turn(&tr.name) {
+            blocked_tool_count += 1;
+            tracing::info!(
+                agent = %id,
+                tool = %tr.name,
+                "operational_chat: blocked high-risk tool on attachment turn"
+            );
             continue;
         }
         if tr.name == "store_secret"
@@ -3273,10 +3285,10 @@ async fn api_operational_chat(
             "user", &feedback,
         ));
 
-        match router.route(messages).await {
+        match router.route_with_tools(messages, tool_defs.clone()).await {
             Ok(followup_response) => {
-                let (followup_clean, _) = parse_tool_requests(&followup_response.content);
-                followup_content = Some(followup_clean);
+                let followup_extraction = tool_extraction::extract_tool_calls(&followup_response);
+                followup_content = Some(followup_extraction.clean_content);
             }
             Err(e) => {
                 tracing::warn!("operational_chat: follow-up turn failed: {}", e);
@@ -3291,8 +3303,8 @@ async fn api_operational_chat(
     let final_content = followup_content.as_deref().unwrap_or(&clean_content);
     let attachment_notice = if blocked_tool_count > 0 {
         Some(format!(
-            "Attachment safety: I analyzed {} attachment(s) and did not execute tool requests in this turn. Ask explicitly if you want follow-up actions.",
-            attachment_ids.len()
+            "Attachment safety: {} high-risk tool(s) were blocked on this attachment turn. Read-only tools were allowed. Ask explicitly if you want me to execute write/shell actions.",
+            blocked_tool_count
         ))
     } else {
         None
@@ -3312,7 +3324,7 @@ async fn api_operational_chat(
         let redacted_assistant = redact_api_keys(&final_content_for_storage);
         let tools = tool_requests.clone();
         let skill_output_text = skill_tool_output_text.clone();
-        let allow_tool_execution = !block_tool_execution;
+        let allow_tool_execution = true; // credential tools are always allowed
         move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;

@@ -231,7 +231,7 @@ impl McpTrustPolicy {
         }
 
         // Otherwise, allow defaults + any configured hosts.
-        let in_defaults = MCP_DEFAULT_ALLOWED_HOSTS.iter().any(|h| *h == host);
+        let in_defaults = MCP_DEFAULT_ALLOWED_HOSTS.contains(&host);
         let in_configured = self.allowed_http_hosts.iter().any(|h| h == host);
         if in_defaults || in_configured {
             return Ok(());

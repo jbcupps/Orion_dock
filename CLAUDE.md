@@ -104,6 +104,17 @@ Orion Dock is a **Docker-first** Rust workspace for Orion's core agent logic, bi
 
 The **birth process is the key differentiator**: cryptographic identity, conversational discovery, and signed constitutional documents.
 
+### Agent Autonomy (Non-Negotiable)
+
+**Self-directed tool use is the primary purpose of this agent.** Every design decision must preserve the agent's ability to act independently using its registered skills. Security hardening, sandbox policies, and trust tiers exist to make autonomy *safe*, not to prevent it.
+
+Key invariants:
+- The agent must always attempt available tools before claiming inability.
+- Routing must pass structured tool definitions to providers (`route_with_tools`) so function-calling works reliably. Text-based `tool_request` blocks are a backward-compatible fallback, not the primary path.
+- Attachment turns allow read-only/low-risk tools; only high-risk mutation tools are blocked.
+- Missing API keys are a *solvable state*. The agent tells the mentor exactly what is needed — it never treats missing keys as permanent inability.
+- Any security change that degrades tool execution must include an autonomy regression test proving the agent can still perform its core tasks (search, browse, file access, shell execution, credential storage).
+
 ---
 
 ## Architecture
@@ -134,9 +145,9 @@ Default tier models are configured per provider (see `curated_provider_models()`
 
 The council has a 90-second overall timeout and degrades gracefully — if a provider fails during drafting or critique, the remaining providers continue. Falls back to standard Ego routing if the council fails entirely or fewer than 2 providers are available.
 
-### Cognitive Discipline (Karpathy Principles)
+### Cognitive Discipline (Karpathy Principles + Autonomy)
 
-The agent's cognitive model incorporates four operational principles derived from Andrej Karpathy's observations on LLM behavior. These are woven into the constitutional documents (instincts, ethics, soul) and the runtime system prompt:
+The agent's cognitive model incorporates five operational principles. Four are derived from Andrej Karpathy's observations on LLM behavior; the fifth ensures the agent acts on its capabilities rather than deferring. These are woven into the constitutional documents (instincts, ethics, soul) and the runtime system prompt:
 
 | Principle | Where It Lives | What It Does |
 |-----------|---------------|--------------|
@@ -144,12 +155,13 @@ The agent's cognitive model incorporates four operational principles derived fro
 | **Simplicity first** | Instincts (Precision Instinct), Ethics (Virtue), Operational Prompt | Prevents overengineering — minimum action that solves the problem, no speculative features |
 | **Surgical precision** | Instincts (Precision Instinct), Operational Prompt, Agentic Prompt | Constrains changes to only what was requested — no drive-by refactoring or adjacent "improvements" |
 | **Goal-driven execution** | Instincts (Precision Instinct), Operational Prompt, Agentic Prompt | Transforms vague tasks into verifiable success criteria; iterates with verification at each step |
+| **Autonomy first** | Instincts (Autonomy Instinct), Operational Prompt, Agentic Prompt | Agent attempts tools before claiming inability; exhausts fallbacks; treats missing keys as solvable |
 
 These principles appear at multiple layers:
-- **Instincts** (`instincts.md`): Pre-cognitive Deliberation and Precision instincts
+- **Instincts** (`instincts.md`): Pre-cognitive Deliberation, Precision, and Autonomy instincts
 - **Ethics** (`ethics.md`): "Simplicity over cleverness" and "precision over thoroughness" as virtues
 - **Soul** (`soul.md` / template): Nature statement: "I think before I act, I simplify before I build, I verify before I move on"
-- **System prompt** (`system_prompt.rs`): Cognitive Discipline section in operational awareness; goal-driven workflow in agentic mode
+- **System prompt** (`system_prompt.rs`): Cognitive Discipline section in operational awareness; Autonomy First section; goal-driven workflow in agentic mode
 - **Growth** (`GROWTH_MD`): Aspirational development of these disciplines over time
 
 ### Crate Map

@@ -82,8 +82,35 @@ pub fn normalize_attachment_ids(raw_ids: &[String]) -> Vec<String> {
     out
 }
 
-pub fn should_block_tool_execution_for_attachments(attachment_ids: &[String]) -> bool {
+/// Check if attachments are present (non-empty IDs).
+pub fn has_attachments(attachment_ids: &[String]) -> bool {
     attachment_ids.iter().any(|id| !id.trim().is_empty())
+}
+
+/// Legacy alias — kept to avoid breaking existing call sites during migration.
+#[allow(dead_code)]
+pub fn should_block_tool_execution_for_attachments(attachment_ids: &[String]) -> bool {
+    has_attachments(attachment_ids)
+}
+
+/// Tools considered high-risk (mutation / execution) that should be blocked on
+/// attachment turns unless the mentor explicitly requests follow-up actions.
+const HIGH_RISK_TOOLS: &[&str] = &[
+    "shell_execute",
+    "toolbox_exec",
+    "file_write",
+    "send_email",
+    "cooperative_install",
+];
+
+/// Determine whether a specific tool should be blocked on an attachment turn.
+///
+/// Low-risk / read-only tools (web_search, web_browse, file_read, file_list, http_get,
+/// perplexity_search, store_provider_key, store_vault_secret, etc.) are allowed so the
+/// agent can still act autonomously on information present in attachments.
+/// High-risk mutation/exec tools are blocked unless the mentor explicitly asks.
+pub fn should_block_tool_on_attachment_turn(tool_name: &str) -> bool {
+    HIGH_RISK_TOOLS.contains(&tool_name)
 }
 
 pub fn store_uploaded_attachments(
@@ -399,5 +426,20 @@ mod tests {
             "".to_string(),
             "x".to_string()
         ]));
+    }
+
+    #[test]
+    fn risk_based_tool_blocking() {
+        // High-risk tools blocked on attachment turns.
+        assert!(should_block_tool_on_attachment_turn("shell_execute"));
+        assert!(should_block_tool_on_attachment_turn("file_write"));
+        assert!(should_block_tool_on_attachment_turn("send_email"));
+        // Low-risk / read-only tools allowed.
+        assert!(!should_block_tool_on_attachment_turn("web_search"));
+        assert!(!should_block_tool_on_attachment_turn("web_browse"));
+        assert!(!should_block_tool_on_attachment_turn("file_read"));
+        assert!(!should_block_tool_on_attachment_turn("http_get"));
+        assert!(!should_block_tool_on_attachment_turn("store_provider_key"));
+        assert!(!should_block_tool_on_attachment_turn("perplexity_search"));
     }
 }
