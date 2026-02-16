@@ -2,7 +2,9 @@ mod agentic;
 mod chat_attachments;
 mod governed_chat;
 mod orchestration;
+pub(crate) mod tool_extraction;
 
+use axum::http::{header, HeaderValue, Method};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
@@ -13,7 +15,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use orion_birth::{
     birth_chat_turn, build_birth_messages, build_birth_router, build_genesis_messages,
     detect_provider_from_key, execute_store_provider_key, extract_api_keys_from_text,
-    parse_tool_requests, redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
+    redact_api_keys, BirthToolRequest, GenesisPath, SoulCrystallizationDepth,
 };
 use orion_core::system_prompt::{
     build_system_prompt, build_system_prompt_with_skills, RuntimeContext, SkillToolEntry,
@@ -44,9 +46,10 @@ use agentic::{
     MentorResponseRequest,
 };
 use chat_attachments::{
-    build_attachment_context_block, build_attachment_storage_note, load_attachment_context,
-    load_image_attachments, normalize_attachment_ids, should_block_tool_execution_for_attachments,
-    store_uploaded_attachments, ChatAttachmentUploadResponse, UploadedAttachmentInput,
+    build_attachment_context_block, build_attachment_storage_note, has_attachments,
+    load_attachment_context, load_image_attachments, normalize_attachment_ids,
+    should_block_tool_on_attachment_turn, store_uploaded_attachments, ChatAttachmentUploadResponse,
+    UploadedAttachmentInput,
 };
 use orchestration::{
     append_log_entry, assess_significance, build_id_check_prompt, create_job, decide_action,
@@ -79,6 +82,11 @@ struct AppState {
     email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
     /// Scheduler interval for orchestration periodic jobs.
     orchestration_tick_seconds: u64,
+    /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
+    #[allow(clippy::type_complexity)]
+    skill_confirm_nonces: Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
+    /// Superego L2 behavior mode.
+    superego_l2_mode: orion_router::SuperegoL2Mode,
 }
 
 fn data_root() -> Option<PathBuf> {
@@ -330,6 +338,45 @@ fn provider_supports_tier_models(provider: &str) -> bool {
     )
 }
 
+fn filter_operational_tools_for_mode(
+    entries: Vec<SkillToolEntry>,
+    mode: agentic::AgenticRouterMode,
+) -> Vec<SkillToolEntry> {
+    match mode {
+        // Fast mode should stay low-latency and avoid multi-hop browser navigation.
+        agentic::AgenticRouterMode::Auto => entries
+            .into_iter()
+            .filter(|e| e.tool_name != "web_browse")
+            .collect(),
+        agentic::AgenticRouterMode::ThinkHard | agentic::AgenticRouterMode::ThinkHarder => entries,
+    }
+}
+
+fn mode_profile_name(mode: agentic::AgenticRouterMode) -> &'static str {
+    match mode {
+        agentic::AgenticRouterMode::Auto => "fast",
+        agentic::AgenticRouterMode::ThinkHard => "standard",
+        agentic::AgenticRouterMode::ThinkHarder => "pro",
+    }
+}
+
+fn tools_profile_name(mode: agentic::AgenticRouterMode) -> &'static str {
+    match mode {
+        agentic::AgenticRouterMode::Auto => "minimal",
+        agentic::AgenticRouterMode::ThinkHard | agentic::AgenticRouterMode::ThinkHarder => "full",
+    }
+}
+
+/// List provider names from the vault, stripping the `provider:` namespace prefix.
+/// Only returns entries with the `provider:` prefix (excludes email keys etc.).
+fn vault_provider_names(vault: &SecretsVault) -> Vec<String> {
+    vault
+        .list_providers()
+        .into_iter()
+        .filter_map(|k| k.strip_prefix("provider:").map(String::from))
+        .collect()
+}
+
 fn resolve_ego_credentials_with_preference(
     vault: &SecretsVault,
     preference: Option<&str>,
@@ -337,17 +384,17 @@ fn resolve_ego_credentials_with_preference(
     // If explicit preference is set and has a key, use it first.
     if let Some(pref) = preference {
         let normalized = AppConfig::normalize_provider_name(pref);
-        if let Some(key) = vault.get_secret(&normalized) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
             return (Some(normalized), Some(key.to_string()));
         }
     }
     // Default: anthropic > openai > first available non-tavily key.
-    let providers = vault.list_providers();
+    let providers = vault_provider_names(vault);
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;
     let mut found_key: Option<String> = None;
     for pref in &preferred {
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             found_name = Some(pref.to_string());
             found_key = Some(key.to_string());
             break;
@@ -355,9 +402,9 @@ fn resolve_ego_credentials_with_preference(
     }
     if found_name.is_none() {
         for p in &providers {
-            if *p != "tavily" {
-                if let Some(key) = vault.get_secret(p) {
-                    found_name = Some(p.to_string());
+            if p != "tavily" {
+                if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
+                    found_name = Some(p.clone());
                     found_key = Some(key.to_string());
                     break;
                 }
@@ -365,6 +412,37 @@ fn resolve_ego_credentials_with_preference(
         }
     }
     (found_name, found_key)
+}
+
+fn resolve_superego_credentials_with_preference(
+    config: &AppConfig,
+    vault: &SecretsVault,
+    ego_name: Option<&str>,
+    ego_key: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if let Some(trinity) = &config.trinity {
+        if let Some(provider) = trinity.superego_provider.as_deref() {
+            let normalized = AppConfig::normalize_provider_name(provider);
+            if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
+                return (Some(normalized), Some(key.to_string()));
+            }
+        }
+    }
+
+    (ego_name.map(str::to_string), ego_key.map(str::to_string))
+}
+
+fn parse_superego_l2_mode() -> orion_router::SuperegoL2Mode {
+    match std::env::var("SUPEREGO_L2_MODE")
+        .unwrap_or_else(|_| "off".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "advisory" => orion_router::SuperegoL2Mode::Advisory,
+        "enforce" => orion_router::SuperegoL2Mode::Enforce,
+        _ => orion_router::SuperegoL2Mode::Off,
+    }
 }
 
 #[derive(Serialize)]
@@ -617,8 +695,7 @@ async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
-async fn api_identities(
-) -> Result<Json<IdentitiesResponse>, (axum::http::StatusCode, String)> {
+async fn api_identities() -> Result<Json<IdentitiesResponse>, (axum::http::StatusCode, String)> {
     let root = data_root().ok_or_else(|| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -686,8 +763,8 @@ struct SetMentorNameRequest {
     mentor_name: String,
 }
 
-async fn api_get_mentor_name(
-) -> Result<Json<MentorNameResponse>, (axum::http::StatusCode, String)> {
+async fn api_get_mentor_name() -> Result<Json<MentorNameResponse>, (axum::http::StatusCode, String)>
+{
     let root = data_root().ok_or_else(|| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -696,9 +773,7 @@ async fn api_get_mentor_name(
     })?;
     let gc_path = GlobalConfig::config_path(&root);
     let mentor_name = if gc_path.exists() {
-        GlobalConfig::load(&root)
-            .ok()
-            .and_then(|gc| gc.mentor_name)
+        GlobalConfig::load(&root).ok().and_then(|gc| gc.mentor_name)
     } else {
         None
     };
@@ -1414,8 +1489,7 @@ async fn api_genesis_start(
                 .clone()
                 .unwrap_or_else(|| "Agent".to_string());
             let docs_dir = config.docs_dir.clone();
-            std::fs::create_dir_all(&docs_dir)
-                .map_err(|e| format!("Create docs dir: {}", e))?;
+            std::fs::create_dir_all(&docs_dir).map_err(|e| format!("Create docs dir: {}", e))?;
 
             let soul_content = fill_soul_template_default(&agent_name);
             std::fs::write(docs_dir.join("soul.md"), &soul_content)
@@ -1427,10 +1501,8 @@ async fn api_genesis_start(
             std::fs::write(docs_dir.join("growth.md"), GROWTH_MD)
                 .map_err(|e| format!("Write growth.md: {}", e))?;
 
-            let signing_key = orion_core::parse_private_key(
-                &BASE64.encode(&key_bytes),
-            )
-            .map_err(|e| format!("Parse signing key: {}", e))?;
+            let signing_key = orion_core::parse_private_key(&BASE64.encode(&key_bytes))
+                .map_err(|e| format!("Parse signing key: {}", e))?;
             orion_core::sign_constitutional_documents(&signing_key, &docs_dir)
                 .map_err(|e| format!("Sign docs: {}", e))?;
 
@@ -1926,11 +1998,7 @@ async fn api_connectivity_providers(
 
     let vault = SecretsVault::load(dir)
         .unwrap_or_else(|_| SecretsVault::new(agent_dir(&id).unwrap_or_default()));
-    let providers: Vec<String> = vault
-        .list_providers()
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let providers: Vec<String> = vault_provider_names(&vault);
     Ok(Json(ProvidersResponse { providers }))
 }
 
@@ -1967,8 +2035,8 @@ async fn api_agent_tier_models(
         .filter(|p| provider_supports_tier_models(p));
 
     let mut providers: Vec<String> = Vec::new();
-    for p in vault.list_providers() {
-        let normalized = AppConfig::normalize_provider_name(p);
+    for p in vault_provider_names(&vault) {
+        let normalized = AppConfig::normalize_provider_name(&p);
         if provider_supports_tier_models(&normalized) && !providers.contains(&normalized) {
             providers.push(normalized);
         }
@@ -2105,17 +2173,16 @@ async fn api_agent_tier_models_refresh(
     let targets: Vec<String> = if let Some(ref p) = body.provider {
         vec![AppConfig::normalize_provider_name(p)]
     } else {
-        vault
-            .list_providers()
+        vault_provider_names(&vault)
             .into_iter()
-            .map(AppConfig::normalize_provider_name)
+            .map(|p| AppConfig::normalize_provider_name(&p))
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };
 
     let mut refreshed: Vec<String> = Vec::new();
     for provider in &targets {
-        if let Some(key) = vault.get_secret(provider) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
             let entry =
                 orion_capabilities::cognitive::model_catalog::refresh_catalog(provider, key).await;
             config.provider_catalog.insert(provider.clone(), entry);
@@ -2164,10 +2231,9 @@ async fn api_agent_tier_models_validate(
     let targets: Vec<String> = if let Some(ref p) = body.provider {
         vec![AppConfig::normalize_provider_name(p)]
     } else {
-        vault
-            .list_providers()
+        vault_provider_names(&vault)
             .into_iter()
-            .map(AppConfig::normalize_provider_name)
+            .map(|p| AppConfig::normalize_provider_name(&p))
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };
@@ -2176,7 +2242,7 @@ async fn api_agent_tier_models_validate(
     for provider in &targets {
         let tiers = config.effective_tier_models(provider);
         let key = vault
-            .get_secret(provider)
+            .get_secret(&format!("provider:{}", provider))
             .map(|s| s.to_string())
             .unwrap_or_default();
 
@@ -2397,9 +2463,8 @@ async fn api_connectivity_remove_key(
     }
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut vault =
-            SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
-        if !vault.remove_secret(&provider) {
+        let mut vault = SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
+        if !vault.remove_secret(&format!("provider:{}", provider)) {
             return Err(format!("No key stored for provider: {}", provider));
         }
         vault.save().map_err(|e| format!("Save vault: {}", e))?;
@@ -2499,11 +2564,7 @@ async fn api_connectivity_chat(
 
             let vault = SecretsVault::load(config.data_dir.clone())
                 .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-            let stored: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let stored: Vec<String> = vault_provider_names(&vault);
 
             let conversation: Vec<(String, String)> = orch
                 .get_conversation()
@@ -2679,11 +2740,7 @@ async fn api_connectivity_chat(
                 }
             }
 
-            let stored: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let stored: Vec<String> = vault_provider_names(&vault);
 
             // Persist conversation
             let updated: Vec<BirthChatMessage> = orch
@@ -2842,6 +2899,8 @@ struct OperationalChatResponseBody {
     context_warning: Option<ContextWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_archived: Option<AutoArchivedInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_telemetry: Option<RoutingTelemetry>,
 }
 
 #[derive(Serialize, Clone)]
@@ -2856,6 +2915,19 @@ struct ContextWarning {
 struct AutoArchivedInfo {
     archive_id: String,
     message_count: usize,
+}
+
+#[derive(Serialize, Clone)]
+struct RoutingTelemetry {
+    mode_profile: String,
+    tools_profile: String,
+    requested_router_mode: String,
+    routing_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_model: Option<String>,
+    governor_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -2878,6 +2950,40 @@ fn strip_tool_result_block(content: &str) -> String {
         .split_once("\n\n[Tool Result]\n")
         .map(|(clean, _)| clean.to_string())
         .unwrap_or_else(|| content.to_string())
+}
+
+fn looks_like_provisional_tool_message(content: &str) -> bool {
+    let normalized = content.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+    let markers = [
+        "let me check",
+        "i'll check",
+        "i will check",
+        "let me look",
+        "one moment",
+        "hang on",
+        "searching",
+        "looking that up",
+    ];
+    markers.iter().any(|m| normalized.contains(m))
+}
+
+fn format_fast_tool_reply(output_text: &str) -> String {
+    let cleaned = output_text
+        .lines()
+        .map(|line| {
+            if line.starts_with('[') {
+                if let Some(idx) = line.find("] ") {
+                    return line[idx + 2..].to_string();
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    format!("Here's what I found:\n\n{}", cleaned.trim())
 }
 
 /// POST /api/agents/{id}/chat/attachments — upload and parse attachments for operational chat.
@@ -3150,10 +3256,7 @@ async fn api_get_chat_archive(
 
 /// Estimate token count using character-based heuristic.
 fn estimate_token_count(messages: &[orion_capabilities::cognitive::Message]) -> usize {
-    messages
-        .iter()
-        .map(|m| (m.content.len() / 4) + 4)
-        .sum()
+    messages.iter().map(|m| (m.content.len() / 4) + 4).sum()
 }
 
 /// Look up context window size for a model by name (well-known defaults).
@@ -3163,10 +3266,12 @@ fn lookup_context_window(model: &str) -> usize {
         128_000
     } else if m.contains("gpt-3.5") {
         16_384
-    } else if m.contains("claude-opus") || m.contains("claude-sonnet") || m.contains("claude-haiku")
+    } else if m.contains("claude-opus")
+        || m.contains("claude-sonnet")
+        || m.contains("claude-haiku")
+        || m.contains("o3")
+        || m.contains("o4")
     {
-        200_000
-    } else if m.contains("o3") || m.contains("o4") {
         200_000
     } else if m.contains("gemini") {
         1_000_000
@@ -3228,6 +3333,7 @@ async fn api_operational_chat(
     })?;
 
     let user_message = body.message.trim().to_string();
+    let requested_router_mode = body.router_mode.unwrap_or(agentic::AgenticRouterMode::Auto);
     let attachment_ids = normalize_attachment_ids(&body.attachment_ids);
     if user_message.is_empty() && attachment_ids.is_empty() {
         return Err((
@@ -3243,8 +3349,8 @@ async fn api_operational_chat(
         load_attachment_context(&dir, &attachment_ids)
             .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?
     };
-    let has_attachments = !attachment_context_entries.is_empty();
-    let attachment_context_block = if has_attachments {
+    let has_attachment_context = !attachment_context_entries.is_empty();
+    let attachment_context_block = if has_attachment_context {
         Some(build_attachment_context_block(&attachment_context_entries))
     } else {
         None
@@ -3299,17 +3405,16 @@ async fn api_operational_chat(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Build system prompt from constitutional docs with dynamic skill tools
-    let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
+    let skill_tool_entries = filter_operational_tools_for_mode(
+        build_skill_tool_entries(&state.skill_registry),
+        requested_router_mode,
+    );
 
     // Load vault provider names for system prompt awareness
     let vault_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault
-            .list_providers()
-            .into_iter()
-            .map(String::from)
-            .collect()
+        vault_provider_names(&vault)
     };
 
     // Sync agent secrets into the shared skill vault so plugins can see them.
@@ -3336,7 +3441,8 @@ async fn api_operational_chat(
     };
 
     // Load raw image bytes for vision model support
-    let vision_images: Vec<orion_capabilities::cognitive::ImageContent> = if has_attachments {
+    let vision_images: Vec<orion_capabilities::cognitive::ImageContent> = if has_attachment_context
+    {
         load_image_attachments(&dir, &attachment_ids)
             .into_iter()
             .map(|img| orion_capabilities::cognitive::ImageContent {
@@ -3382,7 +3488,6 @@ async fn api_operational_chat(
             config.active_provider_preference.as_deref(),
         )
     };
-    let requested_router_mode = body.router_mode.unwrap_or(agentic::AgenticRouterMode::Auto);
     let tier = match requested_router_mode {
         agentic::AgenticRouterMode::Auto => ThinkingModelTier::Fast,
         agentic::AgenticRouterMode::ThinkHard => ThinkingModelTier::Standard,
@@ -3408,24 +3513,42 @@ async fn api_operational_chat(
         "operational_chat: building router"
     );
 
-    let active_model_name = ego_model
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+    let active_model_name = ego_model.clone().unwrap_or_else(|| "unknown".to_string());
 
-    let router = orion_router::IdEgoRouter::with_provider_auto_detect(
+    let ego_name_for_sup = ego_name.clone();
+    let ego_key_for_sup = ego_key.clone();
+    let mut router = orion_router::IdEgoRouter::with_provider_auto_detect(
         config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
-        ego_model,
+        ego_model.clone(),
         effective_routing_mode,
     )
     .await;
+    if state.superego_l2_mode != orion_router::SuperegoL2Mode::Off {
+        let vault = SecretsVault::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        let (sup_name, sup_key) = resolve_superego_credentials_with_preference(
+            &config,
+            &vault,
+            ego_name_for_sup.as_deref(),
+            ego_key_for_sup.as_deref(),
+        );
+        if let Some(key) = sup_key {
+            let (provider, _) =
+                orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
+            if let Some(provider) = provider {
+                router = router.with_superego_config(provider, sup_name, state.superego_l2_mode);
+            }
+        }
+    }
 
     // Context window tracking: estimate usage and detect if near limit
     let estimated_tokens = estimate_token_count(&messages);
     let context_window = lookup_context_window(&active_model_name);
 
-    let usage_percent = ((estimated_tokens as f64 / context_window as f64) * 100.0).min(100.0) as u8;
+    let usage_percent =
+        ((estimated_tokens as f64 / context_window as f64) * 100.0).min(100.0) as u8;
 
     // Auto-archive at 90%+ context usage
     let mut auto_archived: Option<AutoArchivedInfo> = None;
@@ -3472,6 +3595,8 @@ async fn api_operational_chat(
         None
     };
 
+    // Build structured tool definitions for tool-aware routing.
+    let tool_defs = tool_extraction::build_tool_definitions(&skill_tool_entries);
     // Redact API keys from user message before storing
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
@@ -3480,9 +3605,17 @@ async fn api_operational_chat(
     // looks like it involves tool usage, route through the Execution Governor
     // for structured planning, loop detection, and recovery.
     // ═══════════════════════════════════════════════════════════════════════
-    let use_governor = !skill_tool_entries.is_empty()
-        && ego_name.is_some()
-        && body.use_governor.unwrap_or(false);
+    let use_governor =
+        !skill_tool_entries.is_empty() && ego_name.is_some() && body.use_governor.unwrap_or(false);
+    let routing_telemetry = RoutingTelemetry {
+        mode_profile: mode_profile_name(requested_router_mode).to_string(),
+        tools_profile: tools_profile_name(requested_router_mode).to_string(),
+        requested_router_mode: format!("{:?}", requested_router_mode),
+        routing_mode: format!("{:?}", effective_routing_mode),
+        active_provider: ego_name.clone(),
+        active_model: ego_model.clone(),
+        governor_enabled: use_governor,
+    };
 
     if use_governor {
         tracing::info!(agent = %id, "operational_chat: using Execution Governor path");
@@ -3523,9 +3656,7 @@ async fn api_operational_chat(
                 system_prompt: system_prompt.clone(),
                 conversation_history: history
                     .iter()
-                    .map(|m| {
-                        orion_capabilities::cognitive::Message::new(&m.role, &m.content)
-                    })
+                    .map(|m| orion_capabilities::cognitive::Message::new(&m.role, &m.content))
                     .collect(),
             };
 
@@ -3571,11 +3702,8 @@ async fn api_operational_chat(
                         role: "assistant".to_string(),
                         content: redacted_assistant,
                     });
-                    std::fs::write(
-                        &chat_path,
-                        serde_json::to_string_pretty(&updated).unwrap(),
-                    )
-                    .map_err(|e| format!("Write: {}", e))?;
+                    std::fs::write(&chat_path, serde_json::to_string_pretty(&updated).unwrap())
+                        .map_err(|e| format!("Write: {}", e))?;
                     Ok(())
                 }
             })
@@ -3589,13 +3717,19 @@ async fn api_operational_chat(
                 attachment_notice: None,
                 context_warning,
                 auto_archived,
+                routing_telemetry: Some(routing_telemetry.clone()),
             }));
         }
     }
 
-    tracing::info!(agent = %id, "operational_chat: sending chat turn");
+    tracing::info!(
+        agent = %id,
+        tool_def_count = tool_defs.len(),
+        "operational_chat: sending chat turn"
+    );
 
     // Pro-mode council path: for Pro tier with 2+ providers, run MoA DAG in Rust.
+    // Council does not support structured tool-calling; falls back to tool-aware route on failure.
     let response = if tier == ThinkingModelTier::Pro {
         let vault_for_pro = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
@@ -3643,35 +3777,50 @@ async fn api_operational_chat(
             {
                 Ok(council_response) => council_response,
                 Err(e) => {
-                    tracing::warn!(agent = %id, error = %e, "operational_chat: council failed, falling back to standard Ego");
-                    router.route(messages.clone()).await.map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Chat failed: {}", e),
-                        )
-                    })?
+                    tracing::warn!(agent = %id, error = %e, "operational_chat: council failed, falling back to tool-aware Ego");
+                    router
+                        .route_with_tools(messages.clone(), tool_defs.clone())
+                        .await
+                        .map_err(|e| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Chat failed: {}", e),
+                            )
+                        })?
                 }
             }
         } else {
-            router.route(messages.clone()).await.map_err(|e| {
+            router
+                .route_with_tools(messages.clone(), tool_defs.clone())
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Chat failed: {}", e),
+                    )
+                })?
+        }
+    } else {
+        router
+            .route_with_tools(messages.clone(), tool_defs.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Chat failed: {}", e),
                 )
             })?
-        }
-    } else {
-        router.route(messages.clone()).await.map_err(|e| {
-            tracing::error!(agent = %id, error = %e, "operational_chat: chat turn failed");
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Chat failed: {}", e),
-            )
-        })?
     };
 
-    // Parse tool_request blocks from LLM response
-    let (clean_content, tool_requests) = parse_tool_requests(&response.content);
+    // Unified tool extraction: structured tool_calls first, then legacy text blocks as fallback.
+    let extraction = tool_extraction::extract_tool_calls(&response);
+    let clean_content = extraction.clean_content;
+    let tool_requests: Vec<BirthToolRequest> = extraction
+        .tool_calls
+        .iter()
+        .map(BirthToolRequest::from)
+        .collect();
 
     tracing::info!(
         agent = %id,
@@ -3681,16 +3830,16 @@ async fn api_operational_chat(
         "operational_chat: chat turn complete"
     );
 
-    let block_tool_execution = should_block_tool_execution_for_attachments(&attachment_ids);
+    let attachment_turn = has_attachments(&attachment_ids);
     let mut blocked_tool_count: usize = 0;
-    if block_tool_execution && !tool_requests.is_empty() {
-        blocked_tool_count = tool_requests.len();
-        tracing::info!(
-            agent = %id,
-            blocked_tool_count = blocked_tool_count,
-            "operational_chat: blocked tool execution for attachment turn"
-        );
-    }
+    let advisory_code = match router.superego_check(&message_for_model).await {
+        orion_router::SuperegoResult::Advisory { code, .. } => code,
+        _ => None,
+    };
+    let capability_envelope = orion_core::evaluate_user_message_for_capabilities(
+        &message_for_model,
+        advisory_code.as_deref(),
+    );
 
     // Execute skill tool requests (async — must happen outside spawn_blocking).
     // Supports multiple tool calls per turn for autonomous multi-step actions.
@@ -3698,7 +3847,15 @@ async fn api_operational_chat(
     let mut skill_tool_outputs: Vec<String> = Vec::new();
     let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
     for tr in &tool_requests {
-        if block_tool_execution {
+        // Risk-based attachment policy: block high-risk tools on attachment turns,
+        // allow read-only/low-risk tools so the agent can still act autonomously.
+        if attachment_turn && should_block_tool_on_attachment_turn(&tr.name) {
+            blocked_tool_count += 1;
+            tracing::info!(
+                agent = %id,
+                tool = %tr.name,
+                "operational_chat: blocked high-risk tool on attachment turn"
+            );
             continue;
         }
         if tr.name == "store_secret"
@@ -3708,7 +3865,7 @@ async fn api_operational_chat(
             continue; // handled in the blocking section below
         }
         // Try to match against registered skill tools
-        if let Some((skill_id, _tool_desc)) =
+        if let Some((skill_id, tool_desc)) =
             agentic::find_skill_for_tool(&state.skill_registry, &tr.name)
         {
             let skill_name = state
@@ -3728,6 +3885,54 @@ async fn api_operational_chat(
                     "operational_chat: tool arguments not a JSON object"
                 );
             }
+            let gate =
+                orion_core::evaluate_tool_request(&tr.name, &tr.arguments, &capability_envelope);
+            if !gate.allowed {
+                let reason_code = gate.reason_code.unwrap_or("SAFETY_BLOCK");
+                let reason_text = gate
+                    .reason_text
+                    .unwrap_or_else(|| "Blocked by capability safety policy".to_string());
+                tracing::info!(
+                    agent = %id,
+                    tool = %tr.name,
+                    reason_code = %reason_code,
+                    reason = %reason_text,
+                    "operational_chat: tool blocked by capability gate"
+                );
+                let output = format!(
+                    "Blocked by safety policy ({}): {}",
+                    reason_code, reason_text
+                );
+                skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                skill_tool_log.push(OperationalToolLogEntry {
+                    tool_name: tr.name.clone(),
+                    skill_name: Some(skill_name.clone()),
+                    success: false,
+                    output,
+                });
+                continue;
+            }
+
+            if tool_desc.requires_confirmation || gate.require_confirmation {
+                let output = format!(
+                    "Tool '{}' requires confirmation and was not executed in operational chat.",
+                    tr.name
+                );
+                tracing::info!(
+                    agent = %id,
+                    tool = %tr.name,
+                    "operational_chat: requires_confirmation tool blocked by server policy"
+                );
+                skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                skill_tool_log.push(OperationalToolLogEntry {
+                    tool_name: tr.name.clone(),
+                    skill_name: Some(skill_name.clone()),
+                    success: false,
+                    output,
+                });
+                continue;
+            }
+
             tracing::info!(
                 tool = %tr.name,
                 skill = %skill_id,
@@ -3804,44 +4009,62 @@ async fn api_operational_chat(
         Some(skill_tool_outputs.join("\n\n"))
     };
 
-    // Tool feedback loop: if skill tools produced output, feed results back for ONE follow-up LLM call.
-    // This prevents hallucination — the LLM sees actual tool results and can summarize them accurately.
+    // Tool feedback loop: in Standard/Pro, feed tool output back for ONE follow-up LLM call.
+    // Fast mode is intentionally single-pass for lower latency and simpler routing.
     let mut followup_content: Option<String> = None;
-    if let Some(ref output_text) = skill_tool_output_text {
-        let feedback = format!("## Tool Results\n\n{}", output_text);
-        messages.push(orion_capabilities::cognitive::Message::new(
-            "assistant",
-            &clean_content,
-        ));
-        messages.push(orion_capabilities::cognitive::Message::new(
-            "user", &feedback,
-        ));
+    if requested_router_mode != agentic::AgenticRouterMode::Auto {
+        if let Some(ref output_text) = skill_tool_output_text {
+            let feedback = format!("## Tool Results\n\n{}", output_text);
+            messages.push(orion_capabilities::cognitive::Message::new(
+                "assistant",
+                &clean_content,
+            ));
+            messages.push(orion_capabilities::cognitive::Message::new(
+                "user", &feedback,
+            ));
 
-        match router.route(messages).await {
-            Ok(followup_response) => {
-                let (followup_clean, _) = parse_tool_requests(&followup_response.content);
-                followup_content = Some(followup_clean);
-            }
-            Err(e) => {
-                tracing::warn!("operational_chat: follow-up turn failed: {}", e);
-                // Fall back to original response — no followup_content set
+            match router.route_with_tools(messages, tool_defs.clone()).await {
+                Ok(followup_response) => {
+                    let followup_extraction =
+                        tool_extraction::extract_tool_calls(&followup_response);
+                    followup_content = Some(followup_extraction.clean_content);
+                }
+                Err(e) => {
+                    tracing::warn!("operational_chat: follow-up turn failed: {}", e);
+                    // Fall back to original response — no followup_content set
+                }
             }
         }
+    } else {
+        tracing::debug!("operational_chat: skipping follow-up tool synthesis in Fast mode");
     }
 
     // Blocking 2: execute credential tool requests, persist conversation with redacted content.
     let config_path_2 = config_path.clone();
     let raw_user_message = user_message.clone();
-    let final_content = followup_content.as_deref().unwrap_or(&clean_content);
+    let fast_tool_fallback = if requested_router_mode == agentic::AgenticRouterMode::Auto
+        && followup_content.is_none()
+        && looks_like_provisional_tool_message(&clean_content)
+    {
+        skill_tool_output_text
+            .as_ref()
+            .map(|output| format_fast_tool_reply(output))
+    } else {
+        None
+    };
+    let final_content = followup_content
+        .clone()
+        .or(fast_tool_fallback)
+        .unwrap_or_else(|| clean_content.clone());
     let attachment_notice = if blocked_tool_count > 0 {
         Some(format!(
-            "Attachment safety: I analyzed {} attachment(s) and did not execute tool requests in this turn. Ask explicitly if you want follow-up actions.",
-            attachment_ids.len()
+            "Attachment safety: {} high-risk tool(s) were blocked on this attachment turn. Read-only tools were allowed. Ask explicitly if you want me to execute write/shell actions.",
+            blocked_tool_count
         ))
     } else {
         None
     };
-    let mut final_content_for_storage = final_content.to_string();
+    let mut final_content_for_storage = final_content;
     if let Some(note) = &attachment_notice {
         if !final_content_for_storage.trim().is_empty() {
             final_content_for_storage.push_str("\n\n");
@@ -3856,7 +4079,7 @@ async fn api_operational_chat(
         let redacted_assistant = redact_api_keys(&final_content_for_storage);
         let tools = tool_requests.clone();
         let skill_output_text = skill_tool_output_text.clone();
-        let allow_tool_execution = !block_tool_execution;
+        let allow_tool_execution = true; // credential tools are always allowed
         move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;
@@ -3952,11 +4175,7 @@ async fn api_operational_chat(
                 }
             }
 
-            let providers: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let providers: Vec<String> = vault_provider_names(&vault);
 
             // Persist conversation with redacted content (include skill output if any)
             let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
@@ -4015,6 +4234,7 @@ async fn api_operational_chat(
         attachment_notice,
         context_warning,
         auto_archived,
+        routing_telemetry: Some(routing_telemetry),
     }))
 }
 
@@ -4049,12 +4269,7 @@ async fn api_operational_chat_stream(
             .await;
 
         // Delegate to the existing handler
-        let result = api_operational_chat(
-            State(state_clone),
-            Path(id_clone),
-            Json(body),
-        )
-        .await;
+        let result = api_operational_chat(State(state_clone), Path(id_clone), Json(body)).await;
 
         match result {
             Ok(Json(response)) => {
@@ -4065,11 +4280,7 @@ async fn api_operational_chat_stream(
                     .await;
             }
             Err((_, err)) => {
-                let _ = tx
-                    .send(ChatStreamEvent::Error {
-                        message: err,
-                    })
-                    .await;
+                let _ = tx.send(ChatStreamEvent::Error { message: err }).await;
             }
         }
     });
@@ -4105,6 +4316,7 @@ async fn api_operational_chat_stream(
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ChatStreamEvent {
     Status { phase: String },
     Token { text: String },
@@ -4167,12 +4379,8 @@ async fn api_agent_identity(
             }
             let gc = GlobalConfig::load(&root).ok()?;
             let lineage_sig_path = dir.join("hive_lineage.sig");
-            orion_core::verify_agent_lineage(
-                &gc.master_key_path,
-                &pubkey_path,
-                &lineage_sig_path,
-            )
-            .ok()
+            orion_core::verify_agent_lineage(&gc.master_key_path, &pubkey_path, &lineage_sig_path)
+                .ok()
         })
         .unwrap_or(false);
 
@@ -4801,7 +5009,7 @@ async fn api_import_agent(
         for (provider, secret_value) in provider_secrets {
             if let Some(secret) = secret_value.as_str() {
                 if !secret.trim().is_empty() {
-                    vault.set_secret(provider, secret);
+                    vault.set_secret(&format!("provider:{}", provider), secret);
                 }
             }
         }
@@ -4961,10 +5169,10 @@ async fn api_export_agent(
         )
     })?;
     let mut provider_secrets = serde_json::Map::new();
-    for provider in vault.list_providers() {
-        if let Some(secret) = vault.get_secret(provider) {
+    for provider in vault_provider_names(&vault) {
+        if let Some(secret) = vault.get_secret(&format!("provider:{}", provider)) {
             provider_secrets.insert(
-                provider.to_string(),
+                provider.clone(),
                 serde_json::Value::String(secret.to_string()),
             );
         }
@@ -5131,6 +5339,12 @@ struct SkillExecuteRequest {
     tool: String,
     #[serde(default)]
     params: serde_json::Value,
+    /// Set to true on the second call to confirm a requires_confirmation tool.
+    #[serde(default)]
+    confirm: bool,
+    /// Nonce from the first call's confirmation_required response.
+    #[serde(default)]
+    nonce: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5140,6 +5354,16 @@ struct SkillExecuteResponse {
     data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_required: Option<ConfirmationInfo>,
+}
+
+#[derive(Serialize)]
+struct ConfirmationInfo {
+    tool: String,
+    skill_id: String,
+    nonce: String,
+    message: String,
 }
 
 /// GET /api/agents/{id}/skills — list registered skills with trust tiers and tools.
@@ -5218,6 +5442,75 @@ async fn api_execute_skill(
     }
 
     let sid = orion_skills::manifest::SkillId(skill_id.clone());
+    let envelope = orion_core::evaluate_user_message_for_capabilities("", None);
+    let gate = orion_core::evaluate_tool_request(&body.tool, &body.params, &envelope);
+    if !gate.allowed {
+        let code = gate.reason_code.unwrap_or("SAFETY_BLOCK");
+        let text = gate
+            .reason_text
+            .unwrap_or_else(|| "Blocked by capability safety policy".to_string());
+        return Ok(Json(SkillExecuteResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Blocked by safety policy ({}): {}", code, text)),
+            confirmation_required: None,
+        }));
+    }
+
+    // --- Confirmation enforcement ---
+    if state.skill_executor.requires_confirmation(&sid, &body.tool) {
+        if body.confirm {
+            // Validate nonce
+            let nonce = body.nonce.as_deref().unwrap_or("");
+            let mut nonces = state.skill_confirm_nonces.lock().await;
+            // Clean expired nonces (>5 min)
+            let now = std::time::Instant::now();
+            nonces.retain(|_, (_, _, created)| now.duration_since(*created).as_secs() < 300);
+            match nonces.remove(nonce) {
+                Some((ref ns, ref nt, created))
+                    if *ns == skill_id
+                        && *nt == body.tool
+                        && now.duration_since(created).as_secs() < 300 =>
+                {
+                    // Valid nonce — fall through to execution
+                }
+                Some(_) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "Confirmation nonce does not match this tool/skill".to_string(),
+                    ));
+                }
+                None => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "Invalid or expired confirmation nonce".to_string(),
+                    ));
+                }
+            }
+        } else {
+            // Issue nonce
+            let nonce = Uuid::new_v4().to_string();
+            let mut nonces = state.skill_confirm_nonces.lock().await;
+            // Clean expired nonces
+            let now = std::time::Instant::now();
+            nonces.retain(|_, (_, _, created)| now.duration_since(*created).as_secs() < 300);
+            nonces.insert(nonce.clone(), (skill_id.clone(), body.tool.clone(), now));
+            return Ok(Json(SkillExecuteResponse {
+                success: false,
+                data: None,
+                error: None,
+                confirmation_required: Some(ConfirmationInfo {
+                    tool: body.tool.clone(),
+                    skill_id: skill_id.clone(),
+                    nonce,
+                    message: format!(
+                        "Tool '{}' in skill '{}' requires confirmation before execution",
+                        body.tool, skill_id
+                    ),
+                }),
+            }));
+        }
+    }
 
     // Convert JSON params to ToolParams
     let mut tool_params = orion_skills::skill::ToolParams::new();
@@ -5236,11 +5529,13 @@ async fn api_execute_skill(
             success: output.success,
             data: output.data,
             error: output.error,
+            confirmation_required: None,
         })),
         Err(e) => Ok(Json(SkillExecuteResponse {
             success: false,
             data: None,
             error: Some(e.to_string()),
+            confirmation_required: None,
         })),
     }
 }
@@ -5406,11 +5701,20 @@ fn sync_agent_vault_to_skills(
             return;
         }
     };
+    let mut alias_count = 0usize;
     for (name, val) in &entries {
         shared.set_secret(name, val);
+        if let Some(provider) = name.strip_prefix("provider:") {
+            // Back-compat aliases for skills that read provider names directly.
+            if provider == "tavily" || provider == "perplexity" {
+                shared.set_secret(provider, val);
+                alias_count += 1;
+            }
+        }
     }
     tracing::debug!(
         count = entries.len(),
+        aliases = alias_count,
         "Synced agent vault secrets to skill vault"
     );
 }
@@ -5694,11 +5998,7 @@ async fn launch_agentic_task_internal(
     let stored_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault
-            .list_providers()
-            .into_iter()
-            .map(String::from)
-            .collect()
+        vault_provider_names(&vault)
     };
 
     let loop_config = AgenticLoopConfig {
@@ -5719,6 +6019,7 @@ async fn launch_agentic_task_internal(
         task_handle: task_arc,
         started_at,
         run_source,
+        superego_l2_mode: state.superego_l2_mode,
     };
 
     tokio::spawn(agentic::run_agentic_loop(loop_config));
@@ -5740,7 +6041,7 @@ fn resolve_council_providers(
     if let Some(pref) = preference {
         let normalized = AppConfig::normalize_provider_name(pref);
         if provider_supports_tier_models(&normalized) {
-            if let Some(key) = vault.get_secret(&normalized) {
+            if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
                 result.push((normalized, key.to_string()));
             }
         }
@@ -5752,7 +6053,7 @@ fn resolve_council_providers(
         if result.iter().any(|(n, _)| n == *pref) {
             continue;
         }
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             result.push((pref.to_string(), key.to_string()));
             if result.len() >= 3 {
                 break;
@@ -5762,15 +6063,15 @@ fn resolve_council_providers(
 
     // Fill remaining from vault.
     if result.len() < 3 {
-        for p in vault.list_providers() {
-            let normalized = AppConfig::normalize_provider_name(p);
+        for p in vault_provider_names(vault) {
+            let normalized = AppConfig::normalize_provider_name(&p);
             if !provider_supports_tier_models(&normalized) || normalized == "tavily" {
                 continue;
             }
             if result.iter().any(|(n, _)| *n == normalized) {
                 continue;
             }
-            if let Some(key) = vault.get_secret(p) {
+            if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
                 result.push((normalized, key.to_string()));
                 if result.len() >= 3 {
                     break;
@@ -6551,6 +6852,54 @@ async fn api_orchestration_logs(
     Ok(Json(OrchestrationLogsResponse { logs }))
 }
 
+/// Bearer-token authentication middleware.
+/// When ORION_API_TOKEN is set, all /api/* requests require a matching
+/// Authorization: Bearer header (or ?token= query param for SSE).
+/// /health and /ready are exempt.
+async fn auth_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let expected = TOKEN.get_or_init(|| {
+        let t = std::env::var("ORION_API_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if t.is_none() {
+            tracing::warn!("ORION_API_TOKEN not set — API is unauthenticated");
+        }
+        t
+    });
+    let Some(expected_token) = expected else {
+        return Ok(next.run(req).await); // no token configured → pass through
+    };
+    let path = req.uri().path();
+    if path == "/health" || path == "/ready" {
+        return Ok(next.run(req).await); // exempt health endpoints
+    }
+    // Check Authorization: Bearer header
+    let authorized = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|t| t == expected_token.as_str())
+        .unwrap_or(false);
+    // Fallback: ?token= query param (for EventSource/SSE)
+    let authorized = authorized
+        || req
+            .uri()
+            .query()
+            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
+            .map(|t| t == expected_token.as_str())
+            .unwrap_or(false);
+    if authorized {
+        Ok(next.run(req).await)
+    } else {
+        Err(axum::http::StatusCode::UNAUTHORIZED)
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
@@ -6581,6 +6930,33 @@ async fn main() -> std::io::Result<()> {
                         let id = entry.file_name().to_string_lossy().to_string();
                         tracing::info!("Restored persisted signing key for agent {}", id);
                         birth_keys.lock().unwrap().insert(id, bytes);
+                    }
+                }
+            }
+        }
+    }
+
+    // Run vault namespace migration and config key migration for active agent(s).
+    if let Some(config_path) = resolve_config_path() {
+        if let Some(vault_dir) = config_path.parent().map(|d| d.to_path_buf()) {
+            if let Ok(mut vault) = SecretsVault::load(vault_dir.clone()) {
+                let ns_migrated = vault.migrate_namespace();
+                if let Ok(mut config) = AppConfig::load(&config_path) {
+                    let key_migrated = config.migrate_keys_to_vault(&mut vault);
+                    if !ns_migrated.is_empty() || !key_migrated.is_empty() {
+                        if let Err(e) = vault.save() {
+                            tracing::error!("Failed to save vault after migration: {}", e);
+                        }
+                        if !key_migrated.is_empty() {
+                            if let Err(e) = config.save(&config_path) {
+                                tracing::error!("Failed to save config after key migration: {}", e);
+                            }
+                        }
+                        tracing::info!(
+                            "Secrets migration complete: {} namespace, {} config keys",
+                            ns_migrated.len(),
+                            key_migrated.len()
+                        );
                     }
                 }
             }
@@ -6621,15 +6997,47 @@ async fn main() -> std::io::Result<()> {
         skill_vault,
         email_accounts,
         orchestration_tick_seconds: 30,
+        skill_confirm_nonces: Arc::new(TokioMutex::new(HashMap::new())),
+        superego_l2_mode: parse_superego_l2_mode(),
     };
 
     // Start orchestration scheduler for periodic jobs (UTC cron semantics).
     tokio::spawn(run_orchestration_scheduler_loop(state.clone()));
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = {
+        let origins_env = std::env::var("CORS_ALLOW_ORIGINS").unwrap_or_default();
+        let methods = vec![
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ];
+        let headers = vec![header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT];
+        if origins_env.is_empty() {
+            if std::env::var("ORION_CONTAINER").is_ok() {
+                // Container: deny cross-origin (same-origin via nginx)
+                CorsLayer::new()
+                    .allow_methods(methods)
+                    .allow_headers(headers)
+            } else {
+                // Host dev: allow all (Vite proxy is server-side, not CORS)
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(methods)
+                    .allow_headers(headers)
+            }
+        } else {
+            let origins: Vec<HeaderValue> = origins_env
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(methods)
+                .allow_headers(headers)
+        }
+    };
 
     let app = Router::new()
         .route("/health", get(health))
@@ -6729,10 +7137,7 @@ async fn main() -> std::io::Result<()> {
             "/api/agents/{id}/chat/stream",
             post(api_operational_chat_stream),
         )
-        .route(
-            "/api/agents/{id}/chat/archive",
-            post(api_archive_chat),
-        )
+        .route("/api/agents/{id}/chat/archive", post(api_archive_chat))
         .route(
             "/api/agents/{id}/chat/archives",
             get(api_list_chat_archives),
@@ -6789,10 +7194,21 @@ async fn main() -> std::io::Result<()> {
         .route("/api/agents/{id}/constitution", get(api_agent_constitution))
         .route("/api/agents/{id}/verify", post(api_agent_verify))
         .route("/api/agents/{id}/export", get(api_export_agent))
+        .layer(axum::middleware::from_fn(auth_middleware))
         .layer(cors)
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let bind_addr = std::env::var("ORION_BIND_ADDR").unwrap_or_else(|_| {
+        if std::env::var("ORION_CONTAINER").is_ok() {
+            "0.0.0.0:8080".to_string()
+        } else {
+            "127.0.0.1:8080".to_string()
+        }
+    });
+    let addr: SocketAddr = bind_addr.parse().unwrap_or_else(|e| {
+        tracing::error!("Invalid ORION_BIND_ADDR '{}': {}", bind_addr, e);
+        SocketAddr::from(([127, 0, 0, 1], 8080))
+    });
     tracing::info!("orion-api listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

@@ -146,7 +146,7 @@ mod tests {
             blocked: "/app/vault".to_string(),
             use_instead: vec!["/app/agent-data".to_string()],
         };
-        store.add(&[constraint.clone()]);
+        store.add(std::slice::from_ref(&constraint));
         store.add(&[constraint]);
         assert_eq!(store.len(), 1);
 

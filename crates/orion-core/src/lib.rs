@@ -15,6 +15,7 @@ pub mod error;
 pub mod global_config;
 pub mod keyring;
 pub mod local_llm_url;
+pub mod policy;
 pub mod sao_bridge;
 pub mod secrets;
 pub mod superego;
@@ -43,8 +44,16 @@ pub use keyring::{
     verify_agent_signature, ExternalKeypairResult, Keyring, MasterKeyResult, SignatureMetadata,
 };
 pub use local_llm_url::validate_local_llm_url;
+pub use policy::{
+    evaluate_tool_request, evaluate_user_message_for_capabilities, CapabilityEnvelope,
+    CapabilityGateResult,
+};
 pub use sao_bridge::{AgentState, SaoBridgeClient, SaoBridgeError};
 pub use secrets::SecretsVault;
-pub use superego::{check_message, check_search_query, SuperegoVerdict};
+pub use superego::{
+    check_message, check_search_query, check_search_query_with_trace, check_user_message,
+    check_user_message_with_trace, SafetyDecisionTrace, SuperegoVerdict, CODE_ILLEGAL_DRUGS,
+    CODE_MALWARE_CREATION, CODE_PII_DOXXING, CODE_PROMPT_INJECTION, CODE_WEAPONS_EXPLOSIVES,
+};
 pub use vault::{ExternalVault, ReadOnlyFileVault};
 pub use verifier::{write_sig_file, SigMeta, Verifier};

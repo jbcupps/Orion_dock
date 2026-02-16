@@ -162,7 +162,7 @@ impl Planner {
             Message::new("system", PLANNING_PROMPT),
             Message::new(
                 "user",
-                &format!(
+                format!(
                     "Your previous response could not be parsed as valid JSON.\n\nError: {}\n\nYour response was:\n{}\n\nPlease fix the JSON and respond with ONLY the corrected JSON object.",
                     parse_error, original_response
                 ),

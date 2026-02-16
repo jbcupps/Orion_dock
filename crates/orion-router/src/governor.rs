@@ -293,7 +293,7 @@ impl ExecutionGovernor {
                         .collect();
                     messages.push(Message::new(
                         "user",
-                        &format!(
+                        format!(
                             "You stopped generating actions but the following done_criteria are not yet met:\n{}\n\nContinue working to satisfy them.",
                             unmet.join("\n")
                         ),
@@ -404,7 +404,7 @@ impl ExecutionGovernor {
             messages.push(Message::new("assistant", &clean_content));
             messages.push(Message::new(
                 "user",
-                &format!("## Tool Results\n\n{}", tool_results_text.join("\n\n")),
+                format!("## Tool Results\n\n{}", tool_results_text.join("\n\n")),
             ));
         }
 

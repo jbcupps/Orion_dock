@@ -10,6 +10,7 @@ import {
   type ChatArchiveInfo,
   type ChatAttachmentUploadItem,
   type OperationalChatResponse,
+  type RoutingTelemetry,
 } from '../api';
 import './OperationalChat.css';
 
@@ -21,6 +22,7 @@ interface OperationalChatProps {
   routerMode?: 'auto' | 'think_hard' | 'think_harder';
   onError: (message: string) => void;
   onBusyChange?: (busy: boolean) => void;
+  onRoutingTelemetryChange?: (telemetry: RoutingTelemetry | null) => void;
 }
 
 function formatBytes(size: number): string {
@@ -51,6 +53,7 @@ export default function OperationalChat({
   routerMode,
   onError,
   onBusyChange,
+  onRoutingTelemetryChange,
 }: OperationalChatProps) {
   type ActivityLogItem = NonNullable<OperationalChatResponse['tool_log']>[number] & {
     id: string;
@@ -281,6 +284,7 @@ export default function OperationalChat({
             );
             void loadArchives();
           }
+          onRoutingTelemetryChange?.(res.routing_telemetry ?? null);
         },
         onError: (msg) => {
           setThinkingStatus(null);
@@ -296,6 +300,7 @@ export default function OperationalChat({
       input,
       loadArchives,
       onError,
+      onRoutingTelemetryChange,
       routerMode,
       sending,
       uploadingAttachments,

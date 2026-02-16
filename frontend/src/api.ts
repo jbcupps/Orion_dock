@@ -3,6 +3,29 @@ const getBaseUrl = (): string => {
   return '';
 };
 
+/** Auth token for API requests (set via VITE_API_TOKEN at build time). */
+const getApiToken = (): string | undefined =>
+  import.meta.env.VITE_API_TOKEN || undefined;
+
+/** Wrapper around fetch that injects Authorization: Bearer header when configured. */
+function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = getApiToken();
+  if (!token) return fetch(input, init);
+  const headers = new Headers(init?.headers);
+  if (!headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, { ...init, headers });
+}
+
+/** Append ?token= for EventSource (SSE) when API token is configured. */
+function authUrl(url: string): string {
+  const token = getApiToken();
+  if (!token) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
 export interface HealthResponse {
   status: string;
 }
@@ -27,14 +50,14 @@ export interface AgentIdentityInfo {
 
 export async function fetchHealth(): Promise<HealthResponse> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/health`);
+  const res = await apiFetch(`${base}/health`);
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchStatus(): Promise<StatusResponse> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/status`);
+  const res = await apiFetch(`${base}/api/status`);
   if (!res.ok) throw new Error(`Status failed: ${res.status}`);
   return res.json();
 }
@@ -46,14 +69,14 @@ export interface IdentitiesResponse {
 
 export async function fetchIdentities(): Promise<IdentitiesResponse> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/identities`);
+  const res = await apiFetch(`${base}/api/identities`);
   if (!res.ok) throw new Error(`Identities failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchMentorName(): Promise<{ mentor_name: string | null }> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/mentor-name`);
+  const res = await apiFetch(`${base}/api/mentor-name`);
   if (!res.ok) throw new Error(`Mentor name fetch failed: ${res.status}`);
   return res.json();
 }
@@ -62,7 +85,7 @@ export async function setMentorName(
   mentorName: string
 ): Promise<{ mentor_name: string | null }> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/mentor-name`, {
+  const res = await apiFetch(`${base}/api/mentor-name`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mentor_name: mentorName }),
@@ -76,7 +99,7 @@ export async function createAgent(
   quickStart = false
 ): Promise<{ id: string }> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/agents`, {
+  const res = await apiFetch(`${base}/api/agents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, quick_start: quickStart }),
@@ -90,7 +113,7 @@ export async function createAgent(
 
 export async function loadAgent(id: string): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/agents/${encodeURIComponent(id)}/load`, {
+  const res = await apiFetch(`${base}/api/agents/${encodeURIComponent(id)}/load`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -108,7 +131,7 @@ export async function fetchBirthState(
   agentId: string
 ): Promise<BirthStateResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/state`
   );
   if (!res.ok) {
@@ -120,7 +143,7 @@ export async function fetchBirthState(
 
 export async function advanceDarkness(agentId: string): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/advance-darkness`,
     { method: 'POST' }
   );
@@ -135,7 +158,7 @@ export async function setIgnition(
   local_llm_base_url?: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/ignition`,
     {
       method: 'POST',
@@ -161,7 +184,7 @@ export interface GenesisPathItem {
 
 export async function fetchGenesisPaths(): Promise<GenesisPathItem[]> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/genesis/paths`);
+  const res = await apiFetch(`${base}/api/genesis/paths`);
   if (!res.ok) throw new Error(`Genesis paths failed: ${res.status}`);
   return res.json();
 }
@@ -172,7 +195,7 @@ export async function startGenesis(
   depth?: string
 ): Promise<{ ok: boolean; path: string; completed?: boolean; state?: string; prompt?: string; choices?: string[] }> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/agents/${encodeURIComponent(agentId)}/genesis/start`, {
+  const res = await apiFetch(`${base}/api/agents/${encodeURIComponent(agentId)}/genesis/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path, depth }),
@@ -197,7 +220,7 @@ export async function forgeSelect(
   weights?: Record<string, number>;
 }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/select`,
     {
       method: 'POST',
@@ -216,7 +239,7 @@ export async function fetchGenesisState(
   agentId: string
 ): Promise<{ path: string | null; depth?: string | null }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/state`
   );
   if (!res.ok) {
@@ -239,7 +262,7 @@ export async function fetchForgeState(
   weights?: Record<string, number>;
 }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/state`
   );
   if (!res.ok) {
@@ -260,7 +283,7 @@ export async function forgeCrystallize(
   body: ForgeCrystallizeBody
 ): Promise<{ ok: boolean }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/crystallize`,
     {
       method: 'POST',
@@ -281,7 +304,7 @@ export async function forgeCrystallize(
 
 export async function completeEmergence(agentId: string): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/complete-emergence`,
     { method: 'POST' }
   );
@@ -300,7 +323,7 @@ export async function fetchBirthChatHistory(
   agentId: string
 ): Promise<{ messages: BirthChatMessageItem[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat/history`
   );
   if (!res.ok) {
@@ -319,7 +342,7 @@ export async function sendBirthChat(
   crystallized?: boolean;
 }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat`,
     {
       method: 'POST',
@@ -348,7 +371,7 @@ export async function sendConnectivityChat(
   message: string
 ): Promise<ConnectivityChatResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/chat`,
     {
       method: 'POST',
@@ -367,7 +390,7 @@ export async function fetchConnectivityChatHistory(
   agentId: string
 ): Promise<{ messages: BirthChatMessageItem[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/chat/history`
   );
   if (!res.ok) {
@@ -390,7 +413,7 @@ export async function storeProviderKey(
   validate = true
 ): Promise<StoreKeyResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/keys`,
     {
       method: 'POST',
@@ -410,7 +433,7 @@ export async function removeProviderKey(
   provider: string
 ): Promise<{ ok: boolean }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/keys/${encodeURIComponent(provider)}`,
     { method: 'DELETE' }
   );
@@ -425,7 +448,7 @@ export async function fetchStoredProviders(
   agentId: string
 ): Promise<{ providers: string[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/connectivity/providers`
   );
   if (!res.ok) {
@@ -475,7 +498,7 @@ export async function fetchTierModels(
   agentId: string
 ): Promise<TierModelsResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models`
   );
   if (!res.ok) {
@@ -490,7 +513,7 @@ export async function updateTierModels(
   models: Record<string, TierModels>
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models`,
     {
       method: 'PUT',
@@ -509,7 +532,7 @@ export async function refreshProviderCatalog(
   provider?: string
 ): Promise<{ ok: boolean; refreshed: string[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/refresh`,
     {
       method: 'POST',
@@ -529,7 +552,7 @@ export async function validateTierModels(
   provider?: string
 ): Promise<ValidateModelsResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/validate`,
     {
       method: 'POST',
@@ -549,7 +572,7 @@ export async function resetTierModels(
   provider?: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/tier-models/reset`,
     {
       method: 'POST',
@@ -568,7 +591,7 @@ export async function setActiveProvider(
   provider: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/active-provider`,
     {
       method: 'PUT',
@@ -588,7 +611,7 @@ export async function fetchChatHistory(
   agentId: string
 ): Promise<{ messages: BirthChatMessageItem[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat/history`
   );
   if (!res.ok) {
@@ -610,6 +633,16 @@ export interface AutoArchivedInfo {
   message_count: number;
 }
 
+export interface RoutingTelemetry {
+  mode_profile: string;
+  tools_profile: string;
+  requested_router_mode: string;
+  routing_mode: string;
+  active_provider?: string;
+  active_model?: string;
+  governor_enabled: boolean;
+}
+
 export interface OperationalChatResponse {
   assistant_content: string;
   tool_executed?: { name: string; provider: string };
@@ -623,6 +656,7 @@ export interface OperationalChatResponse {
   }[];
   context_warning?: ContextWarning;
   auto_archived?: AutoArchivedInfo;
+  routing_telemetry?: RoutingTelemetry;
 }
 
 export interface ChatAttachmentUploadItem {
@@ -652,7 +686,7 @@ export async function uploadChatAttachments(
   for (const file of files) {
     formData.append('files', file, file.name);
   }
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat/attachments`,
     {
       method: 'POST',
@@ -680,7 +714,7 @@ export async function sendChat(
   if (attachmentIds.length > 0) {
     payload.attachment_ids = attachmentIds;
   }
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat`,
     {
       method: 'POST',
@@ -718,7 +752,7 @@ export function sendChatStream(
 
   (async () => {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${base}/api/agents/${encodeURIComponent(agentId)}/chat/stream`,
         {
           method: 'POST',
@@ -796,7 +830,7 @@ export async function archiveChat(
   agentId: string
 ): Promise<{ archive_id: string; message_count: number }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archive`,
     { method: 'POST' }
   );
@@ -811,7 +845,7 @@ export async function fetchChatArchives(
   agentId: string
 ): Promise<ChatArchiveInfo[]> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archives`
   );
   if (!res.ok) {
@@ -826,7 +860,7 @@ export async function fetchChatArchive(
   archiveId: string
 ): Promise<{ archive_id: string; messages: BirthChatMessageItem[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/chat/archives/${encodeURIComponent(archiveId)}`
   );
   if (!res.ok) {
@@ -854,7 +888,7 @@ export async function fetchAgenticRuns(
   agentId: string
 ): Promise<AgenticRunInfo[]> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/agent/runs`
   );
   if (!res.ok) {
@@ -920,7 +954,7 @@ export async function fetchOrchestrationJobs(
   agentId: string
 ): Promise<{ jobs: OrchestrationJob[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs`
   );
   if (!res.ok) {
@@ -942,7 +976,7 @@ export async function createOrchestrationJob(
   }
 ): Promise<OrchestrationJob> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs`,
     {
       method: 'POST',
@@ -970,7 +1004,7 @@ export async function updateOrchestrationJob(
   }
 ): Promise<OrchestrationJob> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}`,
     {
       method: 'POST',
@@ -991,7 +1025,7 @@ export async function setOrchestrationJobEnabled(
   enabled: boolean
 ): Promise<OrchestrationJob> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/enable`,
     {
       method: 'POST',
@@ -1011,7 +1045,7 @@ export async function deleteOrchestrationJob(
   jobId: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/delete`,
     { method: 'POST' }
   );
@@ -1026,7 +1060,7 @@ export async function runOrchestrationJobNow(
   jobId: string
 ): Promise<JobRunNowResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/jobs/${encodeURIComponent(jobId)}/run`,
     { method: 'POST' }
   );
@@ -1042,7 +1076,7 @@ export async function fetchOrchestrationLogs(
   limit = 25
 ): Promise<{ logs: OrchestrationJobLogEntry[] }> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/orchestration/logs?limit=${encodeURIComponent(String(limit))}`
   );
   if (!res.ok) {
@@ -1115,7 +1149,7 @@ export async function startAgenticRun(
   request: AgenticRunRequest
 ): Promise<AgenticRunStartResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/agent/run`,
     {
       method: 'POST',
@@ -1137,7 +1171,7 @@ export function subscribeToAgenticStream(
   onError?: (error: Event) => void
 ): EventSource {
   const base = getBaseUrl();
-  const url = `${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`;
+  const url = authUrl(`${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`);
   const es = new EventSource(url);
 
   const eventTypes = [
@@ -1175,7 +1209,7 @@ export async function respondToAgent(
   response: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/agent/respond`,
     {
       method: 'POST',
@@ -1195,7 +1229,7 @@ export async function confirmAgentTool(
   approved: boolean
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/agent/confirm`,
     {
       method: 'POST',
@@ -1214,7 +1248,7 @@ export async function cancelAgenticRun(
   taskId: string
 ): Promise<void> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/agent/cancel`,
     {
       method: 'POST',
@@ -1242,7 +1276,7 @@ export async function fetchAgentIdentity(
   agentId: string
 ): Promise<AgentIdentityBundle> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/identity`
   );
   if (!res.ok) {
@@ -1270,7 +1304,7 @@ export async function fetchConstitution(
   agentId: string
 ): Promise<ConstitutionResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/constitution`
   );
   if (!res.ok) {
@@ -1296,7 +1330,7 @@ export async function verifyAgent(
   agentId: string
 ): Promise<VerifyResponse> {
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/verify`,
     { method: 'POST' }
   );
@@ -1320,7 +1354,7 @@ export async function exportAgent(
   }
 
   const base = getBaseUrl();
-  const res = await fetch(
+  const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/export`,
     {
       headers: {
@@ -1363,7 +1397,7 @@ export async function importAgent(
   }
 
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/agents/import`, {
+  const res = await apiFetch(`${base}/api/agents/import`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

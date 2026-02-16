@@ -19,6 +19,7 @@ import {
   validateTierModels,
   type BirthStateResponse,
   type ProviderCatalogEntry,
+  type RoutingTelemetry,
   type ProviderModelValidation,
   type StatusResponse,
   type TierModels,
@@ -80,6 +81,7 @@ function App() {
   const [chatBusy, setChatBusy] = useState(false);
   const [agenticBusy, setAgenticBusy] = useState(false);
   const [mentorName, setMentorName] = useState<string | null>(null);
+  const [routingTelemetry, setRoutingTelemetry] = useState<RoutingTelemetry | null>(null);
   const cloudBusy = (chatBusy || agenticBusy) && storedProviders.length > 0;
 
   useEffect(() => {
@@ -144,6 +146,10 @@ function App() {
       clearInterval(interval);
     };
   }, [appState]);
+
+  useEffect(() => {
+    setRoutingTelemetry(null);
+  }, [currentAgentId, chatMode]);
 
   // Fetch stored LLM providers for the current agent
   useEffect(() => {
@@ -603,6 +609,15 @@ function App() {
     !status.birth_complete &&
     status.birth_stage === 'Emergence';
 
+  const displayModeProfile = routingTelemetry?.mode_profile
+    ? routingTelemetry.mode_profile.charAt(0).toUpperCase() +
+      routingTelemetry.mode_profile.slice(1)
+    : null;
+  const displayToolsProfile = routingTelemetry?.tools_profile
+    ? routingTelemetry.tools_profile.charAt(0).toUpperCase() +
+      routingTelemetry.tools_profile.slice(1)
+    : null;
+
   const activeThinkingProvider =
     activeTierProvider && tierModels[activeTierProvider]
       ? activeTierProvider
@@ -781,6 +796,46 @@ function App() {
           <section className="panel phase-panel">
             <h2>{phase}</h2>
             <p className="phase-message">{status ? phaseMessage : 'Loading…'}</p>
+            {status?.birth_complete && routingTelemetry && (
+              <div className="operation-telemetry">
+                <div className="operation-telemetry-summary">
+                  <span className="operation-telemetry-label">Routing profile</span>
+                  {displayModeProfile && (
+                    <span className="operation-telemetry-pill">{displayModeProfile}</span>
+                  )}
+                  {displayToolsProfile && (
+                    <span className="operation-telemetry-pill operation-telemetry-pill-muted">
+                      {displayToolsProfile} tools
+                    </span>
+                  )}
+                </div>
+                <details className="operation-telemetry-details">
+                  <summary>Details</summary>
+                  <div className="operation-telemetry-grid">
+                    <div>
+                      <span>Router mode</span>
+                      <code>{routingTelemetry.requested_router_mode}</code>
+                    </div>
+                    <div>
+                      <span>Routing</span>
+                      <code>{routingTelemetry.routing_mode}</code>
+                    </div>
+                    <div>
+                      <span>Provider</span>
+                      <code>{routingTelemetry.active_provider ?? 'none'}</code>
+                    </div>
+                    <div>
+                      <span>Model</span>
+                      <code>{routingTelemetry.active_model ?? 'unknown'}</code>
+                    </div>
+                    <div>
+                      <span>Governor</span>
+                      <code>{routingTelemetry.governor_enabled ? 'on' : 'off'}</code>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            )}
             {status && !status.birth_complete && status.birth_stage && (
               <p className="phase-stage">{status.birth_stage}</p>
             )}
@@ -854,6 +909,7 @@ function App() {
                     routerMode={routerMode}
                     onError={setError}
                     onBusyChange={setChatBusy}
+                    onRoutingTelemetryChange={setRoutingTelemetry}
                   />
                 ) : (
                   <AgenticPanel

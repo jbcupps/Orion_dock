@@ -37,11 +37,7 @@ impl SkillToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for SkillToolExecutor {
-    async fn execute_tool(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> ToolExecutionResult {
+    async fn execute_tool(&self, tool_name: &str, args: &serde_json::Value) -> ToolExecutionResult {
         // Find the skill that provides this tool
         let skill_match = agentic::find_skill_for_tool(&self.skill_registry, tool_name);
         let (skill_id, _tool_desc) = match skill_match {
@@ -75,8 +71,7 @@ impl ToolExecutor for SkillToolExecutor {
             Ok(output) => {
                 if output.success {
                     let text = if let Some(data) = &output.data {
-                        serde_json::to_string_pretty(data)
-                            .unwrap_or_else(|_| data.to_string())
+                        serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
                     } else {
                         "OK".to_string()
                     };
@@ -131,31 +126,30 @@ impl ToolCallParser for BirthToolCallParser {
 /// Create a concise summary of tool call arguments (for logging, not secrets).
 fn summarize_args(args: &serde_json::Value) -> String {
     match args {
-        serde_json::Value::Object(map) => {
-            map.iter()
-                .map(|(k, v)| {
-                    let val_str = match v {
-                        serde_json::Value::String(s) => {
-                            if s.len() > 50 {
-                                format!("{}...", &s[..50])
-                            } else {
-                                s.clone()
-                            }
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                let val_str = match v {
+                    serde_json::Value::String(s) => {
+                        if s.len() > 50 {
+                            format!("{}...", &s[..50])
+                        } else {
+                            s.clone()
                         }
-                        other => {
-                            let s = other.to_string();
-                            if s.len() > 50 {
-                                format!("{}...", &s[..50])
-                            } else {
-                                s
-                            }
+                    }
+                    other => {
+                        let s = other.to_string();
+                        if s.len() > 50 {
+                            format!("{}...", &s[..50])
+                        } else {
+                            s
                         }
-                    };
-                    format!("{}={}", k, val_str)
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+                    }
+                };
+                format!("{}={}", k, val_str)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => args.to_string(),
     }
 }

@@ -62,3 +62,12 @@ These scripts execute the same Docker validation path used in CI.
 
 Do not commit secrets, credentials, or private keys.
 For vulnerability reporting, see `.github/SECURITY.md`.
+
+## Autonomy-First Development
+
+The agent's ability to act independently using its skills is the core product value. When making changes that affect routing, tool execution, sandbox policies, or skill registration:
+
+- **Always use `route_with_tools()`** for structured function-calling. The text-based `tool_request` fallback exists for backward compatibility, not as the primary path.
+- **Security hardening must not blanket-block tool execution.** Use risk-based policies: block high-risk/mutation tools where needed, allow read-only tools.
+- **Include autonomy regression coverage** — any security change must be accompanied by a test proving the agent can still search the web, read files, execute safe commands, and store credentials.
+- **Missing keys are solvable states.** The agent should tell the user what is needed, not claim inability.

@@ -128,6 +128,79 @@ body {
   color: var(--muted);
 }
 
+.operation-telemetry {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  background: color-mix(in srgb, var(--surface) 86%, var(--accent) 14%);
+}
+
+.operation-telemetry-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.operation-telemetry-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.operation-telemetry-pill {
+  font-size: 0.76rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  background: var(--bg);
+  color: var(--accent);
+}
+
+.operation-telemetry-pill-muted {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.operation-telemetry-details {
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.operation-telemetry-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+}
+
+.operation-telemetry-grid {
+  margin-top: 0.4rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.35rem 0.65rem;
+}
+
+.operation-telemetry-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.operation-telemetry-grid span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.operation-telemetry-grid code {
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .status {
   margin: 0;
   display: grid;

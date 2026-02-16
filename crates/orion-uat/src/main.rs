@@ -118,6 +118,15 @@ fn main() -> Result<()> {
                 let growth = orion_core::templates::GROWTH_MD.to_string();
                 (soul, growth)
             }
+            GenesisPath::QuickStart => {
+                let soul = orion_core::templates::fill_soul_template(
+                    "OrionUAT",
+                    orion_core::templates::DEFAULT_PURPOSE,
+                    orion_core::templates::DEFAULT_PERSONALITY,
+                );
+                let growth = orion_core::templates::GROWTH_MD.to_string();
+                (soul, growth)
+            }
             GenesisPath::SoulForge => {
                 let mut app = SoulForgeApp::new();
                 while app.state == SoulForgeAppState::Boot {
@@ -201,7 +210,8 @@ fn main() -> Result<()> {
         anyhow::bail!("UAT: birth_complete is still false after emergence");
     }
     let store = orion_memory::MemoryStore::open_with_config(config)?;
-    if !store.has_birth()? {
+    let uat_agent_id = config.agent_id.as_deref().unwrap_or("uat-agent");
+    if !store.has_birth(uat_agent_id)? {
         anyhow::bail!("UAT: store.has_birth() is false after emergence");
     }
     tracing::info!("UAT: Early operation check: birth_complete and store.has_birth() OK");

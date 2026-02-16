@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
-use orion_birth::parse_tool_requests;
+use orion_birth::BirthToolRequest;
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, RuntimeContext, SkillToolEntry};
 use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
@@ -18,6 +18,8 @@ use orion_skills::manifest::SkillId;
 use orion_skills::protocol::mcp::McpSkillRuntime;
 use orion_skills::skill::{Skill, ToolDescriptor};
 use orion_skills::{SkillExecutor, SkillRegistry, TrustTier};
+
+use crate::tool_extraction;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -210,6 +212,7 @@ pub struct AgenticLoopConfig {
     pub task_handle: Arc<Mutex<AgenticTask>>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub run_source: String,
+    pub superego_l2_mode: orion_router::SuperegoL2Mode,
 }
 
 /// Run the autonomous agentic loop. Call from `tokio::spawn`.
@@ -237,7 +240,8 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     // Build router
     let (ego_name, ego_key) = resolve_ego_credentials(&cfg.config);
     let routing_mode = match cfg.router_mode {
-        AgenticRouterMode::Auto => cfg.config.routing_mode,
+        // Auto is the fast tier and should prefer a single cloud call path first.
+        AgenticRouterMode::Auto => orion_core::RoutingMode::EgoPrimary,
         AgenticRouterMode::ThinkHard | AgenticRouterMode::ThinkHarder => {
             // Thinking presets prioritize Ego for deeper reasoning while preserving Id fallback.
             orion_core::RoutingMode::EgoPrimary
@@ -251,7 +255,9 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     let ego_model = ego_name
         .as_deref()
         .map(|provider| cfg.config.effective_tier_model(provider, tier));
-    let router = orion_router::IdEgoRouter::with_provider_auto_detect(
+    let ego_name_for_sup = ego_name.clone();
+    let ego_key_for_sup = ego_key.clone();
+    let mut router = orion_router::IdEgoRouter::with_provider_auto_detect(
         cfg.config.local_llm_base_url.clone(),
         ego_name.as_deref(),
         ego_key,
@@ -259,6 +265,23 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         routing_mode,
     )
     .await;
+    if cfg.superego_l2_mode != orion_router::SuperegoL2Mode::Off {
+        let (sup_name, sup_key) = resolve_superego_credentials(
+            &cfg.config,
+            ego_name_for_sup.as_deref(),
+            ego_key_for_sup.as_deref(),
+        );
+        if let Some(key) = sup_key {
+            let (provider, _) =
+                orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
+            if let Some(provider) = provider {
+                router = router.with_superego_config(provider, sup_name, cfg.superego_l2_mode);
+            }
+        }
+    }
+
+    // Build structured tool definitions for tool-aware routing (includes synthetic agentic tools).
+    let mut tool_defs = tool_extraction::build_agentic_tool_definitions(&cfg.skill_tool_entries);
 
     // Pre-flight: verify at least one LLM is reachable before entering the loop.
     if let Err(e) = router.heartbeat().await {
@@ -287,7 +310,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     let mut tools_changed = false;
 
     loop {
-        // Refresh system prompt when tools have been added mid-run.
+        // Refresh system prompt and tool definitions when tools have been added mid-run.
         if tools_changed {
             let refreshed_entries = crate::build_skill_tool_entries(&cfg.skill_registry);
             let refreshed_prompt = build_agentic_system_prompt(
@@ -300,6 +323,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             if !messages.is_empty() {
                 messages[0] = Message::new("system", &refreshed_prompt);
             }
+            tool_defs = tool_extraction::build_agentic_tool_definitions(&refreshed_entries);
             cfg.skill_tool_entries = refreshed_entries;
             tools_changed = false;
             tracing::info!(agent_dir = %cfg.agent_dir.display(), "agentic: refreshed tool list after skill registration");
@@ -359,8 +383,11 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         // Trim context if conversation is getting long
         trim_context(&mut messages, context_token_budget(cfg.router_mode));
 
-        // LLM call
-        let response = match router.route(messages.clone()).await {
+        // LLM call with structured tool definitions for reliable tool invocation.
+        let response = match router
+            .route_with_tools(messages.clone(), tool_defs.clone())
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = format!("LLM call failed: {}", e);
@@ -383,7 +410,14 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             }
         };
 
-        let (clean_content, tool_requests) = parse_tool_requests(&response.content);
+        // Unified tool extraction: structured first, legacy text fallback.
+        let extraction = tool_extraction::extract_tool_calls(&response);
+        let clean_content = extraction.clean_content;
+        let tool_requests: Vec<BirthToolRequest> = extraction
+            .tool_calls
+            .iter()
+            .map(BirthToolRequest::from)
+            .collect();
 
         // Emit thinking event
         if !clean_content.trim().is_empty() {
@@ -524,7 +558,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         }
 
         // Check for register_mcp_skill synthetic tool
-        if let Some(reg) = tool_requests.iter().find(|t| t.name == "register_mcp_skill") {
+        if let Some(reg) = tool_requests
+            .iter()
+            .find(|t| t.name == "register_mcp_skill")
+        {
             let server_id = reg
                 .arguments
                 .get("server_id")
@@ -630,6 +667,20 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
 
         // Execute real tool calls
         let mut tool_results: Vec<String> = Vec::new();
+        let last_user_for_policy = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let advisory_code = match router.superego_check(&last_user_for_policy).await {
+            orion_router::SuperegoResult::Advisory { code, .. } => code,
+            _ => None,
+        };
+        let capability_envelope = orion_core::evaluate_user_message_for_capabilities(
+            &last_user_for_policy,
+            advisory_code.as_deref(),
+        );
         for tr in &tool_requests {
             // Skip synthetic tools already handled above
             if tr.name == "task_complete"
@@ -663,8 +714,31 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 }
             };
 
+            let gate =
+                orion_core::evaluate_tool_request(&tr.name, &tr.arguments, &capability_envelope);
+            if !gate.allowed {
+                let reason_code = gate.reason_code.unwrap_or("SAFETY_BLOCK");
+                let reason_text = gate
+                    .reason_text
+                    .unwrap_or_else(|| "Blocked by capability safety policy".to_string());
+                let err_msg = format!(
+                    "Blocked by safety policy ({}): {}",
+                    reason_code, reason_text
+                );
+                let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                    turn,
+                    tool_name: tr.name.clone(),
+                    success: false,
+                    output: err_msg.clone(),
+                });
+                tool_results.push(format!("**{}**: Error — {}", tr.name, err_msg));
+                continue;
+            }
+
             // Check confirmation requirement
-            if tool_desc.requires_confirmation && !cfg.auto_approve_safe_tools {
+            if (tool_desc.requires_confirmation || gate.require_confirmation)
+                && !cfg.auto_approve_safe_tools
+            {
                 let _ = cfg.event_tx.send(AgenticEvent::ConfirmationNeeded {
                     turn,
                     tool_name: tr.name.clone(),
@@ -878,16 +952,20 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     // Respect active provider preference if set.
     if let Some(ref pref) = config.active_provider_preference {
         let normalized = AppConfig::normalize_provider_name(pref);
-        if let Some(key) = vault.get_secret(&normalized) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
             return (Some(normalized), Some(key.to_string()));
         }
     }
-    let providers = vault.list_providers();
+    let providers: Vec<String> = vault
+        .list_providers()
+        .into_iter()
+        .filter_map(|k| k.strip_prefix("provider:").map(String::from))
+        .collect();
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;
     let mut found_key: Option<String> = None;
     for pref in &preferred {
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             found_name = Some(pref.to_string());
             found_key = Some(key.to_string());
             break;
@@ -895,9 +973,9 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     }
     if found_name.is_none() {
         for p in &providers {
-            if *p != "tavily" {
-                if let Some(key) = vault.get_secret(p) {
-                    found_name = Some(p.to_string());
+            if p != "tavily" {
+                if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
+                    found_name = Some(p.clone());
                     found_key = Some(key.to_string());
                     break;
                 }
@@ -905,6 +983,24 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
         }
     }
     (found_name, found_key)
+}
+
+fn resolve_superego_credentials(
+    config: &AppConfig,
+    ego_name: Option<&str>,
+    ego_key: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let vault = SecretsVault::load(config.data_dir.clone())
+        .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+    if let Some(trinity) = &config.trinity {
+        if let Some(provider) = trinity.superego_provider.as_deref() {
+            let normalized = AppConfig::normalize_provider_name(provider);
+            if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
+                return (Some(normalized), Some(key.to_string()));
+            }
+        }
+    }
+    (ego_name.map(str::to_string), ego_key.map(str::to_string))
 }
 
 /// Estimate token count for a text string using a character-based heuristic.
@@ -1081,9 +1177,7 @@ async fn register_mcp_skill_impl(
     let config_path = agent_dir.join("config.json");
     if let Ok(mut persisted_config) = AppConfig::load(&config_path) {
         // Avoid duplicate entries.
-        persisted_config
-            .mcp_servers
-            .retain(|s| s.id != server_id);
+        persisted_config.mcp_servers.retain(|s| s.id != server_id);
         persisted_config.mcp_servers.push(McpServerDefinition {
             id: server_id.to_string(),
             name: server_name.to_string(),
@@ -1224,10 +1318,7 @@ fn handle_manage_job(agent_dir: &Path, args: &serde_json::Value) -> String {
         },
 
         "enable" => {
-            let job_id = args
-                .get("job_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let job_id = args.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
             let enabled = args
                 .get("enabled")
                 .and_then(|v| v.as_bool())
@@ -1259,10 +1350,7 @@ fn handle_manage_job(agent_dir: &Path, args: &serde_json::Value) -> String {
         }
 
         "delete" => {
-            let job_id = args
-                .get("job_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let job_id = args.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
 
             if job_id.is_empty() {
                 return "manage_job failed: job_id is required for delete.".to_string();
@@ -1295,10 +1383,7 @@ fn handle_manage_job(agent_dir: &Path, args: &serde_json::Value) -> String {
 // ---------------------------------------------------------------------------
 
 fn handle_write_review(agent_dir: &Path, args: &serde_json::Value) -> String {
-    let content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
     if content.is_empty() {
         return "write_review failed: content is required.".to_string();

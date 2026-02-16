@@ -9,12 +9,13 @@ Desktop installer and npm-based deployment paths have been retired in favor of c
 ## What Is Included
 
 - Core crates for identity, memory, routing, capabilities, skills, and birth lifecycle
+- **Autonomous agent runtime** — structured tool-calling via `route_with_tools()` with legacy text fallback; risk-based security policies that enable safe autonomous action
 - **Orion API** (`crates/orion-api`) — HTTP API for the web UI (health, status, tier-model management)
 - **Web UI** (`frontend/`) — React + Vite + TypeScript; chat dashboard with Fast/Standard/Pro tier selection
 - **Council Engine (MoA DAG)** (`crates/orion-router/src/council.rs`) — native Rust multi-model debate/synthesis for Pro tier
 - **Tier Model Orchestration** — Per-provider Fast/Standard/Pro model selection with catalog validation
 - **Quick-Start Birth** — One-call agent creation with auto identity and standard constitutional documents
-- Skill crates under `skills/`
+- Skill crates under `skills/` (web search, web browse, shell, filesystem, HTTP, email, Docker exec, Perplexity)
 - Docker development and CI workflow under `docker/`
 - Full stack Compose profile: postgres, ollama, orion-api, frontend
 - GitHub Actions CI (when enabled): Docker-only fast suite (lint, build, test, frontend typecheck/build in container) and full-stack UAT job. CI and Dependabot may be disabled; run `scripts/local-verify` (or `run-uat.ps1` / `dev-stack.ps1`) locally before pushing.

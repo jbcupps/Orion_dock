@@ -113,7 +113,7 @@ impl PerplexitySearchSkill {
         if !verdict.allowed {
             return Ok(ToolOutput::error(format!(
                 "Search blocked: {}",
-                verdict.reason.unwrap_or_default()
+                verdict.reason_text.unwrap_or_default()
             )));
         }
 
