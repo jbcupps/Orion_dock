@@ -6,25 +6,16 @@ interface GenesisPathSelectorProps {
   agentId: string;
   onStarted: (
     path: string,
-    data?: { state?: string; prompt?: string; choices?: string[] }
+    data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[] }
   ) => void | Promise<void>;
   onError: (message: string) => void;
 }
 
-function pathLabel(item: GenesisPathItem): string {
-  if (item.depth) {
-    const depthLabel =
-      item.depth === 'quick_start'
-        ? 'Quick Start'
-        : item.depth === 'conversation'
-          ? 'Conversation'
-          : item.depth === 'deep_dive'
-            ? 'Deep Dive'
-            : item.depth;
-    return `${item.label} (${depthLabel})`;
-  }
-  return item.label;
-}
+const DEPTH_OPTIONS: { value: string; label: string; time: string }[] = [
+  { value: 'quick_start', label: 'Quick Start', time: '~30 sec' },
+  { value: 'conversation', label: 'Conversation', time: '3-5 min' },
+  { value: 'deep_dive', label: 'Deep Dive', time: '10-15 min' },
+];
 
 export default function GenesisPathSelector({
   agentId,
@@ -34,15 +25,14 @@ export default function GenesisPathSelector({
   const [paths, setPaths] = useState<GenesisPathItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState<string | null>(null);
+  const [expandedCrystallization, setExpandedCrystallization] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const list = await fetchGenesisPaths();
-        // Filter out paths that don't have a working frontend yet
-        const working = list.filter((p) => p.id !== 'soul_crystallization');
-        if (!cancelled) setPaths(working);
+        if (!cancelled) setPaths(list);
       } catch {
         if (!cancelled) setPaths([]);
       } finally {
@@ -54,14 +44,23 @@ export default function GenesisPathSelector({
     };
   }, []);
 
-  const handleSelect = async (item: GenesisPathItem) => {
-    const key = item.depth ? `${item.id}:${item.depth}` : item.id;
+  const handleSelect = async (item: GenesisPathItem, depthOverride?: string) => {
     if (starting) return;
+
+    // For Soul Crystallization, show depth sub-selector first
+    if (item.id === 'soul_crystallization' && !depthOverride) {
+      setExpandedCrystallization(true);
+      return;
+    }
+
+    const depth = depthOverride ?? item.depth;
+    const key = depth ? `${item.id}:${depth}` : item.id;
     try {
       setStarting(key);
-      const data = await startGenesis(agentId, item.id, item.depth);
+      const data = await startGenesis(agentId, item.id, depth);
       await Promise.resolve(
         onStarted(data.path, {
+          completed: data.completed,
           state: data.state,
           prompt: data.prompt,
           choices: data.choices,
@@ -77,7 +76,7 @@ export default function GenesisPathSelector({
   if (loading) {
     return (
       <div className="genesis-paths-loading">
-        <p>Loading Genesis paths…</p>
+        <p>Loading Genesis paths...</p>
       </div>
     );
   }
@@ -86,26 +85,57 @@ export default function GenesisPathSelector({
     <div className="genesis-path-selector">
       <h3 className="genesis-path-title">Choose how to discover your agent</h3>
       <p className="genesis-path-subtitle">
-        Each path leads to the same outcome — a soul document — but the journey differs.
+        Each path leads to the same outcome &mdash; a soul document &mdash; but the journey differs.
       </p>
       <div className="genesis-path-cards">
         {paths.map((item) => {
-          const key = item.depth ? `${item.id}:${item.depth}` : item.id;
-          const isStarting = starting === key;
+          const key = item.id;
+          const isCrystallization = item.id === 'soul_crystallization';
+          const isExpanded = isCrystallization && expandedCrystallization;
+
           return (
-            <button
+            <div
               key={key}
-              type="button"
-              className="genesis-path-card"
-              onClick={() => handleSelect(item)}
-              disabled={!!starting}
-              title={item.estimated_time}
+              className={`genesis-path-card${isExpanded ? ' genesis-path-card-expanded' : ''}`}
             >
-              <span className="genesis-path-card-label">{pathLabel(item)}</span>
-              <span className="genesis-path-card-time">{item.estimated_time}</span>
-              <p className="genesis-path-card-desc">{item.description}</p>
-              {isStarting && <span className="genesis-path-card-busy">Starting…</span>}
-            </button>
+              <button
+                type="button"
+                className="genesis-path-card-btn"
+                onClick={() => handleSelect(item)}
+                disabled={!!starting}
+              >
+                <span className="genesis-path-card-label">{item.label}</span>
+                <span className="genesis-path-card-time">{item.estimated_time}</span>
+                <p className="genesis-path-card-desc">{item.description}</p>
+                {starting === key && (
+                  <span className="genesis-path-card-busy">Starting...</span>
+                )}
+              </button>
+
+              {isExpanded && (
+                <div className="genesis-depth-selector">
+                  <p className="genesis-depth-label">Choose depth:</p>
+                  <div className="genesis-depth-options">
+                    {DEPTH_OPTIONS.map((d) => {
+                      const isStartingThis = starting === `${item.id}:${d.value}`;
+                      return (
+                        <button
+                          key={d.value}
+                          type="button"
+                          className="genesis-depth-btn"
+                          onClick={() => handleSelect(item, d.value)}
+                          disabled={!!starting}
+                        >
+                          <span className="genesis-depth-btn-label">{d.label}</span>
+                          <span className="genesis-depth-btn-time">{d.time}</span>
+                          {isStartingThis && <span className="genesis-path-card-busy">Starting...</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           );
         })}
       </div>

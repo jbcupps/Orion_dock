@@ -54,28 +54,35 @@ impl PostgresStore {
         self.rt.block_on(f)
     }
 
-    pub fn has_birth(&self) -> Result<bool> {
+    pub fn has_birth(&self, agent_id: &str) -> Result<bool> {
         let pool = &self.pool;
+        let agent_id = agent_id.to_string();
         let count: (i64,) = self
             .block_on(
-                sqlx::query_as("SELECT COUNT(*)::bigint FROM birth WHERE id = 1").fetch_one(pool),
+                sqlx::query_as("SELECT COUNT(*)::bigint FROM birth WHERE agent_id = $1")
+                    .bind(&agent_id)
+                    .fetch_one(pool),
             )
             .map_err(|e| StoreError::Postgres(e.to_string()))?;
         Ok(count.0 > 0)
     }
 
-    pub fn record_birth(&self, memory: &Memory) -> Result<()> {
-        if self.has_birth()? {
+    pub fn record_birth(&self, agent_id: &str, memory: &Memory) -> Result<()> {
+        if self.has_birth(agent_id)? {
             return Err(StoreError::BirthAlreadyRecorded);
         }
         let pool = &self.pool;
+        let agent_id = agent_id.to_string();
         let content = memory.content.clone();
         let created_at = memory.created_at;
         self.block_on(
-            sqlx::query("INSERT INTO birth (id, content, created_at) VALUES (1, $1, $2)")
-                .bind(&content)
-                .bind(created_at)
-                .execute(pool),
+            sqlx::query(
+                "INSERT INTO birth (agent_id, content, created_at) VALUES ($1, $2, $3)",
+            )
+            .bind(&agent_id)
+            .bind(&content)
+            .bind(created_at)
+            .execute(pool),
         )
         .map_err(|e| StoreError::Postgres(e.to_string()))?;
         Ok(())

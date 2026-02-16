@@ -451,6 +451,7 @@ struct AgentIdentityBundle {
     pubkey_base64: String,
     birth_complete: bool,
     birth_date: Option<String>,
+    lineage_verified: bool,
 }
 
 #[derive(Serialize)]
@@ -711,6 +712,7 @@ async fn api_create_agent(
 
     let config = AppConfig {
         schema_version: CONFIG_SCHEMA_VERSION,
+        agent_id: Some(uuid.clone()),
         data_dir: agent_dir.clone(),
         models_dir: agent_dir.join("models"),
         docs_dir: docs_dir.clone(),
@@ -756,7 +758,20 @@ async fn api_create_agent(
             )
         })?
     } else {
-        GlobalConfig::new(&root)
+        let mut new_gc = GlobalConfig::new(&root);
+        // Auto-generate Hive master key on first initialization.
+        if !new_gc.master_key_path.exists() {
+            match orion_core::generate_master_key(&root) {
+                Ok(result) => {
+                    new_gc.master_key_path = result.master_key_path;
+                    tracing::info!("Generated Hive master key");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to generate Hive master key: {}", e);
+                }
+            }
+        }
+        new_gc
     };
 
     gc.register_agent(AgentEntry {
@@ -906,9 +921,30 @@ async fn api_birth_state(
         ));
     }
 
+    // Check if we already have the signing key in memory or on disk.
+    let id_clone = id.clone();
+    let has_key_in_memory = state
+        .birth_keys
+        .lock()
+        .map(|keys| keys.contains_key(&id))
+        .unwrap_or(false);
+
+    // If key is not in memory, try to reload from disk (handles disconnect/reconnect).
+    if !has_key_in_memory {
+        if let Some(dir) = agent_dir(&id) {
+            if let Ok(Some(key_bytes)) = orion_core::load_signing_key(&dir) {
+                if let Ok(mut keys) = state.birth_keys.lock() {
+                    keys.insert(id.clone(), key_bytes);
+                }
+            }
+        }
+    }
+
+    // Capture data_root for master key lineage signing.
+    let data_root_path = data_root();
+
     // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
     let cp = config_path.clone();
-    let id_clone = id.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<(BirthStateResponse, Option<Vec<u8>>), String> {
             let mut orch = orion_birth::BirthOrchestrator::new(config.clone())
@@ -927,6 +963,35 @@ async fn api_birth_state(
                     orch.config_mut()
                         .save(&cp)
                         .map_err(|e| format!("Save config: {}", e))?;
+
+                    // Sign agent's pubkey with Hive master key for lineage.
+                    if let Some(ref root) = data_root_path {
+                        let gc_path = GlobalConfig::config_path(root);
+                        if gc_path.exists() {
+                            if let Ok(gc) = GlobalConfig::load(root) {
+                                let pubkey_path_inner =
+                                    config.data_dir.join("external_pubkey.bin");
+                                let lineage_sig_path =
+                                    config.data_dir.join("hive_lineage.sig");
+                                match orion_core::sign_agent_lineage(
+                                    &gc.master_key_path,
+                                    &pubkey_path_inner,
+                                    &lineage_sig_path,
+                                ) {
+                                    Ok(true) => {
+                                        tracing::info!("Hive lineage signature written for agent");
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!("Hive master key or agent pubkey not found; skipping lineage");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to sign agent lineage: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     orch.get_private_key_base64().map(String::from)
                 } else {
                     None
@@ -1216,6 +1281,7 @@ async fn api_genesis_start(
     }
 
     let path = match body.path.as_str() {
+        "quick_start" => GenesisPath::QuickStart,
         "direct" => GenesisPath::Direct,
         "soul_crystallization" => {
             let depth = match body.depth.as_deref().unwrap_or("quick_start") {
@@ -1234,9 +1300,98 @@ async fn api_genesis_start(
         }
     };
 
+    // For QuickStart, auto-fill soul template and advance through Genesis → Emergence.
+    if let GenesisPath::QuickStart = path {
+        let id_qs = id.clone();
+        let key_bytes = state
+            .birth_keys
+            .lock()
+            .map_err(|_| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Lock failed".to_string(),
+                )
+            })?
+            .remove(&id)
+            .or_else(|| {
+                agent_dir(&id).and_then(|dir| orion_core::load_signing_key(&dir).ok().flatten())
+            })
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "No signing key found. The signing key may have been lost.".to_string(),
+                )
+            })?;
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            use orion_core::templates::{
+                fill_soul_template_default, ETHICS_MD, GROWTH_MD, INSTINCTS_MD,
+            };
+
+            let mut config = AppConfig::load(&config_path)
+                .map_err(|e| format!("Quick-start load config: {}", e))?;
+            let agent_name = config
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "Agent".to_string());
+            let docs_dir = config.docs_dir.clone();
+            std::fs::create_dir_all(&docs_dir)
+                .map_err(|e| format!("Create docs dir: {}", e))?;
+
+            let soul_content = fill_soul_template_default(&agent_name);
+            std::fs::write(docs_dir.join("soul.md"), &soul_content)
+                .map_err(|e| format!("Write soul.md: {}", e))?;
+            std::fs::write(docs_dir.join("ethics.md"), ETHICS_MD)
+                .map_err(|e| format!("Write ethics.md: {}", e))?;
+            std::fs::write(docs_dir.join("instincts.md"), INSTINCTS_MD)
+                .map_err(|e| format!("Write instincts.md: {}", e))?;
+            std::fs::write(docs_dir.join("growth.md"), GROWTH_MD)
+                .map_err(|e| format!("Write growth.md: {}", e))?;
+
+            let signing_key = orion_core::parse_private_key(
+                &BASE64.encode(&key_bytes),
+            )
+            .map_err(|e| format!("Parse signing key: {}", e))?;
+            orion_core::sign_constitutional_documents(&signing_key, &docs_dir)
+                .map_err(|e| format!("Sign docs: {}", e))?;
+
+            config.birth_complete = true;
+            config.birth_stage = None;
+            config.birth_timestamp = Some(chrono::Utc::now().to_rfc3339());
+            config
+                .save(&config.config_path())
+                .map_err(|e| format!("Save config: {}", e))?;
+
+            persist_genesis_path(&id_qs, &GenesisPath::QuickStart)
+                .map_err(|e| format!("Persist path: {}", e))?;
+
+            tracing::info!(agent = %agent_name, "Quick-start genesis completed");
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task join: {}", e),
+            )
+        })?
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        // Clean up persisted signing key
+        if let Some(dir) = agent_dir(&id) {
+            let _ = orion_core::delete_signing_key(&dir);
+        }
+
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "path": "quick_start",
+            "completed": true,
+        })));
+    }
+
     // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
     let path_clone = path.clone();
-    let id_clone = id.clone();
+    let id_clone2 = id.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut orch = orion_birth::BirthOrchestrator::new(config.clone())
             .map_err(|e| format!("Orchestrator: {}", e))?;
@@ -1251,7 +1406,7 @@ async fn api_genesis_start(
         orch.advance_to_genesis_with_path(path_clone.clone())
             .map_err(|e| format!("Failed to advance: {}", e))?;
 
-        persist_genesis_path(&id_clone, &path_clone)
+        persist_genesis_path(&id_clone2, &path_clone)
             .map_err(|e| format!("Failed to persist path: {}", e))?;
         Ok(())
     })
@@ -1471,23 +1626,27 @@ async fn api_birth_chat(
         )
     })?;
 
-    // Guard: only Direct Discovery in Genesis stage.
+    // Guard: only Direct Discovery or Soul Crystallization in Genesis stage.
     let gp_path = dir.join("genesis_path.json");
-    let path_is_direct = gp_path
+    let genesis_path_id = gp_path
         .exists()
         .then(|| {
             std::fs::read_to_string(&gp_path).ok().and_then(|s| {
                 serde_json::from_str::<serde_json::Value>(&s)
                     .ok()
-                    .map(|v| v.get("path").and_then(|p| p.as_str()) == Some("direct"))
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
             })
         })
-        .flatten()
-        .unwrap_or(false);
-    if !path_is_direct {
+        .flatten();
+    let path_allows_chat = matches!(
+        genesis_path_id.as_deref(),
+        Some("direct") | Some("soul_crystallization")
+    );
+    if !path_allows_chat {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            "Birth chat is only for Direct Discovery path in Genesis stage.".to_string(),
+            "Birth chat is only for Direct Discovery or Soul Crystallization paths in Genesis stage."
+                .to_string(),
         ));
     }
 
@@ -3362,12 +3521,31 @@ async fn api_agent_identity(
         (None, false, None)
     };
 
+    // Verify Hive lineage if master key and lineage file exist.
+    let lineage_verified = data_root()
+        .and_then(|root| {
+            let gc_path = GlobalConfig::config_path(&root);
+            if !gc_path.exists() {
+                return None;
+            }
+            let gc = GlobalConfig::load(&root).ok()?;
+            let lineage_sig_path = dir.join("hive_lineage.sig");
+            orion_core::verify_agent_lineage(
+                &gc.master_key_path,
+                &pubkey_path,
+                &lineage_sig_path,
+            )
+            .ok()
+        })
+        .unwrap_or(false);
+
     Ok(Json(AgentIdentityBundle {
         agent_id: id,
         name,
         pubkey_base64,
         birth_complete,
         birth_date,
+        lineage_verified,
     }))
 }
 
@@ -3782,6 +3960,7 @@ async fn api_import_agent(
 
     let config = AppConfig {
         schema_version: CONFIG_SCHEMA_VERSION,
+        agent_id: Some(uuid.clone()),
         data_dir: agent_dir.clone(),
         models_dir: agent_dir.join("models"),
         docs_dir: docs_dir.clone(),

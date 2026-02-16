@@ -145,7 +145,7 @@ export async function startGenesis(
   agentId: string,
   path: string,
   depth?: string
-): Promise<{ ok: boolean; path: string; state?: string; prompt?: string; choices?: string[] }> {
+): Promise<{ ok: boolean; path: string; completed?: boolean; state?: string; prompt?: string; choices?: string[] }> {
   const base = getBaseUrl();
   const res = await fetch(`${base}/api/agents/${encodeURIComponent(agentId)}/genesis/start`, {
     method: 'POST',

@@ -146,19 +146,19 @@ impl MemoryStore {
         }
     }
 
-    pub fn has_birth(&self) -> Result<bool> {
+    pub fn has_birth(&self, agent_id: &str) -> Result<bool> {
         match self {
-            MemoryStore::Sqlite(s) => s.has_birth(),
+            MemoryStore::Sqlite(s) => s.has_birth(agent_id),
             #[cfg(feature = "postgres")]
-            MemoryStore::Postgres(s) => s.has_birth(),
+            MemoryStore::Postgres(s) => s.has_birth(agent_id),
         }
     }
 
-    pub fn record_birth(&self, memory: &Memory) -> Result<()> {
+    pub fn record_birth(&self, agent_id: &str, memory: &Memory) -> Result<()> {
         match self {
-            MemoryStore::Sqlite(s) => s.record_birth(memory),
+            MemoryStore::Sqlite(s) => s.record_birth(agent_id, memory),
             #[cfg(feature = "postgres")]
-            MemoryStore::Postgres(s) => s.record_birth(memory),
+            MemoryStore::Postgres(s) => s.record_birth(agent_id, memory),
         }
     }
 
@@ -281,20 +281,20 @@ mod tests {
     #[test]
     fn test_birth_record() {
         let store = MemoryStore::open_in_memory().unwrap();
-        assert!(!store.has_birth().unwrap());
+        assert!(!store.has_birth("test-agent").unwrap());
         store
-            .record_birth(&Memory::crystallized("I was born".into()))
+            .record_birth("test-agent", &Memory::crystallized("I was born".into()))
             .unwrap();
-        assert!(store.has_birth().unwrap());
+        assert!(store.has_birth("test-agent").unwrap());
     }
 
     #[test]
     fn test_double_birth_rejected() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .record_birth(&Memory::crystallized("I was born".into()))
+            .record_birth("test-agent", &Memory::crystallized("I was born".into()))
             .unwrap();
-        let result = store.record_birth(&Memory::crystallized("Born again".into()));
+        let result = store.record_birth("test-agent", &Memory::crystallized("Born again".into()));
         assert!(result.is_err());
         match result.unwrap_err() {
             StoreError::BirthAlreadyRecorded => {}
@@ -415,14 +415,14 @@ mod tests {
                 .insert_memory(&Memory::ephemeral("persisted msg".into()))
                 .unwrap();
             store
-                .record_birth(&Memory::crystallized("born".into()))
+                .record_birth("test-agent", &Memory::crystallized("born".into()))
                 .unwrap();
         }
 
         // Reopen and verify persistence
         {
             let store = MemoryStore::open(&db_path).unwrap();
-            assert!(store.has_birth().unwrap());
+            assert!(store.has_birth("test-agent").unwrap());
             let recent = store.recent_memories(10).unwrap();
             assert_eq!(recent.len(), 1);
             assert_eq!(recent[0].content, "persisted msg");
@@ -462,11 +462,11 @@ mod tests {
             .insert_memory(&Memory::ephemeral("msg2".into()))
             .unwrap();
         store
-            .record_birth(&Memory::crystallized("born".into()))
+            .record_birth("test-agent", &Memory::crystallized("born".into()))
             .unwrap();
 
         assert_eq!(store.count_memories().unwrap(), 2);
-        assert!(store.has_birth().unwrap());
+        assert!(store.has_birth("test-agent").unwrap());
 
         // Clear memories
         let deleted = store.clear_memories().unwrap();
@@ -474,7 +474,7 @@ mod tests {
 
         // Memories gone, but birth still there
         assert_eq!(store.count_memories().unwrap(), 0);
-        assert!(store.has_birth().unwrap());
+        assert!(store.has_birth("test-agent").unwrap());
     }
 
     #[test]

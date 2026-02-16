@@ -44,7 +44,10 @@ impl SqliteStore {
         Self::open(&config.db_path)
     }
 
-    pub fn has_birth(&self) -> Result<bool> {
+    /// Check if this agent has a birth record. The agent_id parameter is accepted
+    /// for API compatibility with PostgresStore but is ignored for SQLite since
+    /// each agent has its own database file.
+    pub fn has_birth(&self, _agent_id: &str) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
         })?;
@@ -54,8 +57,10 @@ impl SqliteStore {
         Ok(count > 0)
     }
 
-    pub fn record_birth(&self, memory: &Memory) -> Result<()> {
-        if self.has_birth()? {
+    /// Record birth for an agent. The agent_id parameter is accepted for API
+    /// compatibility with PostgresStore but is ignored for SQLite.
+    pub fn record_birth(&self, _agent_id: &str, memory: &Memory) -> Result<()> {
+        if self.has_birth(_agent_id)? {
             return Err(StoreError::BirthAlreadyRecorded);
         }
         let conn = self.conn.lock().map_err(|e| {

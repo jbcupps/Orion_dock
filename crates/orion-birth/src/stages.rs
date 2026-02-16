@@ -110,9 +110,11 @@ fn depth_to_crystallization_depth(d: SoulCrystallizationDepth) -> DepthLevel {
 /// Genesis path: how the mentor chooses to obtain (name, purpose, personality).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GenesisPath {
+    /// Auto-generate standard identity and constitutional docs. No ceremony.
+    QuickStart,
     /// Existing chat with recommend_crystallize tool
     Direct,
-    /// Abigail-style depth-based psychometric profiling
+    /// Depth-based psychometric profiling
     SoulCrystallization { depth: SoulCrystallizationDepth },
     /// Scenario-based calibration ritual (archetypes, sigil)
     SoulForge,
@@ -122,6 +124,7 @@ impl GenesisPath {
     /// Unique id for API and config.
     pub fn id(&self) -> &'static str {
         match self {
+            GenesisPath::QuickStart => "quick_start",
             GenesisPath::Direct => "direct",
             GenesisPath::SoulCrystallization { .. } => "soul_crystallization",
             GenesisPath::SoulForge => "soul_forge",
@@ -131,6 +134,7 @@ impl GenesisPath {
     /// Human-readable label.
     pub fn label(&self) -> &'static str {
         match self {
+            GenesisPath::QuickStart => "Quick Start",
             GenesisPath::Direct => "Direct Discovery",
             GenesisPath::SoulCrystallization { .. } => "Soul Crystallization",
             GenesisPath::SoulForge => "Soul Forge",
@@ -140,6 +144,9 @@ impl GenesisPath {
     /// Description for path-selection UI.
     pub fn description(&self) -> &'static str {
         match self {
+            GenesisPath::QuickStart => {
+                "Skip the ceremony. Auto-generate a standard identity and constitutional documents from the agent name. You can customize later."
+            }
             GenesisPath::Direct => {
                 "A simple conversation. I will ask your name, what you want me to do, and how you want me to talk. Fast and straightforward — we will get to know each other as we work."
             }
@@ -155,6 +162,7 @@ impl GenesisPath {
     /// Estimated time for UI.
     pub fn estimated_time(&self) -> &'static str {
         match self {
+            GenesisPath::QuickStart => "~5 seconds",
             GenesisPath::Direct => "~1 minute",
             GenesisPath::SoulCrystallization { depth } => match depth {
                 SoulCrystallizationDepth::QuickStart => "~30 seconds",
@@ -166,19 +174,24 @@ impl GenesisPath {
     }
 
     /// All paths available for selection.
+    /// Soul Crystallization appears once; the frontend handles depth sub-selection.
     pub fn all_paths() -> Vec<GenesisPath> {
         vec![
+            GenesisPath::QuickStart,
             GenesisPath::Direct,
-            GenesisPath::SoulCrystallization {
-                depth: SoulCrystallizationDepth::QuickStart,
-            },
             GenesisPath::SoulCrystallization {
                 depth: SoulCrystallizationDepth::Conversation,
             },
-            GenesisPath::SoulCrystallization {
-                depth: SoulCrystallizationDepth::DeepDive,
-            },
             GenesisPath::SoulForge,
+        ]
+    }
+
+    /// All available Soul Crystallization depth levels (for frontend sub-selector).
+    pub fn crystallization_depths() -> Vec<(SoulCrystallizationDepth, &'static str, &'static str)> {
+        vec![
+            (SoulCrystallizationDepth::QuickStart, "Quick Start", "~30 seconds"),
+            (SoulCrystallizationDepth::Conversation, "Conversation", "3-5 minutes"),
+            (SoulCrystallizationDepth::DeepDive, "Deep Dive", "10-15 minutes"),
         ]
     }
 }
@@ -206,6 +219,8 @@ pub enum BirthError {
 pub struct BirthOrchestrator {
     config: AppConfig,
     store: MemoryStore,
+    /// Agent UUID for scoping birth records in shared Postgres databases.
+    agent_id: String,
     stage: BirthStage,
     /// Held in memory from Darkness until Emergence, then dropped
     signing_key: Option<SigningKey>,
@@ -221,8 +236,9 @@ pub struct BirthOrchestrator {
 
 impl BirthOrchestrator {
     pub fn new(config: AppConfig) -> anyhow::Result<Self> {
+        let agent_id = config.effective_agent_id();
         let store = MemoryStore::open_with_config(&config)?;
-        if store.has_birth()? {
+        if store.has_birth(&agent_id)? {
             return Err(BirthError::AlreadyBorn.into());
         }
         // Restore persisted stage from config (if any), otherwise start at Darkness.
@@ -234,6 +250,7 @@ impl BirthOrchestrator {
         Ok(Self {
             config,
             store,
+            agent_id,
             stage,
             signing_key: None,
             private_key_base64: None,
@@ -439,13 +456,13 @@ impl BirthOrchestrator {
         self.private_key_base64 = None;
 
         // Write birth memory
-        if self.store.has_birth()? {
+        if self.store.has_birth(&self.agent_id)? {
             return Err(BirthError::AlreadyBorn.into());
         }
         let born_at = chrono::Utc::now().to_rfc3339();
         let content = format!("I was born. First run completed at {}.", born_at);
         let memory = Memory::crystallized(content);
-        self.store.record_birth(&memory)?;
+        self.store.record_birth(&self.agent_id, &memory)?;
 
         // Save config - mark birth complete and clear stage
         self.config.birth_complete = true;
@@ -476,7 +493,7 @@ impl BirthOrchestrator {
 
     /// Complete birth (legacy path — signs with held key if available, or just records birth).
     pub fn complete_birth(&mut self) -> anyhow::Result<()> {
-        if self.store.has_birth()? {
+        if self.store.has_birth(&self.agent_id)? {
             return Err(BirthError::AlreadyBorn.into());
         }
 
@@ -495,7 +512,7 @@ impl BirthOrchestrator {
         let born_at = chrono::Utc::now().to_rfc3339();
         let content = format!("I was born. First run completed at {}.", born_at);
         let memory = Memory::crystallized(content);
-        self.store.record_birth(&memory)?;
+        self.store.record_birth(&self.agent_id, &memory)?;
         self.config.birth_complete = true;
         self.config.birth_timestamp = Some(born_at);
         self.config.clear_birth_stage();
@@ -537,6 +554,7 @@ mod tests {
         fs::create_dir_all(&data_dir).unwrap();
         AppConfig {
             schema_version: orion_core::CONFIG_SCHEMA_VERSION,
+            agent_id: Some("test-agent".to_string()),
             data_dir: data_dir.clone(),
             models_dir: data_dir.join("models"),
             docs_dir: data_dir.join("docs"),

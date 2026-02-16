@@ -28,6 +28,7 @@ import HiveScreen from './components/HiveScreen';
 import GenesisPathSelector from './components/GenesisPathSelector';
 import ForgeScenario from './components/ForgeScenario';
 import GenesisChat from './components/GenesisChat';
+import CrystallizationChat from './components/CrystallizationChat';
 import ApiKeyModal from './components/ApiKeyModal';
 import ConnectivityPanel from './components/ConnectivityPanel';
 import OperationalChat from './components/OperationalChat';
@@ -315,10 +316,22 @@ function App() {
   const handleGenesisStarted = useCallback(
     async (
       path: string,
-      data?: { state?: string; prompt?: string; choices?: string[] }
+      data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[] }
     ) => {
       setError(null);
       setGenesisPathStarted(path);
+
+      // Quick Start auto-completes birth; refresh status immediately.
+      if (data?.completed) {
+        try {
+          const s = await fetchStatus();
+          setStatus(s);
+        } catch {
+          // poll will retry
+        }
+        return;
+      }
+
       if (path === 'soul_forge' && data?.state) {
         setForgeInitial({
           state: data.state,
@@ -629,13 +642,15 @@ function App() {
             )}
             {!birthStateError && !birthStateLoading && birthState && !birthState.private_key_base64 && (
               <>
-                <p className="muted">Key was already shown. Continue to Ignition.</p>
+                <p className="muted">
+                  Your identity key was generated in a previous session. If you saved it, continue. If not, you may need to recreate this agent.
+                </p>
                 <button
                   type="button"
                   className="button-primary"
                   onClick={handleSavedKey}
                 >
-                  Continue to Ignition
+                  I have my key &mdash; continue to Ignition
                 </button>
               </>
             )}
@@ -723,14 +738,18 @@ function App() {
           </section>
         )}
         {showGenesisChatPlaceholder && !showForgeScenario && !showEmergencePanel && (
-          <section className="panel genesis-chat-placeholder-panel">
+          <section className="panel genesis-chat-panel">
             <h2>Genesis: Soul Crystallization</h2>
             <p className="phase-message">
-              The Q&A chat for this path is not yet available in the web UI.
+              Discover your agent through depth-based psychometric profiling.
             </p>
-            <p className="muted">
-              To complete birth with a guided flow now, disconnect and create or load an agent, then choose <strong>Soul Forge</strong> or <strong>Direct Discovery</strong> at the path step.
-            </p>
+            <CrystallizationChat
+              agentId={currentAgentId!}
+              onCrystallized={() => {
+                fetchStatus().then(setStatus).catch(() => {});
+              }}
+              onError={setError}
+            />
           </section>
         )}
         {!showConnectivityPanel && !showPathSelector && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && !showGenesisChatPlaceholder && !showGenesisChat && !showEmergencePanel && (

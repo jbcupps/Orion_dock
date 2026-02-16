@@ -165,6 +165,79 @@ pub fn verify_agent_signature(
         .is_ok()
 }
 
+/// High-level function to sign an agent's pubkey with the Hive master key and
+/// write the lineage signature file. Called during Darkness stage.
+///
+/// Returns Ok(true) if lineage was signed, Ok(false) if master key doesn't exist.
+pub fn sign_agent_lineage(
+    master_key_path: &Path,
+    agent_pubkey_path: &Path,
+    lineage_sig_path: &Path,
+) -> Result<bool> {
+    if !master_key_path.exists() || !agent_pubkey_path.exists() {
+        return Ok(false);
+    }
+    let master_key = load_master_key(master_key_path)?;
+    let pubkey_bytes = std::fs::read(agent_pubkey_path)?;
+    let pubkey_arr: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::Crypto("Invalid agent pubkey length".into()))?;
+    let agent_verifying_key = VerifyingKey::from_bytes(&pubkey_arr)
+        .map_err(|e| CoreError::Crypto(format!("Invalid agent pubkey: {}", e)))?;
+
+    let lineage_sig = sign_agent_key(&master_key, &agent_verifying_key);
+    let lineage_data = serde_json::json!({
+        "hive_master_pubkey": BASE64.encode(master_key.verifying_key().to_bytes()),
+        "agent_pubkey": BASE64.encode(agent_verifying_key.to_bytes()),
+        "signature": BASE64.encode(&lineage_sig),
+        "signed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let json = serde_json::to_string_pretty(&lineage_data)?;
+    std::fs::write(lineage_sig_path, json)?;
+    Ok(true)
+}
+
+/// Verify an agent's Hive lineage from the signature file.
+///
+/// Returns Ok(true) if the lineage is valid, Ok(false) if files are missing.
+pub fn verify_agent_lineage(
+    master_key_path: &Path,
+    agent_pubkey_path: &Path,
+    lineage_sig_path: &Path,
+) -> Result<bool> {
+    if !master_key_path.exists() || !agent_pubkey_path.exists() || !lineage_sig_path.exists() {
+        return Ok(false);
+    }
+
+    let master_key = load_master_key(master_key_path)?;
+    let master_pubkey = master_key.verifying_key();
+
+    let pubkey_bytes = std::fs::read(agent_pubkey_path)?;
+    let pubkey_arr: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::Crypto("Invalid agent pubkey length".into()))?;
+    let agent_verifying_key = VerifyingKey::from_bytes(&pubkey_arr)
+        .map_err(|e| CoreError::Crypto(format!("Invalid agent pubkey: {}", e)))?;
+
+    let lineage_json = std::fs::read_to_string(lineage_sig_path)?;
+    let lineage: serde_json::Value = serde_json::from_str(&lineage_json)?;
+    let sig_b64 = lineage
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::Crypto("Missing signature in lineage file".into()))?;
+    let sig_bytes = BASE64
+        .decode(sig_b64)
+        .map_err(|e| CoreError::Crypto(format!("Invalid signature base64: {}", e)))?;
+
+    Ok(verify_agent_signature(
+        &master_pubkey,
+        &agent_verifying_key,
+        &sig_bytes,
+    ))
+}
+
 #[derive(Serialize, Deserialize)]
 struct MasterKeyStored {
     secret: Vec<u8>,

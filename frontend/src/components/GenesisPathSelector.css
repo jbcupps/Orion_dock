@@ -4,77 +4,169 @@
 }
 
 .genesis-path-title {
-  font-size: 1.25rem;
+  font-size: 1.3rem;
   font-weight: 600;
-  margin: 0 0 0.25rem 0;
-  color: var(--text, #1a1a1a);
+  margin: 0 0 0.35rem 0;
+  color: var(--text, #e8e8e8);
 }
 
 .genesis-path-subtitle {
   font-size: 0.9rem;
-  color: var(--muted, #666);
-  margin: 0 0 1.25rem 0;
+  color: var(--muted, #999);
+  margin: 0 0 1.5rem 0;
 }
 
 .genesis-path-cards {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: 1fr 1fr;
 }
+
+/* ---- Card (wrapper div) ---- */
 
 .genesis-path-card {
   position: relative;
-  text-align: left;
-  padding: 1rem 1.25rem;
-  border: 1px solid var(--border, #ddd);
-  border-radius: 8px;
-  background: var(--card-bg, #fafafa);
-  cursor: pointer;
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  background: var(--card-bg, #1a1e24);
   transition: border-color 0.15s, box-shadow 0.15s;
+  overflow: hidden;
 }
 
-.genesis-path-card:hover:not(:disabled) {
+.genesis-path-card:hover {
   border-color: var(--accent, #0a7ea4);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
 }
 
-.genesis-path-card:disabled {
-  cursor: not-allowed;
-  opacity: 0.8;
+.genesis-path-card-expanded {
+  border-color: var(--accent, #0a7ea4);
 }
+
+/* ---- Card button (clickable area) ---- */
+
+.genesis-path-card-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 1.25rem 1.5rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+}
+
+.genesis-path-card-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* ---- Card inner elements ---- */
 
 .genesis-path-card-label {
   display: block;
-  font-weight: 600;
-  font-size: 1rem;
-  margin-bottom: 0.25rem;
-  color: var(--text, #1a1a1a);
+  font-weight: 700;
+  font-size: 1.1rem;
+  margin-bottom: 0.3rem;
+  color: var(--text, #e8e8e8);
 }
 
 .genesis-path-card-time {
   font-size: 0.8rem;
-  color: var(--muted, #666);
-  margin-bottom: 0.5rem;
+  color: var(--muted, #999);
+  margin-bottom: 0.75rem;
   display: block;
 }
 
 .genesis-path-card-desc {
   font-size: 0.85rem;
-  line-height: 1.45;
-  color: var(--text-secondary, #333);
+  line-height: 1.5;
+  color: var(--text-secondary, #bbb);
   margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .genesis-path-card-busy {
   position: absolute;
-  top: 0.5rem;
-  right: 0.75rem;
+  top: 0.75rem;
+  right: 1rem;
   font-size: 0.75rem;
   color: var(--accent, #0a7ea4);
 }
 
+/* ---- Depth sub-selector (Soul Crystallization) ---- */
+
+.genesis-depth-selector {
+  padding: 0 1.5rem 1.25rem;
+  border-top: 1px solid var(--border, #333);
+}
+
+.genesis-depth-label {
+  font-size: 0.8rem;
+  color: var(--muted, #999);
+  margin: 0.75rem 0 0.5rem;
+}
+
+.genesis-depth-options {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.genesis-depth-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  background: var(--card-bg, #222830);
+  color: var(--text, #e8e8e8);
+  cursor: pointer;
+  text-align: center;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.genesis-depth-btn:hover:not(:disabled) {
+  border-color: var(--accent, #0a7ea4);
+  background: rgba(10, 126, 164, 0.1);
+}
+
+.genesis-depth-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.genesis-depth-btn-label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.genesis-depth-btn-time {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--muted, #999);
+  margin-top: 0.15rem;
+}
+
+/* ---- Loading ---- */
+
 .genesis-paths-loading {
   padding: 1.5rem;
   text-align: center;
-  color: var(--muted, #666);
+  color: var(--muted, #999);
+}
+
+/* ---- Responsive: stack to single column on narrow screens ---- */
+
+@media (max-width: 640px) {
+  .genesis-path-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .genesis-depth-options {
+    flex-direction: column;
+  }
 }
