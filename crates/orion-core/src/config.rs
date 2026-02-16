@@ -276,6 +276,11 @@ pub struct AppConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
 
+    /// Unique agent identifier (UUID v4). Used to scope Postgres birth/memory tables.
+    /// If None (legacy configs), derived from data_dir path.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
     pub data_dir: PathBuf,
     pub models_dir: PathBuf,
     pub docs_dir: PathBuf,
@@ -479,6 +484,7 @@ impl AppConfig {
 
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
+            agent_id: None,
             data_dir: base.clone(),
             models_dir: base.join("models"),
             docs_dir: base.join("docs"),
@@ -610,6 +616,18 @@ impl AppConfig {
     /// Path to the config file (data_dir/config.json).
     pub fn config_path(&self) -> PathBuf {
         self.data_dir.join("config.json")
+    }
+
+    /// Effective agent ID. Uses explicit agent_id if set, otherwise derives from data_dir path.
+    pub fn effective_agent_id(&self) -> String {
+        if let Some(ref id) = self.agent_id {
+            return id.clone();
+        }
+        self.data_dir
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(String::from)
+            .unwrap_or_else(|| "default".to_string())
     }
 
     /// Returns the effective external pubkey path.

@@ -11,6 +11,7 @@ fn test_config(base: &Path) -> AppConfig {
     std::fs::create_dir_all(&data_dir).unwrap();
     AppConfig {
         schema_version: orion_core::CONFIG_SCHEMA_VERSION,
+        agent_id: Some("test-agent".to_string()),
         data_dir: data_dir.clone(),
         models_dir: data_dir.join("models"),
         docs_dir: data_dir.join("docs"),

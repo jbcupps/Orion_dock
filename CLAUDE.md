@@ -197,7 +197,7 @@ Orchestration is currently implemented as an MVP module at `crates/orion-api/src
 - `/api/agents/:id/tier-models/validate` (POST) — Validate selected tier models against catalogs
 - `/api/agents/:id/tier-models/reset` (POST) — Reset provider tier models to built-in defaults
 - `/api/agents/:id/active-provider` (PUT) — Set preferred Ego provider for routing
-- `POST /api/agents` with `quick_start: true` — Quick-start birth (auto identity + standard docs)
+- `POST /api/agents` — Create agent (always enters birth flow; quick-start is now a Genesis path)
 
 ---
 
@@ -206,23 +206,30 @@ Orchestration is currently implemented as an MVP module at `crates/orion-api/src
 The birth flow is a **state machine** in `crates/orion-birth/`. Most stages are **interactive** — the user must participate.
 
 ```
-Darkness → Ignition → Connectivity → Genesis → Emergence
+Darkness → Ignition → Connectivity → Genesis (path selector) → Emergence
 ```
 
 | Stage | Purpose | What Happens |
 |-------|---------|--------------|
-| **Darkness** | Generate cryptographic identity | `generate_external_keypair()` creates Ed25519 keypair. Public key saved to `external_pubkey.bin`. Private key returned as base64 **once** via `get_private_key_base64()`. User must save it before advancing. |
+| **Darkness** | Generate cryptographic identity | `generate_external_keypair()` creates Ed25519 keypair. Public key saved to `external_pubkey.bin`. Private key returned as base64 **once** via `get_private_key_base64()`. User must save it before advancing. Hive master key signs the agent's pubkey (`hive_lineage.sig`) for lineage proof. |
 | **Ignition** | Configure local LLM | User sets `local_llm_base_url`. URL validated (localhost/127.0.0.1 only for SSRF protection). |
 | **Connectivity** | Acquire cloud API keys | Id (local LLM) chats with user. User pastes API keys. Provider auto-detected from key prefix (sk-ant- → anthropic, sk- → openai). Keys stored in SecretsVault. |
-| **Genesis** | Discover identity | Mentor chooses a Genesis path. Each produces (name, purpose, personality) and calls `crystallize_soul()`. |
+| **Genesis** | Discover identity | Mentor chooses a Genesis path (Quick Start, Direct Discovery, Soul Crystallization, Soul Forge). Each produces (name, purpose, personality) and calls `crystallize_soul()`. |
 | **Emergence** | Finalize birth | Signs soul.md, ethics.md, instincts.md with held signing key; writes `.sig` files; drops key from memory; writes birth memory. |
+
+### Hive Master Key Lineage
+
+Each Hive installation generates an Ed25519 master key on first agent creation (`master.key` in data root, DPAPI-encrypted). During the Darkness stage, the agent's public key is signed by the Hive master key, creating a `hive_lineage.sig` file containing the master pubkey, agent pubkey, signature, and timestamp. This proves an agent belongs to a specific Hive. The `/api/agents/:id/identity` endpoint returns `lineage_verified: true/false`.
+
+Key functions: `generate_master_key()`, `sign_agent_lineage()`, `verify_agent_lineage()` in `crates/orion-core/src/keyring.rs`.
 
 ### Key Code Locations
 
 - **Stages/orchestrator**: `crates/orion-birth/src/stages.rs` — `BirthStage`, `BirthOrchestrator`, `generate_identity()`, `get_private_key_base64()`, `advance_past_darkness()`, `crystallize_soul()`, `complete_emergence()`
 - **Birth chat/tools**: `crates/orion-birth/src/chat.rs` — `build_birth_messages()`, `birth_chat_turn()`, `parse_tool_requests()`, `execute_store_provider_key()`
 - **Stage prompts**: `crates/orion-birth/src/prompts.rs` — `CONNECTIVITY_SYSTEM_PROMPT`, `GENESIS_SYSTEM_PROMPT`, `BIRTH_TOOLS_DEFINITION`
-- **Keypair generation**: `crates/orion-core/src/keyring.rs` — `generate_external_keypair()`, `sign_constitutional_documents()`
+- **Keypair generation**: `crates/orion-core/src/keyring.rs` — `generate_external_keypair()`, `sign_constitutional_documents()`, `sign_agent_lineage()`, `verify_agent_lineage()`
+- **Hive config**: `crates/orion-core/src/global_config.rs` — `GlobalConfig`, `master_key_path`, agent registry
 - **Tier config**: `crates/orion-core/src/config.rs` — `TierModels`, `ProviderCatalogEntry`, `effective_tier_model()`, `curated_provider_models()`
 - **Model catalog**: `crates/orion-capabilities/src/cognitive/model_catalog.rs` — Provider catalog fetching (OpenAI, Anthropic, Google, xAI, Perplexity)
 - **Default templates**: `crates/orion-core/src/templates.rs` — `DEFAULT_PURPOSE`, `DEFAULT_PERSONALITY`, `fill_soul_template_default()`
@@ -234,22 +241,23 @@ Every Genesis path must produce `(name, purpose, personality)`. The caller uses 
 
 | Path | Mechanism |
 |------|-----------|
+| **Quick Start** | Auto-generate standard identity and constitutional documents from agent name. No ceremony — signs and completes immediately. (~5 sec) |
 | **Direct Discovery** | LLM chat with `GENESIS_SYSTEM_PROMPT`; `recommend_crystallize` tool. (~1 min) |
-| **Soul Crystallization** | `CrystallizationEngine` (Spark → Conversation → Mirror → Forge → SoulGeneration → Complete); depth-based. (30s–15min) |
+| **Soul Crystallization** | `CrystallizationEngine` (Spark → Conversation → Mirror → Forge → SoulGeneration → Complete); depth-based (Quick Start/Conversation/Deep Dive). (30s–15min) |
 | **Soul Forge** | Three ethical dilemmas → Triangle Ethic weights, deterministic archetype, SHA-256 soul hash, visual sigil. (~2 min) |
 
 New paths plug in by: (1) extending `GenesisPath` enum in orion-birth, (2) adding path-specific engine if needed, (3) producing soul_content + growth_content and calling `crystallize_soul`.
 
-### Quick-Start Birth
+### Quick-Start Genesis Path
 
-An alternative to the interactive birth flow. When `POST /api/agents` includes `quick_start: true`:
+Quick Start is now a Genesis path (not a Hive creation checkbox). When the mentor selects Quick Start in the Genesis path selector:
 
-1. Generates Ed25519 identity keypair automatically.
-2. Fills soul template with `DEFAULT_PURPOSE` and `DEFAULT_PERSONALITY` from `orion-core::templates`.
-3. Signs constitutional documents (soul.md, ethics.md, instincts.md).
-4. Sets `birth_complete: true` immediately — no interactive stages.
+1. Auto-fills soul template with `DEFAULT_PURPOSE` and `DEFAULT_PERSONALITY` from `orion-core::templates`.
+2. Writes constitutional documents (soul.md, ethics.md, instincts.md, growth.md).
+3. Signs constitutional documents with the held signing key.
+4. Sets `birth_complete: true` — skips Emergence confirmation.
 
-Useful for testing, automation, or when the mentor wants a pre-configured agent quickly.
+The agent still goes through Darkness (identity), Ignition (LLM), and Connectivity (API keys) before Quick Start is available as a Genesis path choice.
 
 ### Constitutional Documents
 
@@ -283,7 +291,9 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 ## Security Model
 
 - **Ed25519 identity**: External keypair generated in Darkness. Private key shown **once**, never persisted. Public key in `external_pubkey.bin`.
+- **Hive lineage**: Master Ed25519 key generated per Hive (`master.key`). Signs each agent's pubkey at birth → `hive_lineage.sig`. Proves agent belongs to this Hive. Future: SAO/blockchain verification via `jbcupps/SAO` and `jbcupps/Ethical_AI_Reg`.
 - **Document signing**: Format `{doc_name}|{tier}|{content}` → signature. `.sig` files store base64 signature, tier, timestamp. Verified on boot via `orion-core` verifier.
+- **Per-agent Postgres scoping**: When using Postgres as the memory backend, the `birth` table uses `agent_id TEXT` as the primary key so multiple agents can share one database. Migration `003_birth_agent_scoped.sql` handles the schema change.
 - **Secrets**: API keys in SecretsVault. DPAPI (Windows) for mentor keyring; plaintext stub on other platforms.
 - **Local LLM URL**: Validated to localhost/127.0.0.1 to prevent SSRF.
 - **MCP trust policy**: `McpTrustPolicy` restricts which hosts agent-registered MCP servers can connect to. Default allows localhost, `orion-toolbox`, and Docker-internal hostnames. Cloud metadata endpoints (169.254.169.254) are unconditionally blocked. `AgentBuilt` tier applies sandbox resource limits to dynamically registered skills.
@@ -294,8 +304,9 @@ The orchestration layer is implemented in `crates/orion-api/src/orchestration.rs
 
 ### Implemented now
 - Full five-stage birth flow (Darkness → Emergence) with web UI progression and API support.
-- Quick-start birth: auto identity + standard constitutional docs from agent name alone.
-- Modular Genesis paths (Direct Discovery, Soul Crystallization depth option, Soul Forge).
+- Hive master key lineage: auto-generated master key signs each agent's pubkey at birth; verified on identity requests.
+- Four modular Genesis paths (Quick Start, Direct Discovery, Soul Crystallization with web chat UI, Soul Forge).
+- Per-agent Postgres birth table scoping (agent_id column) — multiple agents can share one Postgres database.
 - Operational mentor chat with skill tool execution and separate activity logging.
 - Tier-based model orchestration: Fast/Standard/Pro mapped to per-provider model selections.
 - Provider model catalog: API-fetched and curated catalogs with validation and lifecycle warnings.
