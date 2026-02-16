@@ -1,8 +1,12 @@
 //! Email transport capability trait and provider capability flags.
+//!
+//! Defines the **capability** interface that email skills implement.
+//! Protocol-level transports (IMAP, SMTP) live in `transport/`.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::transport::{FolderInfo, SearchCriteria};
 use crate::SkillResult;
 
 /// Per-provider capability flags (e.g. OAuth API vs Bridge/IMAP limitations).
@@ -33,7 +37,7 @@ fn bool_true() -> bool {
 pub struct EmailTransportInfo {
     pub id: String,
     pub name: String,
-    /// Capability flags for this transport (e.g. Proton Bridge limitations).
+    /// Capability flags for this transport.
     #[serde(default)]
     pub capabilities: EmailProviderCapabilities,
 }
@@ -87,4 +91,25 @@ pub trait EmailTransportCapability: Send + Sync {
     async fn send_email(&self, email: OutgoingEmail) -> SkillResult<SendResult>;
     async fn move_email(&self, email_id: &str, folder: &str) -> SkillResult<()>;
     async fn delete_email(&self, email_id: &str) -> SkillResult<()>;
+
+    /// Search emails with structured criteria.
+    async fn search_emails(
+        &self,
+        folder: &str,
+        criteria: &SearchCriteria,
+        limit: Option<u32>,
+    ) -> SkillResult<Vec<Email>> {
+        // Default: delegate to fetch_emails with the folder set.
+        let _ = (folder, criteria, limit);
+        Err(crate::SkillError::ToolFailed(
+            "search_emails not implemented for this provider".to_string(),
+        ))
+    }
+
+    /// List available mail folders.
+    async fn list_folders(&self) -> SkillResult<Vec<FolderInfo>> {
+        Err(crate::SkillError::ToolFailed(
+            "list_folders not implemented for this provider".to_string(),
+        ))
+    }
 }

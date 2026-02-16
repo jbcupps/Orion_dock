@@ -34,10 +34,22 @@ impl std::fmt::Display for SkillId {
     }
 }
 
+/// Describes a capability that a skill depends on or provides.
+///
+/// **Taxonomy:**
+/// - `protocol` — Transport-layer implementations (IMAP, SMTP, HTTP, WebSocket, OAuth2).
+///   Live in `orion-skills/transport/` and `orion-email/`. No agent-facing tools.
+/// - `cognitive` — LLM provider integrations (OpenAI, Anthropic, local).
+///   Live in `orion-capabilities/cognitive/`.
+/// - `sensory` — External data acquisition (web search, browser, vision, file ingestion).
+///   Live in `orion-capabilities/sensory/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
     pub capability_type: String,
     pub version: String,
+    /// Classification: `protocol`, `cognitive`, `sensory`, or empty for legacy.
+    #[serde(default)]
+    pub category: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -159,6 +171,8 @@ pub struct CapabilitySection {
     #[serde(default)]
     pub version: Option<String>,
     #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
     pub features: Vec<String>,
 }
 
@@ -203,6 +217,7 @@ impl SkillManifest {
             .map(|c| CapabilityDescriptor {
                 capability_type: c.capability.clone(),
                 version: c.version.clone().unwrap_or_else(|| "1.0".to_string()),
+                category: c.category.clone().unwrap_or_default(),
             })
             .collect();
         let perms = parse_permissions(&raw.permissions);

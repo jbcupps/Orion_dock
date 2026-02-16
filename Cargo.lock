@@ -3145,6 +3145,7 @@ dependencies = [
  "sha2",
  "skill-cooperative-install",
  "skill-docker-exec",
+ "skill-email",
  "skill-filesystem",
  "skill-http",
  "skill-perplexity-search",
@@ -4531,6 +4532,21 @@ dependencies = [
  "reqwest 0.11.27",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skill-email"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "orion-core",
+ "orion-skills",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
