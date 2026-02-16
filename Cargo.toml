@@ -17,6 +17,7 @@ members = [
     "skills/skill-perplexity-search",
     "skills/skill-web-browse",
     "skills/skill-proton-mail",
+    "skills/skill-email",
     "crates/soul-forge",
     "crates/orion-soul-crystallization",
     "crates/orion-api",

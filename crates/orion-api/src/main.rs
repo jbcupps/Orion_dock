@@ -1717,15 +1717,20 @@ async fn api_birth_chat(
             "No messages to send".to_string(),
         ));
     }
+    let router = build_birth_router(&config).await;
+    let has_ego = router.has_ego();
+    let ego_provider = router.ego_provider_name().map(|p| format!("{:?}", p));
     tracing::info!(
         agent = %id,
         local_llm = ?config.local_llm_base_url,
         birth_model = %config.effective_birth_model(),
+        has_ego = has_ego,
+        ego_provider = ?ego_provider,
         message_count = messages.len(),
-        "genesis_chat: building router"
+        "genesis_chat: routing (ego_primary={}, provider={})",
+        has_ego,
+        ego_provider.as_deref().unwrap_or("local-only"),
     );
-    let router = build_birth_router(&config).await;
-    tracing::info!(agent = %id, "genesis_chat: sending chat turn");
     let response = birth_chat_turn(&router, messages).await.map_err(|e| {
         tracing::error!(agent = %id, error = %e, "genesis_chat: chat turn failed");
         (
@@ -3193,7 +3198,19 @@ async fn api_operational_chat(
                 for (k, v) in map {
                     tool_params = tool_params.with(k, v.clone());
                 }
+            } else {
+                tracing::warn!(
+                    tool = %tr.name,
+                    args = %tr.arguments,
+                    "operational_chat: tool arguments not a JSON object"
+                );
             }
+            tracing::info!(
+                tool = %tr.name,
+                skill = %skill_id,
+                arg_keys = ?tool_params.values.keys().collect::<Vec<_>>(),
+                "operational_chat: executing skill tool"
+            );
             match state
                 .skill_executor
                 .execute(&skill_id, &tr.name, tool_params)
@@ -4753,10 +4770,11 @@ fn init_skill_registry(vault: Arc<Mutex<SecretsVault>>) -> Arc<SkillRegistry> {
         )
     );
 
-    // Proton Mail (IMAP — lazy-connects on first tool call using vault credentials)
-    register_skill!(skill_proton_mail::ProtonMailSkill::with_secrets(
-        skill_proton_mail::ProtonMailSkill::default_manifest(),
+    // Generic Email (IMAP/SMTP — supports multiple accounts/providers via config)
+    register_skill!(skill_email::EmailSkill::with_secrets(
+        skill_email::EmailSkill::default_manifest(),
         Arc::clone(&vault),
+        Arc::new(tokio::sync::RwLock::new(Vec::new())),
     ));
 
     tracing::info!(
@@ -5754,7 +5772,9 @@ async fn api_orchestration_logs(
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "orion_api=info,tower_http=info".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "orion_api=info,orion_router=info,orion_birth=info,orion_capabilities=warn,tower_http=info".into()
+            }),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();

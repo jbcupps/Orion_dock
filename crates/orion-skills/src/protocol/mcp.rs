@@ -312,6 +312,7 @@ impl McpSkillRuntime {
             capabilities: vec![CapabilityDescriptor {
                 capability_type: "McpClient".to_string(),
                 version: "1.0".to_string(),
+                category: "protocol".to_string(),
             }],
             permissions: vec![Permission::Network(NetworkPermission::Full)],
             secrets: vec![],
