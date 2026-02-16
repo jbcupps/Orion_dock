@@ -102,7 +102,8 @@ impl SkillSandbox {
     /// - `AgentBuilt`: strip `ShellExecute`.
     /// - `Untrusted`: only `Network` and `Memory(ReadOnly)` allowed.
     pub fn filter_permissions(perms: Vec<Permission>, tier: TrustTier) -> Vec<Permission> {
-        match tier {
+        let original_count = perms.len();
+        let filtered = match tier {
             TrustTier::Verified => perms,
             TrustTier::AgentBuilt => perms
                 .into_iter()
@@ -118,7 +119,18 @@ impl SkillSandbox {
                     )
                 })
                 .collect(),
+        };
+        let stripped = original_count - filtered.len();
+        if stripped > 0 {
+            tracing::debug!(
+                tier = %tier,
+                original = original_count,
+                stripped = stripped,
+                remaining = filtered.len(),
+                "sandbox: filtered permissions by trust tier"
+            );
         }
+        filtered
     }
 
     pub fn new(

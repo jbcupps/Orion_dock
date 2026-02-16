@@ -24,6 +24,9 @@ pub struct GlobalConfig {
     /// Path to hive-level secrets vault (shared API keys across all agents).
     #[serde(default)]
     pub hive_secrets_path: Option<PathBuf>,
+    /// Display name the mentor prefers (shown in chat instead of "user").
+    #[serde(default)]
+    pub mentor_name: Option<String>,
 }
 
 impl GlobalConfig {
@@ -33,6 +36,7 @@ impl GlobalConfig {
             master_key_path: data_root.join("master.key"),
             agents: Vec::new(),
             hive_secrets_path: Some(data_root.join("hive_secrets.bin")),
+            mentor_name: None,
         }
     }
 

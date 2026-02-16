@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Current config schema version. Increment when making breaking changes.
-pub const CONFIG_SCHEMA_VERSION: u32 = 7;
+pub const CONFIG_SCHEMA_VERSION: u32 = 8;
 
 /// Memory store backend: SQLite (file) or PostgreSQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -231,7 +231,7 @@ impl McpTrustPolicy {
         }
 
         // Otherwise, allow defaults + any configured hosts.
-        let in_defaults = MCP_DEFAULT_ALLOWED_HOSTS.iter().any(|h| *h == host);
+        let in_defaults = MCP_DEFAULT_ALLOWED_HOSTS.contains(&host);
         let in_configured = self.allowed_http_hosts.iter().any(|h| h == host);
         if in_defaults || in_configured {
             return Ok(());
@@ -254,14 +254,14 @@ pub struct TrinityConfig {
     /// Cloud provider name for Ego (e.g. "openai", "anthropic")
     #[serde(default)]
     pub ego_provider: Option<String>,
-    /// API key for Ego provider
-    #[serde(default)]
+    /// API key for Ego provider (legacy — migrated to vault in v8, never serialized)
+    #[serde(default, skip_serializing)]
     pub ego_api_key: Option<String>,
     /// Cloud provider name for Superego (e.g. "anthropic", "openai")
     #[serde(default)]
     pub superego_provider: Option<String>,
-    /// API key for Superego provider
-    #[serde(default)]
+    /// API key for Superego provider (legacy — migrated to vault in v8, never serialized)
+    #[serde(default, skip_serializing)]
     pub superego_api_key: Option<String>,
 }
 
@@ -286,7 +286,8 @@ pub struct AppConfig {
     pub docs_dir: PathBuf,
     pub db_path: PathBuf,
 
-    /// OpenAI API key (optional - enables Ego)
+    /// OpenAI API key (legacy — migrated to vault in v8, never serialized)
+    #[serde(default, skip_serializing)]
     pub openai_api_key: Option<String>,
 
     /// Legacy single email config (migrated to email_accounts in v5).
@@ -406,6 +407,74 @@ pub enum EmailProvider {
     Fastmail,
     /// Generic IMAP/SMTP (Yahoo, iCloud, custom).
     ImapFallback,
+}
+
+/// TLS negotiation mode for mail transport connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// TLS from connection start (IMAP port 993, SMTP port 465).
+    #[default]
+    Implicit,
+    /// Plaintext connection upgraded via STARTTLS (IMAP port 143, SMTP port 587).
+    Starttls,
+    /// No encryption — testing and localhost only.
+    None,
+}
+
+/// Well-known server settings for a mail provider.
+#[derive(Debug, Clone)]
+pub struct EmailServerPreset {
+    pub imap_host: &'static str,
+    pub imap_port: u16,
+    pub imap_tls: TlsMode,
+    pub smtp_host: &'static str,
+    pub smtp_port: u16,
+    pub smtp_tls: TlsMode,
+    pub auth: EmailAuthType,
+}
+
+/// Return well-known server settings for a provider, if available.
+pub fn provider_preset(provider: EmailProvider) -> Option<EmailServerPreset> {
+    match provider {
+        EmailProvider::Gmail => Some(EmailServerPreset {
+            imap_host: "imap.gmail.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.gmail.com",
+            smtp_port: 587,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::OAuth2,
+        }),
+        EmailProvider::Outlook => Some(EmailServerPreset {
+            imap_host: "outlook.office365.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.office365.com",
+            smtp_port: 587,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::OAuth2,
+        }),
+        EmailProvider::Proton => Some(EmailServerPreset {
+            imap_host: "127.0.0.1",
+            imap_port: 1143,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "127.0.0.1",
+            smtp_port: 1025,
+            smtp_tls: TlsMode::Starttls,
+            auth: EmailAuthType::AppPassword,
+        }),
+        EmailProvider::Fastmail => Some(EmailServerPreset {
+            imap_host: "imap.fastmail.com",
+            imap_port: 993,
+            imap_tls: TlsMode::Implicit,
+            smtp_host: "smtp.fastmail.com",
+            smtp_port: 465,
+            smtp_tls: TlsMode::Implicit,
+            auth: EmailAuthType::AppPassword,
+        }),
+        EmailProvider::ImapFallback => Option::None,
+    }
 }
 
 /// Status of an email account (for reconnect/reauth UX).
@@ -758,6 +827,78 @@ impl AppConfig {
             );
         }
 
+        // Migration from v7 to v8
+        if self.schema_version < 8 {
+            // v8: API keys removed from config.json (skip_serializing).
+            // Keys are migrated to vault via migrate_keys_to_vault() at startup.
+            self.schema_version = 8;
+            migrated = true;
+            tracing::debug!(
+                "Migrated config from v7 to v8 (secrets moved to vault, keys removed from config)"
+            );
+        }
+
+        migrated
+    }
+
+    /// Migrate any legacy plaintext API keys from config fields into the vault.
+    /// Returns a list of providers that were migrated. Call `save()` after this
+    /// to persist the config without the key fields.
+    pub fn migrate_keys_to_vault(
+        &mut self,
+        vault: &mut crate::SecretsVault,
+    ) -> Vec<String> {
+        let mut migrated = Vec::new();
+
+        // openai_api_key → provider:openai
+        if let Some(ref key) = self.openai_api_key {
+            if !key.is_empty() && vault.get_secret("provider:openai").is_none() {
+                vault.set_secret("provider:openai", key);
+                migrated.push("openai".to_string());
+                tracing::info!("Migrated openai_api_key from config to vault");
+            }
+        }
+        self.openai_api_key = None;
+
+        // trinity.ego_api_key → provider:{ego_provider}
+        if let Some(ref trinity) = self.trinity.clone() {
+            if let Some(ref key) = trinity.ego_api_key {
+                if !key.is_empty() {
+                    let provider = trinity
+                        .ego_provider
+                        .as_deref()
+                        .unwrap_or("openai");
+                    let ns_key = format!("provider:{}", provider);
+                    if vault.get_secret(&ns_key).is_none() {
+                        vault.set_secret(&ns_key, key);
+                        migrated.push(provider.to_string());
+                        tracing::info!("Migrated ego_api_key from config to vault ({})", provider);
+                    }
+                }
+            }
+            if let Some(ref key) = trinity.superego_api_key {
+                if !key.is_empty() {
+                    let provider = trinity
+                        .superego_provider
+                        .as_deref()
+                        .unwrap_or("anthropic");
+                    let ns_key = format!("provider:{}", provider);
+                    if vault.get_secret(&ns_key).is_none() {
+                        vault.set_secret(&ns_key, key);
+                        migrated.push(provider.to_string());
+                        tracing::info!(
+                            "Migrated superego_api_key from config to vault ({})",
+                            provider
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(ref mut trinity) = self.trinity {
+            trinity.ego_api_key = None;
+            trinity.superego_api_key = None;
+        }
+
         migrated
     }
 
@@ -797,6 +938,7 @@ mod tests {
         fs::create_dir_all(&data_dir).unwrap();
         AppConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
+            agent_id: None,
             data_dir: data_dir.clone(),
             models_dir: data_dir.join("models"),
             docs_dir: data_dir.join("docs"),
@@ -1010,7 +1152,7 @@ mod tests {
         });
 
         assert!(config.migrate());
-        assert_eq!(config.schema_version, 7);
+        assert_eq!(config.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(config.email_accounts.len(), 1);
         let acc = &config.email_accounts[0];
         assert_eq!(acc.address, "user@proton.me");

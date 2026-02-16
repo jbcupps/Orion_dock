@@ -9,6 +9,7 @@ pub use crate::skill::{
     CostEstimate, ExecutionContext, HealthStatus, Skill, SkillConfig, SkillError, SkillHealth,
     SkillResult, ToolDescriptor, ToolMetadata, ToolOutput, ToolParams,
 };
+pub use crate::structured_failure::{Constraint, StructuredFailure};
 pub use async_trait::async_trait;
 pub use serde::{Deserialize, Serialize};
 pub use std::collections::HashMap;

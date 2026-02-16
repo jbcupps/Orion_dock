@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::manifest::{CapabilityDescriptor, SkillManifest};
 use crate::sandbox::ResourceLimits;
+use crate::structured_failure::StructuredFailure;
 
 pub type SkillResult<T> = Result<T, SkillError>;
 
@@ -101,6 +102,11 @@ pub struct ToolOutput {
     pub success: bool,
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// Structured failure data. When present, the Execution Governor uses this
+    /// instead of parsing the error string. If absent on a failed result,
+    /// falls back to wrapping the error string in `StructuredFailure::Unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_failure: Option<StructuredFailure>,
     pub metadata: ToolMetadata,
 }
 
@@ -110,6 +116,7 @@ impl ToolOutput {
             success: true,
             data: Some(serde_json::to_value(data).unwrap()),
             error: None,
+            structured_failure: None,
             metadata: ToolMetadata::default(),
         }
     }
@@ -119,6 +126,20 @@ impl ToolOutput {
             success: false,
             data: None,
             error: Some(msg.into()),
+            structured_failure: None,
+            metadata: ToolMetadata::default(),
+        }
+    }
+
+    /// Create an error result with structured failure data.
+    /// The Governor extracts actionable constraints from the structured failure
+    /// without needing LLM parsing.
+    pub fn structured_error(msg: impl Into<String>, failure: StructuredFailure) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+            structured_failure: Some(failure),
             metadata: ToolMetadata::default(),
         }
     }

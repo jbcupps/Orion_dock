@@ -8,9 +8,8 @@
 #
 # Once running:
 #   Web UI:  http://localhost:3000
-#   API:     http://localhost:8080
-#   Postgres: localhost:5432  (orion / orion_dev)
-#   Ollama:   localhost:11434
+#   Postgres: 127.0.0.1:5432  (orion / orion_dev)  — loopback only
+#   Ollama:   127.0.0.1:11434                      — loopback only
 
 set -euo pipefail
 
@@ -32,6 +31,20 @@ if [[ "$ACTION" == "down" ]]; then
   exit 0
 fi
 
+# --- Check ORION_MASTER_KEY ---
+if [[ -z "${ORION_MASTER_KEY:-}" ]]; then
+  echo ""
+  echo "  WARNING: ORION_MASTER_KEY is not set."
+  echo "  The full stack requires this for secrets encryption."
+  echo "  Generate one with: openssl rand -base64 32"
+  echo ""
+  read -r -p "  Continue without ORION_MASTER_KEY? (y/N) " answer
+  if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+    echo "  Aborted. Set ORION_MASTER_KEY and retry."
+    exit 1
+  fi
+fi
+
 # --- Build ---
 echo ""
 echo "  Building Orion Docker images..."
@@ -48,12 +61,14 @@ echo "  Starting full stack (postgres, ollama, orion-api, frontend)..."
 echo ""
 $COMPOSE --profile full up -d
 
-# --- Wait for API health ---
+# --- Wait for API health (via docker inspect, port not published) ---
 echo "  Waiting for API to become healthy..."
 MAX_WAIT=60
 API_READY=false
+API_CID=$($COMPOSE ps -q orion-api 2>/dev/null)
 for i in $(seq 1 "$MAX_WAIT"); do
-  if curl -sf --max-time 2 http://localhost:8080/health >/dev/null 2>&1; then
+  STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$API_CID" 2>/dev/null || true)
+  if [[ "$STATUS" == "healthy" ]]; then
     API_READY=true
     break
   fi
@@ -61,7 +76,7 @@ for i in $(seq 1 "$MAX_WAIT"); do
 done
 if [[ "$API_READY" != "true" ]]; then
   echo ""
-  echo "  WARNING: API did not respond within ${MAX_WAIT}s. Check 'docker compose logs orion-api'."
+  echo "  WARNING: API did not become healthy within ${MAX_WAIT}s. Check 'docker compose logs orion-api'."
   echo ""
 fi
 
@@ -94,10 +109,9 @@ echo "   Orion stack is running!"
 echo "  ============================================"
 echo ""
 echo "   Web UI:    http://localhost:3000"
-echo "   API:       http://localhost:8080"
-echo "   Health:    http://localhost:8080/health"
-echo "   Postgres:  localhost:5432  (orion / orion_dev)"
-echo "   Ollama:    localhost:11434"
+echo "   Health:    http://localhost:3000/health (via nginx)"
+echo "   Postgres:  127.0.0.1:5432  (orion / orion_dev)"
+echo "   Ollama:    127.0.0.1:11434"
 echo ""
 echo "   Tear down: ./scripts/dev-stack.sh down"
 echo "   Logs:      docker compose -f docker/docker-compose.yml logs -f orion-api"

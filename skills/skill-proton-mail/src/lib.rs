@@ -69,6 +69,7 @@ impl ProtonMailSkill {
             capabilities: vec![CapabilityDescriptor {
                 capability_type: "email_transport".to_string(),
                 version: "1.0".to_string(),
+                category: "protocol".to_string(),
             }],
             permissions: vec![Permission::Network(NetworkPermission::Domains(vec![
                 "mail.proton.me".into(),
@@ -158,7 +159,8 @@ impl ProtonMailSkill {
 
                 tracing::info!(user = %user, host = %host, port = port, "ProtonMail: connecting IMAP via Bridge");
                 // Bridge uses self-signed certs, so accept invalid certs
-                let imap = ImapClient::with_insecure_tls(&host, port, &user, &password);
+                let imap = ImapClient::new(&host, port, &user, &password, orion_core::config::TlsMode::Implicit)
+                    .with_insecure_tls();
                 imap.test_connection()
                     .await
                     .map_err(|e| SkillError::InitFailed(format!("IMAP connection failed: {}", e)))?;
@@ -295,7 +297,7 @@ impl Skill for ProtonMailSkill {
             ));
         }
 
-        let imap = ImapClient::new(&host, port, &user, &password);
+        let imap = ImapClient::new(&host, port, &user, &password, orion_core::config::TlsMode::Implicit);
         imap.test_connection()
             .await
             .map_err(|e| SkillError::InitFailed(e.to_string()))?;
@@ -384,6 +386,7 @@ impl Skill for ProtonMailSkill {
         vec![CapabilityDescriptor {
             capability_type: "email_transport".to_string(),
             version: "1.0".to_string(),
+            category: "protocol".to_string(),
         }]
     }
 

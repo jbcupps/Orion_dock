@@ -35,11 +35,13 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,11 +216,12 @@ impl LocalHttpProvider {
             model: self.model.clone(),
             messages: vec![ChatMessage {
                 role: "user".into(),
-                content: "ping".into(),
+                content: serde_json::Value::String("ping".into()),
                 tool_call_id: None,
                 tool_calls: None,
+                images: None,
             }],
-            max_tokens: Some(10), // Minimal response for heartbeat
+            max_tokens: Some(10),
             tools: None,
             stream: false,
         };
@@ -264,22 +267,36 @@ impl LocalHttpProvider {
         request
             .messages
             .iter()
-            .map(|m| ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_call_id: m.tool_call_id.clone(),
-                tool_calls: m.tool_calls.as_ref().map(|tcs| {
-                    tcs.iter()
-                        .map(|tc| ChatToolCall {
-                            id: tc.id.clone(),
-                            r#type: "function".to_string(),
-                            function: ChatFunctionCall {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            },
-                        })
-                        .collect()
-                }),
+            .map(|m| {
+                let (content, images) = if let Some(ref imgs) = m.images {
+                    if !imgs.is_empty() && m.role == "user" {
+                        // Ollama accepts base64 images in an `images` array
+                        let img_data: Vec<String> = imgs.iter().map(|i| i.data.clone()).collect();
+                        (serde_json::Value::String(m.content.clone()), Some(img_data))
+                    } else {
+                        (serde_json::Value::String(m.content.clone()), None)
+                    }
+                } else {
+                    (serde_json::Value::String(m.content.clone()), None)
+                };
+                ChatMessage {
+                    role: m.role.clone(),
+                    content,
+                    tool_call_id: m.tool_call_id.clone(),
+                    tool_calls: m.tool_calls.as_ref().map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| ChatToolCall {
+                                id: tc.id.clone(),
+                                r#type: "function".to_string(),
+                                function: ChatFunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
+                                },
+                            })
+                            .collect()
+                    }),
+                    images,
+                }
             })
             .collect()
     }

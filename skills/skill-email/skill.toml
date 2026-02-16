@@ -1,0 +1,28 @@
+[skill]
+id = "com.orion.skills.email"
+name = "Email"
+version = "0.1.0"
+description = "Generic email: fetch, send, search, and manage mail via IMAP/SMTP with provider auto-detection."
+category = "Communication"
+keywords = ["email", "imap", "smtp", "starttls"]
+
+[runtime]
+runtime = "Native"
+min_orion_version = "0.1.0"
+platforms = ["Windows", "macOS", "Linux"]
+
+[[capabilities]]
+capability = "imap_transport"
+version = "1.0"
+
+[[capabilities]]
+capability = "smtp_transport"
+version = "1.0"
+
+[[capabilities]]
+capability = "service_discovery"
+version = "1.0"
+
+[[permissions]]
+permission = { Network = "Full" }
+reason = "Connects to user-configured mail servers"

@@ -135,6 +135,12 @@ Important files include:
 - Mentor confirmation is available for risky tool actions in agentic mode.
 - Orchestration is designed to avoid noisy interruptions and only surface high-significance events.
 
+**Autonomy is the agent's primary function.** Security controls exist to make autonomy safe, not to prevent it:
+- Routing uses `route_with_tools()` for structured tool-calling with legacy text fallback.
+- Attachment turns use risk-based tool blocking (high-risk only), not blanket blocking.
+- Missing API keys are reported as actionable steps, not permanent inability.
+- Any security change must include an autonomy regression test.
+
 ## Build/Test Constraints
 
 - Rust build/test must run in Docker (`orion-dev`), not host-native.

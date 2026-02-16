@@ -75,6 +75,8 @@ enum AnthropicContent {
 enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -86,6 +88,14 @@ enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,10 +260,39 @@ fn convert_messages(
             }
             _ => {
                 // "user" and anything else → user message
-                anthropic_msgs.push(AnthropicMessage {
-                    role: "user".to_string(),
-                    content: AnthropicContent::Text(msg.content.clone()),
-                });
+                if let Some(ref images) = msg.images {
+                    if !images.is_empty() {
+                        let mut blocks = Vec::new();
+                        if !msg.content.is_empty() {
+                            blocks.push(ContentBlock::Text {
+                                text: msg.content.clone(),
+                            });
+                        }
+                        for img in images {
+                            blocks.push(ContentBlock::Image {
+                                source: ImageSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: img.media_type.clone(),
+                                    data: img.data.clone(),
+                                },
+                            });
+                        }
+                        anthropic_msgs.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Blocks(blocks),
+                        });
+                    } else {
+                        anthropic_msgs.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Text(msg.content.clone()),
+                        });
+                    }
+                } else {
+                    anthropic_msgs.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContent::Text(msg.content.clone()),
+                    });
+                }
             }
         }
     }
@@ -572,6 +611,7 @@ mod tests {
                     name: "web_search".to_string(),
                     arguments: r#"{"query":"cats"}"#.to_string(),
                 }]),
+                images: None,
             },
             Message::tool_result("call_1", "Found 10 results about cats"),
         ];

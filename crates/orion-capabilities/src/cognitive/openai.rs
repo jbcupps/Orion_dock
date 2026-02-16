@@ -1,5 +1,5 @@
 use crate::cognitive::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, StreamEvent, ToolCall,
+    CompletionRequest, CompletionResponse, ImageContent, LlmProvider, StreamEvent, ToolCall,
 };
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{
@@ -98,11 +98,26 @@ struct StreamChatRequest {
 #[derive(Debug, Serialize)]
 struct StreamChatMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<StreamChatToolCallObj>>,
+}
+
+fn build_vision_content(text: &str, images: &[ImageContent]) -> serde_json::Value {
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(serde_json::json!({"type": "text", "text": text}));
+    }
+    for img in images {
+        let data_url = format!("data:{};base64,{}", img.media_type, img.data);
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": data_url}
+        }));
+    }
+    serde_json::Value::Array(parts)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -235,22 +250,39 @@ impl LlmProvider for OpenAiProvider {
         let messages: Vec<StreamChatMessage> = request
             .messages
             .iter()
-            .map(|m| StreamChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_call_id: m.tool_call_id.clone(),
-                tool_calls: m.tool_calls.as_ref().map(|tcs| {
-                    tcs.iter()
-                        .map(|tc| StreamChatToolCallObj {
-                            id: tc.id.clone(),
-                            r#type: "function".to_string(),
-                            function: StreamChatFunctionCall {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            },
-                        })
-                        .collect()
-                }),
+            .map(|m| {
+                let content = if m.role == "user" {
+                    if let Some(ref imgs) = m.images {
+                        if !imgs.is_empty() {
+                            return StreamChatMessage {
+                                role: m.role.clone(),
+                                content: build_vision_content(&m.content, imgs),
+                                tool_call_id: m.tool_call_id.clone(),
+                                tool_calls: None,
+                            };
+                        }
+                    }
+                    serde_json::Value::String(m.content.clone())
+                } else {
+                    serde_json::Value::String(m.content.clone())
+                };
+                StreamChatMessage {
+                    role: m.role.clone(),
+                    content,
+                    tool_call_id: m.tool_call_id.clone(),
+                    tool_calls: m.tool_calls.as_ref().map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| StreamChatToolCallObj {
+                                id: tc.id.clone(),
+                                r#type: "function".to_string(),
+                                function: StreamChatFunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
+                                },
+                            })
+                            .collect()
+                    }),
+                }
             })
             .collect();
 
