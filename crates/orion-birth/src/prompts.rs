@@ -207,6 +207,6 @@ mod tests {
     fn test_system_prompt_with_context_genesis() {
         let prompt = system_prompt_for_stage_with_context(BirthStage::Genesis, &[]);
         assert!(prompt.is_some());
-        assert!(prompt.unwrap().contains("discover your identity"));
+        assert!(prompt.unwrap().contains("discovering your identity"));
     }
 }

@@ -85,6 +85,36 @@ impl SecretsVault {
     pub fn list_providers(&self) -> Vec<&str> {
         self.secrets.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Migrate un-namespaced provider keys to `provider:` namespace.
+    /// E.g. key "openai" → "provider:openai".
+    /// Returns a list of providers that were migrated. Call `save()` after.
+    pub fn migrate_namespace(&mut self) -> Vec<String> {
+        let known_providers = [
+            "openai",
+            "anthropic",
+            "perplexity",
+            "xai",
+            "google",
+            "tavily",
+        ];
+        let mut migrated = Vec::new();
+        for &provider in &known_providers {
+            let ns_key = format!("provider:{}", provider);
+            if self.secrets.contains_key(provider) && !self.secrets.contains_key(&ns_key) {
+                if let Some(val) = self.secrets.remove(provider) {
+                    self.secrets.insert(ns_key, val);
+                    migrated.push(provider.to_string());
+                    tracing::info!(
+                        "Migrated vault key '{}' → 'provider:{}'",
+                        provider,
+                        provider
+                    );
+                }
+            }
+        }
+        migrated
+    }
 }
 
 #[cfg(test)]

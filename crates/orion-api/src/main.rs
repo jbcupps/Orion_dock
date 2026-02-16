@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
+use axum::http::{header, HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -76,6 +77,9 @@ struct AppState {
     skill_vault: Arc<Mutex<SecretsVault>>,
     /// Scheduler interval for orchestration periodic jobs.
     orchestration_tick_seconds: u64,
+    /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
+    skill_confirm_nonces:
+        Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
 }
 
 fn data_root() -> Option<PathBuf> {
@@ -321,6 +325,16 @@ fn provider_supports_tier_models(provider: &str) -> bool {
     )
 }
 
+/// List provider names from the vault, stripping the `provider:` namespace prefix.
+/// Only returns entries with the `provider:` prefix (excludes email keys etc.).
+fn vault_provider_names(vault: &SecretsVault) -> Vec<String> {
+    vault
+        .list_providers()
+        .into_iter()
+        .filter_map(|k| k.strip_prefix("provider:").map(String::from))
+        .collect()
+}
+
 fn resolve_ego_credentials_with_preference(
     vault: &SecretsVault,
     preference: Option<&str>,
@@ -328,17 +342,17 @@ fn resolve_ego_credentials_with_preference(
     // If explicit preference is set and has a key, use it first.
     if let Some(pref) = preference {
         let normalized = AppConfig::normalize_provider_name(pref);
-        if let Some(key) = vault.get_secret(&normalized) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
             return (Some(normalized), Some(key.to_string()));
         }
     }
     // Default: anthropic > openai > first available non-tavily key.
-    let providers = vault.list_providers();
+    let providers = vault_provider_names(vault);
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;
     let mut found_key: Option<String> = None;
     for pref in &preferred {
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             found_name = Some(pref.to_string());
             found_key = Some(key.to_string());
             break;
@@ -346,9 +360,9 @@ fn resolve_ego_credentials_with_preference(
     }
     if found_name.is_none() {
         for p in &providers {
-            if *p != "tavily" {
-                if let Some(key) = vault.get_secret(p) {
-                    found_name = Some(p.to_string());
+            if p != "tavily" {
+                if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
+                    found_name = Some(p.clone());
                     found_key = Some(key.to_string());
                     break;
                 }
@@ -1842,11 +1856,7 @@ async fn api_connectivity_providers(
 
     let vault = SecretsVault::load(dir)
         .unwrap_or_else(|_| SecretsVault::new(agent_dir(&id).unwrap_or_default()));
-    let providers: Vec<String> = vault
-        .list_providers()
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let providers: Vec<String> = vault_provider_names(&vault);
     Ok(Json(ProvidersResponse { providers }))
 }
 
@@ -1883,8 +1893,8 @@ async fn api_agent_tier_models(
         .filter(|p| provider_supports_tier_models(p));
 
     let mut providers: Vec<String> = Vec::new();
-    for p in vault.list_providers() {
-        let normalized = AppConfig::normalize_provider_name(p);
+    for p in vault_provider_names(&vault) {
+        let normalized = AppConfig::normalize_provider_name(&p);
         if provider_supports_tier_models(&normalized) && !providers.contains(&normalized) {
             providers.push(normalized);
         }
@@ -2021,17 +2031,16 @@ async fn api_agent_tier_models_refresh(
     let targets: Vec<String> = if let Some(ref p) = body.provider {
         vec![AppConfig::normalize_provider_name(p)]
     } else {
-        vault
-            .list_providers()
+        vault_provider_names(&vault)
             .into_iter()
-            .map(AppConfig::normalize_provider_name)
+            .map(|p| AppConfig::normalize_provider_name(&p))
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };
 
     let mut refreshed: Vec<String> = Vec::new();
     for provider in &targets {
-        if let Some(key) = vault.get_secret(provider) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
             let entry =
                 orion_capabilities::cognitive::model_catalog::refresh_catalog(provider, key).await;
             config.provider_catalog.insert(provider.clone(), entry);
@@ -2080,10 +2089,9 @@ async fn api_agent_tier_models_validate(
     let targets: Vec<String> = if let Some(ref p) = body.provider {
         vec![AppConfig::normalize_provider_name(p)]
     } else {
-        vault
-            .list_providers()
+        vault_provider_names(&vault)
             .into_iter()
-            .map(AppConfig::normalize_provider_name)
+            .map(|p| AppConfig::normalize_provider_name(&p))
             .filter(|p| provider_supports_tier_models(p))
             .collect()
     };
@@ -2092,7 +2100,7 @@ async fn api_agent_tier_models_validate(
     for provider in &targets {
         let tiers = config.effective_tier_models(provider);
         let key = vault
-            .get_secret(provider)
+            .get_secret(&format!("provider:{}", provider))
             .map(|s| s.to_string())
             .unwrap_or_default();
 
@@ -2315,7 +2323,7 @@ async fn api_connectivity_remove_key(
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut vault =
             SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir));
-        if !vault.remove_secret(&provider) {
+        if !vault.remove_secret(&format!("provider:{}", provider)) {
             return Err(format!("No key stored for provider: {}", provider));
         }
         vault.save().map_err(|e| format!("Save vault: {}", e))?;
@@ -2415,11 +2423,7 @@ async fn api_connectivity_chat(
 
             let vault = SecretsVault::load(config.data_dir.clone())
                 .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-            let stored: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let stored: Vec<String> = vault_provider_names(&vault);
 
             let conversation: Vec<(String, String)> = orch
                 .get_conversation()
@@ -2595,11 +2599,7 @@ async fn api_connectivity_chat(
                 }
             }
 
-            let stored: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let stored: Vec<String> = vault_provider_names(&vault);
 
             // Persist conversation
             let updated: Vec<BirthChatMessage> = orch
@@ -2981,11 +2981,7 @@ async fn api_operational_chat(
     let vault_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault
-            .list_providers()
-            .into_iter()
-            .map(String::from)
-            .collect()
+        vault_provider_names(&vault)
     };
 
     // Sync agent secrets into the shared skill vault so plugins can see them.
@@ -3412,11 +3408,7 @@ async fn api_operational_chat(
                 }
             }
 
-            let providers: Vec<String> = vault
-                .list_providers()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let providers: Vec<String> = vault_provider_names(&vault);
 
             // Persist conversation with redacted content (include skill output if any)
             let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
@@ -4164,7 +4156,7 @@ async fn api_import_agent(
         for (provider, secret_value) in provider_secrets {
             if let Some(secret) = secret_value.as_str() {
                 if !secret.trim().is_empty() {
-                    vault.set_secret(provider, secret);
+                    vault.set_secret(&format!("provider:{}", provider), secret);
                 }
             }
         }
@@ -4324,10 +4316,10 @@ async fn api_export_agent(
         )
     })?;
     let mut provider_secrets = serde_json::Map::new();
-    for provider in vault.list_providers() {
-        if let Some(secret) = vault.get_secret(provider) {
+    for provider in vault_provider_names(&vault) {
+        if let Some(secret) = vault.get_secret(&format!("provider:{}", provider)) {
             provider_secrets.insert(
-                provider.to_string(),
+                provider.clone(),
                 serde_json::Value::String(secret.to_string()),
             );
         }
@@ -4494,6 +4486,12 @@ struct SkillExecuteRequest {
     tool: String,
     #[serde(default)]
     params: serde_json::Value,
+    /// Set to true on the second call to confirm a requires_confirmation tool.
+    #[serde(default)]
+    confirm: bool,
+    /// Nonce from the first call's confirmation_required response.
+    #[serde(default)]
+    nonce: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4503,6 +4501,16 @@ struct SkillExecuteResponse {
     data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_required: Option<ConfirmationInfo>,
+}
+
+#[derive(Serialize)]
+struct ConfirmationInfo {
+    tool: String,
+    skill_id: String,
+    nonce: String,
+    message: String,
 }
 
 /// GET /api/agents/{id}/skills — list registered skills with trust tiers and tools.
@@ -4582,6 +4590,67 @@ async fn api_execute_skill(
 
     let sid = orion_skills::manifest::SkillId(skill_id.clone());
 
+    // --- Confirmation enforcement ---
+    if state
+        .skill_executor
+        .requires_confirmation(&sid, &body.tool)
+    {
+        if body.confirm {
+            // Validate nonce
+            let nonce = body.nonce.as_deref().unwrap_or("");
+            let mut nonces = state.skill_confirm_nonces.lock().await;
+            // Clean expired nonces (>5 min)
+            let now = std::time::Instant::now();
+            nonces.retain(|_, (_, _, created)| now.duration_since(*created).as_secs() < 300);
+            match nonces.remove(nonce) {
+                Some((ref ns, ref nt, created))
+                    if *ns == skill_id
+                        && *nt == body.tool
+                        && now.duration_since(created).as_secs() < 300 =>
+                {
+                    // Valid nonce — fall through to execution
+                }
+                Some(_) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "Confirmation nonce does not match this tool/skill".to_string(),
+                    ));
+                }
+                None => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "Invalid or expired confirmation nonce".to_string(),
+                    ));
+                }
+            }
+        } else {
+            // Issue nonce
+            let nonce = Uuid::new_v4().to_string();
+            let mut nonces = state.skill_confirm_nonces.lock().await;
+            // Clean expired nonces
+            let now = std::time::Instant::now();
+            nonces.retain(|_, (_, _, created)| now.duration_since(*created).as_secs() < 300);
+            nonces.insert(
+                nonce.clone(),
+                (skill_id.clone(), body.tool.clone(), now),
+            );
+            return Ok(Json(SkillExecuteResponse {
+                success: false,
+                data: None,
+                error: None,
+                confirmation_required: Some(ConfirmationInfo {
+                    tool: body.tool.clone(),
+                    skill_id: skill_id.clone(),
+                    nonce,
+                    message: format!(
+                        "Tool '{}' in skill '{}' requires confirmation before execution",
+                        body.tool, skill_id
+                    ),
+                }),
+            }));
+        }
+    }
+
     // Convert JSON params to ToolParams
     let mut tool_params = orion_skills::skill::ToolParams::new();
     if let serde_json::Value::Object(map) = &body.params {
@@ -4599,11 +4668,13 @@ async fn api_execute_skill(
             success: output.success,
             data: output.data,
             error: output.error,
+            confirmation_required: None,
         })),
         Err(e) => Ok(Json(SkillExecuteResponse {
             success: false,
             data: None,
             error: Some(e.to_string()),
+            confirmation_required: None,
         })),
     }
 }
@@ -4894,11 +4965,7 @@ async fn launch_agentic_task_internal(
     let stored_providers: Vec<String> = {
         let vault = SecretsVault::load(config.data_dir.clone())
             .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
-        vault
-            .list_providers()
-            .into_iter()
-            .map(String::from)
-            .collect()
+        vault_provider_names(&vault)
     };
 
     let loop_config = AgenticLoopConfig {
@@ -4939,7 +5006,7 @@ fn resolve_council_providers(
     if let Some(pref) = preference {
         let normalized = AppConfig::normalize_provider_name(pref);
         if provider_supports_tier_models(&normalized) {
-            if let Some(key) = vault.get_secret(&normalized) {
+            if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
                 result.push((normalized, key.to_string()));
             }
         }
@@ -4951,7 +5018,7 @@ fn resolve_council_providers(
         if result.iter().any(|(n, _)| n == *pref) {
             continue;
         }
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             result.push((pref.to_string(), key.to_string()));
             if result.len() >= 3 {
                 break;
@@ -4961,15 +5028,15 @@ fn resolve_council_providers(
 
     // Fill remaining from vault.
     if result.len() < 3 {
-        for p in vault.list_providers() {
-            let normalized = AppConfig::normalize_provider_name(p);
+        for p in vault_provider_names(vault) {
+            let normalized = AppConfig::normalize_provider_name(&p);
             if !provider_supports_tier_models(&normalized) || normalized == "tavily" {
                 continue;
             }
             if result.iter().any(|(n, _)| *n == normalized) {
                 continue;
             }
-            if let Some(key) = vault.get_secret(p) {
+            if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
                 result.push((normalized, key.to_string()));
                 if result.len() >= 3 {
                     break;
@@ -5750,6 +5817,54 @@ async fn api_orchestration_logs(
     Ok(Json(OrchestrationLogsResponse { logs }))
 }
 
+/// Bearer-token authentication middleware.
+/// When ORION_API_TOKEN is set, all /api/* requests require a matching
+/// Authorization: Bearer header (or ?token= query param for SSE).
+/// /health and /ready are exempt.
+async fn auth_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let expected = TOKEN.get_or_init(|| {
+        let t = std::env::var("ORION_API_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if t.is_none() {
+            tracing::warn!("ORION_API_TOKEN not set — API is unauthenticated");
+        }
+        t
+    });
+    let Some(expected_token) = expected else {
+        return Ok(next.run(req).await); // no token configured → pass through
+    };
+    let path = req.uri().path();
+    if path == "/health" || path == "/ready" {
+        return Ok(next.run(req).await); // exempt health endpoints
+    }
+    // Check Authorization: Bearer header
+    let authorized = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|t| t == expected_token.as_str())
+        .unwrap_or(false);
+    // Fallback: ?token= query param (for EventSource/SSE)
+    let authorized = authorized
+        || req
+            .uri()
+            .query()
+            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
+            .map(|t| t == expected_token.as_str())
+            .unwrap_or(false);
+    if authorized {
+        Ok(next.run(req).await)
+    } else {
+        Err(axum::http::StatusCode::UNAUTHORIZED)
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::registry()
@@ -5778,6 +5893,33 @@ async fn main() -> std::io::Result<()> {
                         let id = entry.file_name().to_string_lossy().to_string();
                         tracing::info!("Restored persisted signing key for agent {}", id);
                         birth_keys.lock().unwrap().insert(id, bytes);
+                    }
+                }
+            }
+        }
+    }
+
+    // Run vault namespace migration and config key migration for active agent(s).
+    if let Some(config_path) = resolve_config_path() {
+        if let Some(vault_dir) = config_path.parent().map(|d| d.to_path_buf()) {
+            if let Ok(mut vault) = SecretsVault::load(vault_dir.clone()) {
+                let ns_migrated = vault.migrate_namespace();
+                if let Ok(mut config) = AppConfig::load(&config_path) {
+                    let key_migrated = config.migrate_keys_to_vault(&mut vault);
+                    if !ns_migrated.is_empty() || !key_migrated.is_empty() {
+                        if let Err(e) = vault.save() {
+                            tracing::error!("Failed to save vault after migration: {}", e);
+                        }
+                        if !key_migrated.is_empty() {
+                            if let Err(e) = config.save(&config_path) {
+                                tracing::error!("Failed to save config after key migration: {}", e);
+                            }
+                        }
+                        tracing::info!(
+                            "Secrets migration complete: {} namespace, {} config keys",
+                            ns_migrated.len(),
+                            key_migrated.len()
+                        );
                     }
                 }
             }
@@ -5813,15 +5955,50 @@ async fn main() -> std::io::Result<()> {
         agentic_tasks: Arc::new(TokioMutex::new(HashMap::new())),
         skill_vault,
         orchestration_tick_seconds: 30,
+        skill_confirm_nonces: Arc::new(TokioMutex::new(HashMap::new())),
     };
 
     // Start orchestration scheduler for periodic jobs (UTC cron semantics).
     tokio::spawn(run_orchestration_scheduler_loop(state.clone()));
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = {
+        let origins_env = std::env::var("CORS_ALLOW_ORIGINS").unwrap_or_default();
+        let methods = vec![
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ];
+        let headers = vec![
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+        ];
+        if origins_env.is_empty() {
+            if std::env::var("ORION_CONTAINER").is_ok() {
+                // Container: deny cross-origin (same-origin via nginx)
+                CorsLayer::new()
+                    .allow_methods(methods)
+                    .allow_headers(headers)
+            } else {
+                // Host dev: allow all (Vite proxy is server-side, not CORS)
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(methods)
+                    .allow_headers(headers)
+            }
+        } else {
+            let origins: Vec<HeaderValue> = origins_env
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(methods)
+                .allow_headers(headers)
+        }
+    };
 
     let app = Router::new()
         .route("/health", get(health))
@@ -5957,10 +6134,21 @@ async fn main() -> std::io::Result<()> {
         .route("/api/agents/{id}/constitution", get(api_agent_constitution))
         .route("/api/agents/{id}/verify", post(api_agent_verify))
         .route("/api/agents/{id}/export", get(api_export_agent))
+        .layer(axum::middleware::from_fn(auth_middleware))
         .layer(cors)
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let bind_addr = std::env::var("ORION_BIND_ADDR").unwrap_or_else(|_| {
+        if std::env::var("ORION_CONTAINER").is_ok() {
+            "0.0.0.0:8080".to_string()
+        } else {
+            "127.0.0.1:8080".to_string()
+        }
+    });
+    let addr: SocketAddr = bind_addr.parse().unwrap_or_else(|e| {
+        tracing::error!("Invalid ORION_BIND_ADDR '{}': {}", bind_addr, e);
+        SocketAddr::from(([127, 0, 0, 1], 8080))
+    });
     tracing::info!("orion-api listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

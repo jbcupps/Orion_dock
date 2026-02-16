@@ -835,16 +835,20 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     // Respect active provider preference if set.
     if let Some(ref pref) = config.active_provider_preference {
         let normalized = AppConfig::normalize_provider_name(pref);
-        if let Some(key) = vault.get_secret(&normalized) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
             return (Some(normalized), Some(key.to_string()));
         }
     }
-    let providers = vault.list_providers();
+    let providers: Vec<String> = vault
+        .list_providers()
+        .into_iter()
+        .filter_map(|k| k.strip_prefix("provider:").map(String::from))
+        .collect();
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;
     let mut found_key: Option<String> = None;
     for pref in &preferred {
-        if let Some(key) = vault.get_secret(pref) {
+        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
             found_name = Some(pref.to_string());
             found_key = Some(key.to_string());
             break;
@@ -852,9 +856,9 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     }
     if found_name.is_none() {
         for p in &providers {
-            if *p != "tavily" {
-                if let Some(key) = vault.get_secret(p) {
-                    found_name = Some(p.to_string());
+            if p != "tavily" {
+                if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
+                    found_name = Some(p.clone());
                     found_key = Some(key.to_string());
                     break;
                 }

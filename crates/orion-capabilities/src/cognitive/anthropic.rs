@@ -572,6 +572,7 @@ mod tests {
                     name: "web_search".to_string(),
                     arguments: r#"{"query":"cats"}"#.to_string(),
                 }]),
+                images: None,
             },
             Message::tool_result("call_1", "Found 10 results about cats"),
         ];
