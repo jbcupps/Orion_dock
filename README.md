@@ -45,7 +45,15 @@ docker compose -f docker/docker-compose.yml exec orion-dev bash
 
 # Full stack (web UI + API + Postgres + Ollama): open http://localhost:3000
 docker compose -f docker/docker-compose.yml --profile full up -d
+
+# Full stack with dual-proxy egress boundary (proxy always on in full profile)
+docker compose -f docker/docker-compose.yml --profile full up -d --build
 ```
+
+Dual-proxy mode keeps app services on an internal-only network and routes outbound HTTP(S) via
+`proxy_internal -> proxy_external`, with SSRF deny rules at the egress proxy. See
+`documents/HOW_TO_RUN_LOCALLY.md` and `docker/proxy/README.md` for modes (`allow_all` vs
+`allowlist`), host access toggles, ingress sidecars, and audit logs.
 
 ## Workspace Commands (inside container)
 

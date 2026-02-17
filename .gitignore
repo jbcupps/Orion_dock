@@ -33,5 +33,8 @@ artifacts/
 failed-logs.txt
 *.log
 
+# Dual-proxy runtime logs (mounted by compose)
+.orion/
+
 .DS_Store
 Thumbs.db

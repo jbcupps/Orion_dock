@@ -1,0 +1,37 @@
+http_port 3129
+visible_hostname proxy_external
+
+# Keep logs compact and machine-parsable: ts client method url status bytes.
+logformat orion_proxy %ts.%03tu %>a %rm %ru %>Hs %<st
+access_log daemon:/var/log/squid/access.log orion_proxy
+
+# External proxy is policy + egress, not a cache.
+cache deny all
+cache_mem 16 MB
+maximum_object_size 0 KB
+cache_store_log none
+
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 443
+__EXTRA_SAFE_PORTS__
+acl CONNECT method CONNECT
+
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+
+# Optional host access rule goes before private-network denies.
+__HOST_ACCESS_RULES__
+
+# SSRF protections: block private and metadata-like ranges by default.
+acl to_localnet dst 10.0.0.0/8
+acl to_localnet dst 172.16.0.0/12
+acl to_localnet dst 192.168.0.0/16
+acl to_loopback dst 127.0.0.0/8
+acl to_linklocal dst 169.254.0.0/16
+
+http_access deny to_localnet
+http_access deny to_loopback
+http_access deny to_linklocal
+
+__MODE_RULES__

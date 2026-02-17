@@ -247,6 +247,16 @@ Skills operate under strict permission tiers:
 - **SSRF Protection**: Local LLM URLs validated to `localhost`/`127.0.0.1`.
 - **MCP Trust Policy**: Blocks cloud metadata IPs (e.g., `169.254.169.254`).
 - **API Auth**: Optional Bearer token for API access.
+- **Dual Proxy Egress Boundary (Full Profile Default)**:
+  - App services run on `orion_internal` (`internal: true`) with no direct egress.
+  - Outbound HTTP(S) path is `proxy_internal -> proxy_external -> host/internet`.
+  - `proxy_external` is the only policy-enforcing egress proxy on `orion_egress` (ingress sidecars also attach there for localhost publishing).
+  - Host-loopback access for manual testing is provided by dedicated ingress sidecars (`frontend_ingress`, `ollama_ingress`, `postgres_ingress`) rather than attaching app services to egress-capable networks.
+  - External policy enforces Safe ports (`80`, `443`), CONNECT to `443`, and blocks private/link-local ranges by default.
+  - Modes:
+    - `PROXY_MODE=allow_all` (default compatibility mode for provider APIs)
+    - `PROXY_MODE=allowlist` (strict destination allowlist from `docker/proxy/external/allowlist_domains.txt`)
+  - Host access can be explicitly toggled via `PROXY_ALLOW_HOST_DOCKER_INTERNAL=true|false`.
 
 ---
 
@@ -276,6 +286,10 @@ The frontend is a **React + Vite** Single Page Application (SPA).
 - **Profiles**:
   - `full`: API, Postgres, Ollama, Frontend, Toolbox.
   - `dev`: Dev container with bind mounts.
+- **Dual-Proxy Boundary in Full Profile**:
+  - Enabled with:
+    - `docker compose -f docker/docker-compose.yml --profile full up -d --build`
+  - Includes `proxy_internal`, `proxy_external`, `nettest`, and ingress sidecars.
 - **Services**:
   - `orion-api`: Core logic (Port 8080).
   - `frontend`: Nginx serving React app (Port 3000).
