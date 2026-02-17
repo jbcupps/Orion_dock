@@ -72,7 +72,6 @@ Useful flags:
 .\scripts\full-stack.ps1 -Down
 .\scripts\full-stack.ps1 -Down -PruneVolumes
 ```
-
 ## Full Stack with Dual Proxies (Host + Internet, Secure-by-Default)
 
 The full profile now includes the dual-proxy egress boundary by default:
@@ -116,7 +115,6 @@ Proxy runtime management endpoints (from the API container):
 - `GET /api/proxy/allowlist` — current allowlist file content
 - `PUT /api/proxy/allowlist` — update allowlist (`mentor_approved=true` required)
 - `GET /api/proxy/logs?lines=<n>` — read internal/external proxy log tails
-
 Run smoke tests:
 
 ```bash

@@ -66,7 +66,6 @@ Common variants:
 .\scripts\full-stack.ps1 -Rebuild      # no-cache rebuild before start
 .\scripts\full-stack.ps1 -Down         # tear down running stack
 ```
-
 Dual-proxy mode keeps app services on an internal-only network and routes outbound HTTP(S) via
 `proxy_internal -> proxy_external`, with SSRF deny rules at the egress proxy. See
 `documents/HOW_TO_RUN_LOCALLY.md` and `docker/proxy/README.md` for modes (`allow_all` vs

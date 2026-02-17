@@ -258,7 +258,6 @@ services:
     networks:
       - orion_internal
       - orion_egress
-
   nettest:
     image: curlimages/curl:8.12.1
     profiles:
