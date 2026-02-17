@@ -1,0 +1,6 @@
+# One domain per line. Leading dot matches subdomains, e.g. ".openai.com".
+# Keep this empty (or comments only) when PROXY_MODE=allow_all.
+# Example entries:
+# .openai.com
+# .anthropic.com
+# .googleapis.com

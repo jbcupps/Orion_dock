@@ -55,6 +55,50 @@ docker compose -f docker/docker-compose.yml --profile full up -d
 
 The frontend container proxies `/api` and `/health` to the API service, so the UI uses the same origin when served via Docker.
 
+## Full Stack with Dual Proxies (Host + Internet, Secure-by-Default)
+
+The full profile now includes the dual-proxy egress boundary by default:
+
+- App services run only on `orion_internal` (`internal: true`)
+- Outbound HTTP(S) flows through `proxy_internal -> proxy_external`
+- Private/link-local targets are denied at the external proxy by default
+- Host-local testing ports are exposed by ingress sidecars (`frontend_ingress`, `ollama_ingress`, `postgres_ingress`) so core app services remain internal-only
+
+```bash
+# Start full stack with dual proxies enabled
+docker compose -f docker/docker-compose.yml --profile full up -d --build
+```
+
+Default behavior is compatibility-first for provider/API traffic:
+
+- `PROXY_MODE=allow_all`
+- `PROXY_ALLOW_HOST_DOCKER_INTERNAL=true`
+
+Strict allowlist mode:
+
+```bash
+# Edit docker/proxy/external/allowlist_domains.txt first
+PROXY_MODE=allowlist docker compose -f docker/docker-compose.yml --profile full up -d --build
+```
+
+Disable host access explicitly:
+
+```bash
+PROXY_ALLOW_HOST_DOCKER_INTERNAL=false docker compose -f docker/docker-compose.yml --profile full up -d --build
+```
+
+Proxy audit logs (mounted on host):
+
+- `./.orion/proxy/internal/access.log`
+- `./.orion/proxy/external/access.log`
+
+Run smoke tests:
+
+```bash
+./scripts/proxy-smoke-test.sh
+# Windows: .\scripts\proxy-smoke-test.ps1
+```
+
 ## Full Stack (Postgres + Ollama, dev shell only)
 
 To run with a Postgres memory backend and Ollama for development (no web UI):
