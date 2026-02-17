@@ -12,7 +12,6 @@ use orion_core::config::{
 use orion_core::email_auth;
 use orion_core::secrets::SecretsVault;
 use orion_skills::channel::{SkillEvent, TriggerDescriptor, TriggerFrequency, TriggerPriority};
-use orion_skills::structured_failure::StructuredFailure;
 use orion_skills::manifest::{
     CapabilityDescriptor, NetworkPermission, Permission, SkillId, SkillManifest,
 };
@@ -20,6 +19,7 @@ use orion_skills::skill::{
     CostEstimate, ExecutionContext, HealthStatus, Skill, SkillConfig, SkillError, SkillHealth,
     SkillResult, ToolDescriptor, ToolOutput, ToolParams,
 };
+use orion_skills::structured_failure::StructuredFailure;
 use orion_skills::transport::discovery;
 use orion_skills::transport::{ImapClient, SearchCriteria, SmtpClient};
 use tokio::sync::RwLock;
@@ -104,10 +104,7 @@ impl EmailSkill {
     }
 
     /// Resolve an account by ID, or return the first active account.
-    async fn resolve_account(
-        &self,
-        account_id: Option<&str>,
-    ) -> SkillResult<EmailAccountConfig> {
+    async fn resolve_account(&self, account_id: Option<&str>) -> SkillResult<EmailAccountConfig> {
         let accounts = self.accounts.read().await;
         if accounts.is_empty() {
             return Err(SkillError::ToolFailed(
@@ -152,14 +149,18 @@ impl EmailSkill {
             .lock()
             .map_err(|e| SkillError::ToolFailed(format!("Vault lock: {}", e)))?;
 
-        let password = email_auth::get_password(&guard, &account.id)
-            .ok_or_else(|| {
-                SkillError::MissingSecret(format!(
-                    "No password/token for account '{}'. Store via: email:{}:password",
-                    account.id, account.id
-                ))
-            })?;
-        Ok((account.address.clone(), password))
+        let password = email_auth::get_password(&guard, &account.id).ok_or_else(|| {
+            SkillError::MissingSecret(format!(
+                "No password/token for account '{}'. Store via: email:{}:password",
+                account.id, account.id
+            ))
+        })?;
+        let username = account
+            .username
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| account.address.clone());
+        Ok((username, password))
     }
 
     /// Build an IMAP client for an account using config + provider presets.
@@ -181,9 +182,9 @@ impl EmailSkill {
             .imap_port
             .or_else(|| preset.as_ref().map(|p| p.imap_port))
             .unwrap_or(993);
-        let tls_mode = preset
-            .as_ref()
-            .map(|p| p.imap_tls)
+        let tls_mode = account
+            .imap_tls
+            .or_else(|| preset.as_ref().map(|p| p.imap_tls))
             .unwrap_or(TlsMode::Implicit);
 
         let client = ImapClient::new(&host, port, &user, &password, tls_mode);
@@ -219,9 +220,9 @@ impl EmailSkill {
             .smtp_port
             .or_else(|| preset.as_ref().map(|p| p.smtp_port))
             .unwrap_or(587);
-        let tls_mode = preset
-            .as_ref()
-            .map(|p| p.smtp_tls)
+        let tls_mode = account
+            .smtp_tls
+            .or_else(|| preset.as_ref().map(|p| p.smtp_tls))
             .unwrap_or(TlsMode::Starttls);
 
         Ok(SmtpClient::new(&host, port, &user, &password, tls_mode))
@@ -522,9 +523,9 @@ impl Skill for EmailSkill {
             "send_email" => {
                 let account_id = params.get::<String>("account_id");
                 let account = self.resolve_account(account_id.as_deref()).await?;
-                let to: Vec<String> = params.get("to").ok_or_else(|| {
-                    SkillError::ToolFailed("'to' parameter required".to_string())
-                })?;
+                let to: Vec<String> = params
+                    .get("to")
+                    .ok_or_else(|| SkillError::ToolFailed("'to' parameter required".to_string()))?;
                 let subject = params.get::<String>("subject").ok_or_else(|| {
                     SkillError::ToolFailed("'subject' parameter required".to_string())
                 })?;
@@ -594,7 +595,9 @@ impl Skill for EmailSkill {
 
         // Convert known error patterns to ToolOutput with StructuredFailure
         match result {
-            Err(SkillError::ToolFailed(ref msg)) if msg.contains("No email accounts configured") => {
+            Err(SkillError::ToolFailed(ref msg))
+                if msg.contains("No email accounts configured") =>
+            {
                 Ok(ToolOutput::structured_error(
                     msg,
                     StructuredFailure::ResourceNotFound {
@@ -606,18 +609,13 @@ impl Skill for EmailSkill {
                     },
                 ))
             }
-            Err(SkillError::MissingSecret(ref msg)) => {
-                Ok(ToolOutput::structured_error(
-                    msg,
-                    StructuredFailure::AuthenticationFailed {
-                        service: "email".to_string(),
-                        user_action_required: Some(format!(
-                            "Store the required credential: {}",
-                            msg
-                        )),
-                    },
-                ))
-            }
+            Err(SkillError::MissingSecret(ref msg)) => Ok(ToolOutput::structured_error(
+                msg,
+                StructuredFailure::AuthenticationFailed {
+                    service: "email".to_string(),
+                    user_action_required: Some(format!("Store the required credential: {}", msg)),
+                },
+            )),
             Err(SkillError::ToolFailed(ref msg))
                 if msg.contains("IMAP") || msg.contains("SMTP") || msg.contains("connect") =>
             {

@@ -74,19 +74,27 @@ fn preset_to_discovered(preset: &EmailServerPreset, provider_name: &str) -> Disc
     }
 }
 
+fn running_in_container() -> bool {
+    std::env::var("ORION_CONTAINER")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn proton_bridge_host_for_runtime() -> String {
+    std::env::var("ORION_EMAIL_BRIDGE_HOST")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "protonbridge_ingress".to_string())
+}
+
 /// Attempt Mozilla autoconfig for a domain.
 ///
 /// Tries the domain-hosted autoconfig URL, then the Thunderbird ISPDB.
 async fn try_autoconfig(domain: &str) -> Option<DiscoveredConfig> {
     let urls = [
-        format!(
-            "https://autoconfig.{}/mail/config-v1.1.xml",
-            domain
-        ),
-        format!(
-            "https://autoconfig.thunderbird.net/v1.1/{}",
-            domain
-        ),
+        format!("https://autoconfig.{}/mail/config-v1.1.xml", domain),
+        format!("https://autoconfig.thunderbird.net/v1.1/{}", domain),
     ];
 
     let client = reqwest::Client::builder()
@@ -244,10 +252,13 @@ async fn probe_ports(domain: &str) -> Option<DiscoveredConfig> {
 /// TCP connect probe with a short timeout.
 async fn tcp_probe(host: &str, port: u16) -> bool {
     let addr = format!("{}:{}", host, port);
-    tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
 }
 
 /// Discover email server configuration for a domain.
@@ -258,7 +269,13 @@ pub async fn discover_email_config(domain: &str) -> anyhow::Result<DiscoveredCon
     if let Some(provider) = domain_to_provider(domain) {
         if let Some(preset) = provider_preset(provider) {
             let name = format!("{:?}", provider);
-            return Ok(preset_to_discovered(&preset, &name));
+            let mut discovered = preset_to_discovered(&preset, &name);
+            if provider == EmailProvider::Proton && running_in_container() {
+                let ingress = proton_bridge_host_for_runtime();
+                discovered.imap_host = Some(ingress.clone());
+                discovered.smtp_host = Some(ingress);
+            }
+            return Ok(discovered);
         }
     }
 
@@ -296,10 +313,7 @@ mod tests {
             domain_to_provider("outlook.com"),
             Some(EmailProvider::Outlook)
         );
-        assert_eq!(
-            domain_to_provider("proton.me"),
-            Some(EmailProvider::Proton)
-        );
+        assert_eq!(domain_to_provider("proton.me"), Some(EmailProvider::Proton));
         assert_eq!(
             domain_to_provider("fastmail.com"),
             Some(EmailProvider::Fastmail)

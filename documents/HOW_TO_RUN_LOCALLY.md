@@ -55,6 +55,23 @@ docker compose -f docker/docker-compose.yml --profile full up -d
 
 The frontend container proxies `/api` and `/health` to the API service, so the UI uses the same origin when served via Docker.
 
+### Recommended startup entrypoint (Windows)
+
+Use the comprehensive PowerShell startup script for predictable boot order, health waits, and model readiness:
+
+```powershell
+.\scripts\full-stack.ps1
+```
+
+Useful flags:
+
+```powershell
+.\scripts\full-stack.ps1 -NoEmail
+.\scripts\full-stack.ps1 -SkipBuild
+.\scripts\full-stack.ps1 -Rebuild
+.\scripts\full-stack.ps1 -Down
+.\scripts\full-stack.ps1 -Down -PruneVolumes
+```
 ## Full Stack with Dual Proxies (Host + Internet, Secure-by-Default)
 
 The full profile now includes the dual-proxy egress boundary by default:
@@ -92,6 +109,12 @@ Proxy audit logs (mounted on host):
 - `./.orion/proxy/internal/access.log`
 - `./.orion/proxy/external/access.log`
 
+Proxy runtime management endpoints (from the API container):
+
+- `GET /api/proxy/status` — proxy mode, health hints, and recent tails
+- `GET /api/proxy/allowlist` — current allowlist file content
+- `PUT /api/proxy/allowlist` — update allowlist (`mentor_approved=true` required)
+- `GET /api/proxy/logs?lines=<n>` — read internal/external proxy log tails
 Run smoke tests:
 
 ```bash

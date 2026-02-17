@@ -90,9 +90,7 @@ impl SmtpClient {
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid from address '{}': {}", email.from, e))?;
 
-        let mut builder = Message::builder()
-            .from(from)
-            .subject(&email.subject);
+        let mut builder = Message::builder().from(from).subject(&email.subject);
 
         for to_addr in &email.to {
             let to_mailbox: Mailbox = to_addr

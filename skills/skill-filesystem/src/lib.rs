@@ -60,7 +60,8 @@ impl FilesystemSkill {
         };
         let detail = format!(
             "{}. Allowed directories: {:?}",
-            reason, self.allowed_paths_display()
+            reason,
+            self.allowed_paths_display()
         );
         // Stash the StructuredFailure JSON in metadata for the execute_tool wrapper
         // to extract. The SkillError type stays backward-compatible.
@@ -529,7 +530,11 @@ impl Skill for FilesystemSkill {
         // convert to a ToolOutput with the structured failure attached.
         match result {
             Err(SkillError::PermissionDenied(msg)) => {
-                let sf = self.last_structured_failure.lock().ok().and_then(|mut g| g.take());
+                let sf = self
+                    .last_structured_failure
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.take());
                 match sf {
                     Some(structured) => Ok(ToolOutput::structured_error(msg, structured)),
                     None => Err(SkillError::PermissionDenied(msg)),

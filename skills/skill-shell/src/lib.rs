@@ -115,7 +115,9 @@ impl ShellSkill {
                 &reason,
                 StructuredFailure::PermissionDenied {
                     path: command.to_string(),
-                    allowed_paths: vec!["Commands without dangerous patterns are allowed".to_string()],
+                    allowed_paths: vec![
+                        "Commands without dangerous patterns are allowed".to_string()
+                    ],
                 },
             ));
         }

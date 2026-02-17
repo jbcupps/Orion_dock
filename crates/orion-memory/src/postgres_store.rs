@@ -76,13 +76,11 @@ impl PostgresStore {
         let content = memory.content.clone();
         let created_at = memory.created_at;
         self.block_on(
-            sqlx::query(
-                "INSERT INTO birth (agent_id, content, created_at) VALUES ($1, $2, $3)",
-            )
-            .bind(&agent_id)
-            .bind(&content)
-            .bind(created_at)
-            .execute(pool),
+            sqlx::query("INSERT INTO birth (agent_id, content, created_at) VALUES ($1, $2, $3)")
+                .bind(&agent_id)
+                .bind(&content)
+                .bind(created_at)
+                .execute(pool),
         )
         .map_err(|e| StoreError::Postgres(e.to_string()))?;
         Ok(())

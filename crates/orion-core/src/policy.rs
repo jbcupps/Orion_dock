@@ -68,8 +68,7 @@ pub fn evaluate_tool_request(
     args: &Value,
     envelope: &CapabilityEnvelope,
 ) -> CapabilityGateResult {
-    if !envelope.allow_web
-        && matches!(tool_name, "web_search" | "perplexity_search" | "web_browse")
+    if !envelope.allow_web && matches!(tool_name, "web_search" | "perplexity_search" | "web_browse")
     {
         return CapabilityGateResult::deny(
             superego::CODE_PII_DOXXING,
@@ -107,7 +106,10 @@ pub fn evaluate_tool_request(
 
     let mut out = CapabilityGateResult::allow();
     out.require_confirmation = envelope.require_confirmation
-        && matches!(tool_name, "toolbox_exec" | "shell_execute" | "file_write" | "send_email");
+        && matches!(
+            tool_name,
+            "toolbox_exec" | "shell_execute" | "file_write" | "send_email"
+        );
     out
 }
 

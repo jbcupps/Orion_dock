@@ -13,6 +13,10 @@ Orion Dock is a **Docker-first**, **Rust-based** autonomous agent framework desi
 - **Skill Sandboxing**: Tiered permission system for tool execution.
 - **Dual Memory**: SQLite (default) or Postgres (vector/graph) backends.
 
+Terminology:
+- **Entity**: The runtime identity inside the container (operational chat persona and autonomous run persona share this identity base).
+- **Base identity**: `soul.md` is the entity's foundational identity document.
+
 ### High-Level Architecture
 
 ```mermaid
@@ -257,6 +261,11 @@ Skills operate under strict permission tiers:
     - `PROXY_MODE=allow_all` (default compatibility mode for provider APIs)
     - `PROXY_MODE=allowlist` (strict destination allowlist from `docker/proxy/external/allowlist_domains.txt`)
   - Host access can be explicitly toggled via `PROXY_ALLOW_HOST_DOCKER_INTERNAL=true|false`.
+  - Runtime inspection/management API:
+    - `GET /api/proxy/status`
+    - `GET /api/proxy/allowlist`
+    - `PUT /api/proxy/allowlist` (requires `mentor_approved=true`)
+    - `GET /api/proxy/logs?lines=<n>`
 
 ---
 
@@ -284,8 +293,12 @@ The frontend is a **React + Vite** Single Page Application (SPA).
 
 ### Docker Compose
 - **Profiles**:
-  - `full`: API, Postgres, Ollama, Frontend, Toolbox.
+  - `full`: API, Postgres, Ollama, Frontend, Toolbox, dual proxies, ingress sidecars.
+  - `email`: Proton Bridge ingress sidecar (`protonbridge_ingress`) for host Proton Bridge IMAP/SMTP routing.
   - `dev`: Dev container with bind mounts.
+- **Comprehensive startup script**:
+  - `.\scripts\full-stack.ps1` (Windows) starts full stack with health waits and model readiness checks.
+  - Supports `-NoEmail`, `-SkipBuild`, `-Rebuild`, `-Down`, `-Down -PruneVolumes`.
 - **Dual-Proxy Boundary in Full Profile**:
   - Enabled with:
     - `docker compose -f docker/docker-compose.yml --profile full up -d --build`

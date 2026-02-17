@@ -137,9 +137,7 @@ impl GoalFrame {
                 rationale: "Fallback plan — Planner did not produce structured output".to_string(),
                 estimated_tool_calls: 3,
             },
-            abort_conditions: vec![
-                "Three consecutive failures with the same error".to_string(),
-            ],
+            abort_conditions: vec!["Three consecutive failures with the same error".to_string()],
             max_iterations: 5,
             time_budget: Some(Duration::from_secs(120)),
         }
@@ -227,11 +225,7 @@ pub struct Approach {
 mod tests {
     use super::*;
 
-    fn make_goal_frame(
-        category: IntentCategory,
-        verifiers: bool,
-        risks: bool,
-    ) -> GoalFrame {
+    fn make_goal_frame(category: IntentCategory, verifiers: bool, risks: bool) -> GoalFrame {
         GoalFrame {
             intent: Intent {
                 category,

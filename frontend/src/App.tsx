@@ -6,7 +6,9 @@ import {
   fetchForgeState,
   fetchGenesisState,
   fetchHealth,
+  fetchAgenticRuns,
   fetchMentorName,
+  fetchOrchestrationJobs,
   fetchStatus,
   fetchStoredProviders,
   fetchTierModels,
@@ -20,6 +22,8 @@ import {
   type BirthStateResponse,
   type ProviderCatalogEntry,
   type RoutingTelemetry,
+  type AgenticRunInfo,
+  type OrchestrationJob,
   type ProviderModelValidation,
   type StatusResponse,
   type TierModels,
@@ -77,11 +81,17 @@ function App() {
   const [showChat, setShowChat] = useState(false);
   const [dashboardTab, setDashboardTab] = useState<'chat' | 'agent' | 'jobs'>('chat');
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
+  const [launchedAgenticTask, setLaunchedAgenticTask] = useState<{
+    taskId: string;
+    goal: string;
+  } | null>(null);
   const [routerMode, setRouterMode] = useState<'auto' | 'think_hard' | 'think_harder'>('auto');
   const [chatBusy, setChatBusy] = useState(false);
   const [agenticBusy, setAgenticBusy] = useState(false);
   const [mentorName, setMentorName] = useState<string | null>(null);
   const [routingTelemetry, setRoutingTelemetry] = useState<RoutingTelemetry | null>(null);
+  const [runningAgentRuns, setRunningAgentRuns] = useState<AgenticRunInfo[]>([]);
+  const [upcomingOrchestrationJobs, setUpcomingOrchestrationJobs] = useState<OrchestrationJob[]>([]);
   const cloudBusy = (chatBusy || agenticBusy) && storedProviders.length > 0;
 
   useEffect(() => {
@@ -341,6 +351,7 @@ function App() {
     setTierRefreshing(false);
     setTierValidating(false);
     setShowChat(false);
+    setLaunchedAgenticTask(null);
     setDashboardTab('chat');
   };
 
@@ -515,6 +526,46 @@ function App() {
       setStoredProviders(res.providers);
     } catch { /* ignore */ }
   }, [currentAgentId]);
+
+  useEffect(() => {
+    if (appState !== 'dashboard' || !currentAgentId || !status?.birth_complete) {
+      setRunningAgentRuns([]);
+      setUpcomingOrchestrationJobs([]);
+      return;
+    }
+    let cancelled = false;
+    const loadOperations = async () => {
+      try {
+        const [runs, orchestration] = await Promise.all([
+          fetchAgenticRuns(currentAgentId),
+          fetchOrchestrationJobs(currentAgentId),
+        ]);
+        if (cancelled) return;
+        setRunningAgentRuns(runs.filter((run) => run.status === 'running').slice(0, 4));
+        setUpcomingOrchestrationJobs(
+          (orchestration.jobs || [])
+            .filter((job) => job.enabled && Boolean(job.next_run_at))
+            .sort((a, b) => {
+              const at = a.next_run_at ? new Date(a.next_run_at).getTime() : Number.MAX_SAFE_INTEGER;
+              const bt = b.next_run_at ? new Date(b.next_run_at).getTime() : Number.MAX_SAFE_INTEGER;
+              return at - bt;
+            })
+            .slice(0, 5)
+        );
+      } catch {
+        if (!cancelled) {
+          setRunningAgentRuns([]);
+          setUpcomingOrchestrationJobs([]);
+        }
+      }
+    };
+    loadOperations();
+    const interval = setInterval(loadOperations, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [appState, currentAgentId, status?.birth_complete]);
 
   if (appState === 'splash') {
     return (
@@ -836,6 +887,44 @@ function App() {
                 </details>
               </div>
             )}
+            {status?.birth_complete && (
+              <div className="operation-snapshot">
+                <div className="operation-snapshot-head">
+                  <span>Operations</span>
+                  <span>{runningAgentRuns.length} running / {upcomingOrchestrationJobs.length} upcoming</span>
+                </div>
+                <details className="operation-snapshot-details">
+                  <summary>Running agent tasks</summary>
+                  {runningAgentRuns.length === 0 ? (
+                    <p className="muted">No active agentic runs.</p>
+                  ) : (
+                    <div className="operation-snapshot-list">
+                      {runningAgentRuns.map((run) => (
+                        <div key={run.task_id} className="operation-snapshot-item">
+                          <strong>{run.goal}</strong>
+                          <span>turns: {run.turns} / tools: {run.tool_calls}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
+                <details className="operation-snapshot-details">
+                  <summary>Upcoming scheduled jobs</summary>
+                  {upcomingOrchestrationJobs.length === 0 ? (
+                    <p className="muted">No enabled scheduled jobs.</p>
+                  ) : (
+                    <div className="operation-snapshot-list">
+                      {upcomingOrchestrationJobs.map((job) => (
+                        <div key={job.job_id} className="operation-snapshot-item">
+                          <strong>{job.name}</strong>
+                          <span>{job.next_run_at ? new Date(job.next_run_at).toLocaleString() : 'no next run'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
+              </div>
+            )}
             {status && !status.birth_complete && status.birth_stage && (
               <p className="phase-stage">{status.birth_stage}</p>
             )}
@@ -910,6 +999,11 @@ function App() {
                     onError={setError}
                     onBusyChange={setChatBusy}
                     onRoutingTelemetryChange={setRoutingTelemetry}
+                    onAgenticTaskLaunched={(info) => {
+                      setLaunchedAgenticTask(info);
+                      setDashboardTab('chat');
+                      setChatMode('agentic');
+                    }}
                   />
                 ) : (
                   <AgenticPanel
@@ -919,6 +1013,8 @@ function App() {
                     onRouterModeChange={setRouterMode}
                     onError={setError}
                     onBusyChange={setAgenticBusy}
+                    externalTask={launchedAgenticTask}
+                    onExternalTaskConsumed={() => setLaunchedAgenticTask(null)}
                   />
                 )}
               </section>

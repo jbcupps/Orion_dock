@@ -15,6 +15,8 @@ interface AgenticPanelProps {
   onRouterModeChange?: (mode: AgenticRouterMode) => void;
   onError: (message: string) => void;
   onBusyChange?: (busy: boolean) => void;
+  externalTask?: { taskId: string; goal: string } | null;
+  onExternalTaskConsumed?: () => void;
 }
 
 interface TimelineStep {
@@ -51,6 +53,8 @@ export default function AgenticPanel({
   onRouterModeChange,
   onError,
   onBusyChange,
+  externalTask,
+  onExternalTaskConsumed,
 }: AgenticPanelProps) {
   const [goal, setGoal] = useState('');
   const [autoApprove, setAutoApprove] = useState(false);
@@ -65,6 +69,12 @@ export default function AgenticPanel({
   const timelineEndRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const stepIdRef = useRef(0);
+  const activeTierLabel =
+    routerMode === 'think_harder'
+      ? 'Pro'
+      : routerMode === 'think_hard'
+        ? 'Standard'
+        : 'Fast';
 
   // Scroll to bottom when new steps arrive
   useEffect(() => {
@@ -115,6 +125,68 @@ export default function AgenticPanel({
     setMaxTurns(ROUTER_MAX_TURN_DEFAULTS[nextMode]);
   }, [onRouterModeChange]);
 
+  const attachToTaskStream = useCallback(
+    (nextTaskId: string) => {
+      eventSourceRef.current?.close();
+      const es = subscribeToAgenticStream(
+        agentId,
+        nextTaskId,
+        (eventName, rawData) => {
+          // Backend sends {event, data: {…}} via serde tagged enum; unwrap nested payload
+          const envelope = rawData as Record<string, unknown>;
+          const data = (envelope.data ?? envelope) as Record<string, unknown>;
+          switch (eventName) {
+            case 'thinking':
+              setTurn(data.turn as number);
+              addStep('thinking', data.turn as number, data.content as string);
+              break;
+            case 'tool_call':
+              addStep('tool_call', data.turn as number, JSON.stringify(data.arguments, null, 2), {
+                toolName: data.tool_name as string,
+              });
+              break;
+            case 'tool_result':
+              addStep('tool_result', data.turn as number, data.output as string, {
+                toolName: data.tool_name as string,
+                success: data.success as boolean,
+              });
+              break;
+            case 'mentor_needed':
+              setStatus('waiting_for_mentor');
+              setTurn(data.turn as number);
+              addStep('mentor_needed', data.turn as number, data.question as string);
+              break;
+            case 'confirmation_needed':
+              setStatus('waiting_for_confirmation');
+              setTurn(data.turn as number);
+              addStep(
+                'confirmation_needed',
+                data.turn as number,
+                `Tool: ${data.tool_name}\nArguments: ${JSON.stringify(data.arguments, null, 2)}`,
+                { toolName: data.tool_name as string }
+              );
+              break;
+            case 'done':
+              setStatus((data.status as string) === 'cancelled' ? 'cancelled' : 'completed');
+              addStep('done', data.turns_used as number, data.summary as string);
+              es.close();
+              break;
+            case 'error':
+              setStatus('failed');
+              addStep('error', 0, data.message as string);
+              es.close();
+              break;
+          }
+        },
+        () => {
+          // SSE connection error — could be normal close or network issue
+        }
+      );
+      eventSourceRef.current = es;
+    },
+    [addStep, agentId]
+  );
+
   const handleStart = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -135,63 +207,7 @@ export default function AgenticPanel({
         });
         setTaskId(result.task_id);
         setStatus('running');
-
-        // Subscribe to SSE stream
-        const es = subscribeToAgenticStream(
-          agentId,
-          result.task_id,
-          (eventName, rawData) => {
-            // Backend sends {event, data: {…}} via serde tagged enum; unwrap nested payload
-            const envelope = rawData as Record<string, unknown>;
-            const data = (envelope.data ?? envelope) as Record<string, unknown>;
-            switch (eventName) {
-              case 'thinking':
-                setTurn(data.turn as number);
-                addStep('thinking', data.turn as number, data.content as string);
-                break;
-              case 'tool_call':
-                addStep('tool_call', data.turn as number, JSON.stringify(data.arguments, null, 2), {
-                  toolName: data.tool_name as string,
-                });
-                break;
-              case 'tool_result':
-                addStep('tool_result', data.turn as number, data.output as string, {
-                  toolName: data.tool_name as string,
-                  success: data.success as boolean,
-                });
-                break;
-              case 'mentor_needed':
-                setStatus('waiting_for_mentor');
-                setTurn(data.turn as number);
-                addStep('mentor_needed', data.turn as number, data.question as string);
-                break;
-              case 'confirmation_needed':
-                setStatus('waiting_for_confirmation');
-                setTurn(data.turn as number);
-                addStep(
-                  'confirmation_needed',
-                  data.turn as number,
-                  `Tool: ${data.tool_name}\nArguments: ${JSON.stringify(data.arguments, null, 2)}`,
-                  { toolName: data.tool_name as string }
-                );
-                break;
-              case 'done':
-                setStatus((data.status as string) === 'cancelled' ? 'cancelled' : 'completed');
-                addStep('done', data.turns_used as number, data.summary as string);
-                es.close();
-                break;
-              case 'error':
-                setStatus('failed');
-                addStep('error', 0, data.message as string);
-                es.close();
-                break;
-            }
-          },
-          () => {
-            // SSE connection error — could be normal close or network issue
-          }
-        );
-        eventSourceRef.current = es;
+        attachToTaskStream(result.task_id);
       } catch (e) {
         onError(e instanceof Error ? e.message : 'Failed to start agentic run');
         setStatus('idle');
@@ -199,8 +215,27 @@ export default function AgenticPanel({
         setStarting(false);
       }
     },
-    [agentId, goal, maxTurns, autoApprove, routerMode, starting, onError, addStep]
+    [agentId, goal, maxTurns, autoApprove, routerMode, starting, onError, attachToTaskStream]
   );
+
+  useEffect(() => {
+    if (!externalTask?.taskId) return;
+    if (taskId === externalTask.taskId && status !== 'idle') return;
+    setGoal(externalTask.goal || '');
+    setSteps([]);
+    setTurn(0);
+    stepIdRef.current = 0;
+    setTaskId(externalTask.taskId);
+    setStatus('running');
+    attachToTaskStream(externalTask.taskId);
+    onExternalTaskConsumed?.();
+  }, [
+    attachToTaskStream,
+    externalTask,
+    onExternalTaskConsumed,
+    status,
+    taskId,
+  ]);
 
   const handleMentorRespond = useCallback(async () => {
     if (!taskId || !mentorInput.trim()) return;
@@ -294,6 +329,7 @@ export default function AgenticPanel({
                 <option value="think_harder">Pro</option>
               </select>
             </label>
+            <span className="agentic-tier-badge">Tier: {activeTierLabel}</span>
             <label>
               <input
                 type="checkbox"
@@ -311,6 +347,7 @@ export default function AgenticPanel({
               <span className={`agentic-status-badge agentic-status-${status}`}>
                 {status.replace(/_/g, ' ')}
               </span>
+              <span className="agentic-tier-badge">Tier: {activeTierLabel}</span>
               <span className="agentic-turn-counter">
                 Turn {turn}/{maxTurns}
               </span>

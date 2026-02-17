@@ -21,12 +21,10 @@ impl ConstraintStore {
         let path = agent_data_dir.join("governor_constraints.json");
         let constraints = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    serde_json::from_str(&content).unwrap_or_else(|e| {
-                        warn!("Failed to parse constraint store: {}", e);
-                        Vec::new()
-                    })
-                }
+                Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+                    warn!("Failed to parse constraint store: {}", e);
+                    Vec::new()
+                }),
                 Err(e) => {
                     warn!("Failed to read constraint store: {}", e);
                     Vec::new()
@@ -56,11 +54,8 @@ impl ConstraintStore {
 
     /// Add new constraints (deduplicating by Display representation).
     pub fn add(&mut self, new_constraints: &[Constraint]) {
-        let existing: std::collections::HashSet<String> = self
-            .constraints
-            .iter()
-            .map(|c| c.to_string())
-            .collect();
+        let existing: std::collections::HashSet<String> =
+            self.constraints.iter().map(|c| c.to_string()).collect();
 
         for c in new_constraints {
             if !existing.contains(&c.to_string()) {

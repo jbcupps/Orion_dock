@@ -201,6 +201,56 @@ body {
   text-overflow: ellipsis;
 }
 
+.operation-snapshot {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.55rem 0.6rem;
+  background: color-mix(in srgb, var(--surface) 90%, var(--ok) 10%);
+}
+
+.operation-snapshot-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.operation-snapshot-details {
+  font-size: 0.8rem;
+}
+
+.operation-snapshot-details + .operation-snapshot-details {
+  margin-top: 0.25rem;
+}
+
+.operation-snapshot-details > summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.operation-snapshot-list {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.operation-snapshot-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.operation-snapshot-item strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
 .status {
   margin: 0;
   display: grid;

@@ -17,8 +17,8 @@ use orion_skills::structured_failure::StructuredFailure;
 
 use crate::cognitive::{ChatResponse, SessionContext, ToolResultRef, UserRequest};
 use crate::execution_state::{
-    detect_progress, format_state_summary, Attempt, AttemptResult, CriterionStatus,
-    ExecutionState, Progress, Strategy,
+    detect_progress, format_state_summary, Attempt, AttemptResult, CriterionStatus, ExecutionState,
+    Progress, Strategy,
 };
 use crate::planner::Planner;
 
@@ -109,11 +109,7 @@ pub use async_trait::async_trait;
 pub trait ToolExecutor: Send + Sync {
     /// Execute a tool call and return a structured result.
     /// The `tool_name` and `args` come from parsing the LLM response.
-    async fn execute_tool(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> ToolExecutionResult;
+    async fn execute_tool(&self, tool_name: &str, args: &serde_json::Value) -> ToolExecutionResult;
 }
 
 /// Result of a single tool execution via the ToolExecutor.
@@ -186,11 +182,7 @@ impl ExecutionGovernor {
     }
 
     /// Run the full governed execution: plan -> execute -> verify -> report.
-    pub async fn execute(
-        &self,
-        user_request: UserRequest,
-        ctx: &SessionContext,
-    ) -> GovernedResult {
+    pub async fn execute(&self, user_request: UserRequest, ctx: &SessionContext) -> GovernedResult {
         // ================================================================
         // PHASE 1: PLANNING (Pro model, one call)
         // ================================================================
@@ -252,7 +244,10 @@ impl ExecutionGovernor {
             let response = match provider.complete(&request).await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("Governor: LLM call failed on iteration {}: {}", iteration, e);
+                    warn!(
+                        "Governor: LLM call failed on iteration {}: {}",
+                        iteration, e
+                    );
                     state.strategy = Strategy::RetryWithConstraints;
                     continue;
                 }
@@ -319,16 +314,13 @@ impl ExecutionGovernor {
 
                 let attempt_result = if result.success {
                     AttemptResult::Success {
-                        summary: result
-                            .output_text
-                            .chars()
-                            .take(200)
-                            .collect(),
+                        summary: result.output_text.chars().take(200).collect(),
                     }
                 } else {
-                    let sf = result.structured_failure.clone().unwrap_or_else(|| {
-                        StructuredFailure::Unknown(result.output_text.clone())
-                    });
+                    let sf = result
+                        .structured_failure
+                        .clone()
+                        .unwrap_or_else(|| StructuredFailure::Unknown(result.output_text.clone()));
                     AttemptResult::Failure(sf)
                 };
 
@@ -369,7 +361,9 @@ impl ExecutionGovernor {
                         repeated_failure
                     );
                     if let Some(risk) = state.goal.find_matching_risk(&repeated_failure) {
-                        info!("Governor: Planner predicted this — switching to AlternativeApproach");
+                        info!(
+                            "Governor: Planner predicted this — switching to AlternativeApproach"
+                        );
                         state.set_active_mitigation(Some(risk.clone()));
                         state.strategy = Strategy::AlternativeApproach;
                     } else {
@@ -453,11 +447,7 @@ impl ExecutionGovernor {
     }
 
     /// Augment messages with execution state for the next iteration.
-    fn augment_messages(
-        &self,
-        messages: &[Message],
-        state: &ExecutionState,
-    ) -> Vec<Message> {
+    fn augment_messages(&self, messages: &[Message], state: &ExecutionState) -> Vec<Message> {
         let mut augmented = messages.to_vec();
         let state_block = format_state_summary(state);
 
@@ -475,10 +465,7 @@ impl ExecutionGovernor {
     fn formulate_question(&self, state: &ExecutionState) -> String {
         let mut parts = Vec::new();
 
-        parts.push(format!(
-            "I'm working on: {}",
-            state.goal.intent.summary
-        ));
+        parts.push(format!("I'm working on: {}", state.goal.intent.summary));
 
         if !state.constraints_discovered.is_empty() {
             parts.push("I've discovered these constraints:".to_string());
@@ -527,7 +514,10 @@ impl ExecutionGovernor {
             if let AttemptResult::Failure(sf) = &attempt.result {
                 let key = sf.kind_key();
                 if seen_keys.insert(key.clone()) {
-                    parts.push(format!("  - {} on '{}': {}", key, attempt.tool, attempt.args_summary));
+                    parts.push(format!(
+                        "  - {} on '{}': {}",
+                        key, attempt.tool, attempt.args_summary
+                    ));
                 }
             }
         }
@@ -573,7 +563,10 @@ impl ExecutionGovernor {
 
         let request = CompletionRequest {
             messages: vec![
-                Message::new("system", "You are a concise assistant. Summarize the task outcome for the user."),
+                Message::new(
+                    "system",
+                    "You are a concise assistant. Summarize the task outcome for the user.",
+                ),
                 Message::new("user", &summary_prompt),
             ],
             tools: None,
@@ -664,9 +657,7 @@ mod tests {
                 .unwrap_or(ToolExecutionResult {
                     success: false,
                     output_text: "No more mock results".to_string(),
-                    structured_failure: Some(StructuredFailure::Unknown(
-                        "exhausted".to_string(),
-                    )),
+                    structured_failure: Some(StructuredFailure::Unknown("exhausted".to_string())),
                 })
         }
     }
@@ -753,14 +744,15 @@ mod tests {
 
         // Executor responds with no tool calls — and criteria are all met
         let executor = Arc::new(MockLlmProvider::new(vec![
-            "All done! Config written.".to_string(),
+            "All done! Config written.".to_string()
         ]));
         let recovery = Arc::new(MockLlmProvider::new(vec![]));
 
         let tool_exec = Arc::new(MockToolExecutor::new(vec![]));
-        let parser = Arc::new(MockParser::new(vec![
-            ("All done! Config written.".to_string(), vec![]),
-        ]));
+        let parser = Arc::new(MockParser::new(vec![(
+            "All done! Config written.".to_string(),
+            vec![],
+        )]));
 
         let gov = ExecutionGovernor::new(
             planner,
@@ -967,10 +959,7 @@ mod tests {
         let executor = Arc::new(MockLlmProvider::new(vec!["response".to_string()]));
         let recovery = Arc::new(MockLlmProvider::new(vec![]));
         let tool_exec = Arc::new(MockToolExecutor::new(vec![]));
-        let parser = Arc::new(MockParser::new(vec![(
-            "response".to_string(),
-            vec![],
-        )]));
+        let parser = Arc::new(MockParser::new(vec![("response".to_string(), vec![])]));
 
         let gov = ExecutionGovernor::new(
             planner,
@@ -990,6 +979,9 @@ mod tests {
 
         let result = gov.execute(user_req, &mock_session_ctx()).await;
         let msg = result.user_message();
-        assert!(!msg.is_empty(), "Governor must always return a non-empty user message");
+        assert!(
+            !msg.is_empty(),
+            "Governor must always return a non-empty user message"
+        );
     }
 }
