@@ -39,9 +39,9 @@ pub use error::{CoreError, Result};
 pub use global_config::{AgentEntry, GlobalConfig};
 pub use keyring::{
     delete_signing_key, generate_external_keypair, generate_master_key, load_master_key,
-    load_signing_key, parse_private_key, persist_signing_key, sign_agent_key,
-    sign_agent_lineage, sign_constitutional_documents, sign_document, verify_agent_lineage,
-    verify_agent_signature, ExternalKeypairResult, Keyring, MasterKeyResult, SignatureMetadata,
+    load_signing_key, parse_private_key, persist_signing_key, sign_agent_key, sign_agent_lineage,
+    sign_constitutional_documents, sign_document, verify_agent_lineage, verify_agent_signature,
+    ExternalKeypairResult, Keyring, MasterKeyResult, SignatureMetadata,
 };
 pub use local_llm_url::validate_local_llm_url;
 pub use policy::{

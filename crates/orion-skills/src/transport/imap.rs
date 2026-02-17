@@ -292,10 +292,7 @@ mod tests {
             .unwrap_or(993);
         let user = std::env::var("ORION_IMAP_USER").unwrap_or_default();
         let pass = std::env::var("ORION_IMAP_PASS").unwrap_or_default();
-        let tls_mode = match std::env::var("ORION_IMAP_TLS")
-            .unwrap_or_default()
-            .as_str()
-        {
+        let tls_mode = match std::env::var("ORION_IMAP_TLS").unwrap_or_default().as_str() {
             "starttls" => TlsMode::Starttls,
             "none" => TlsMode::None,
             _ => TlsMode::Implicit,

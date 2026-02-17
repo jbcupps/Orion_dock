@@ -111,11 +111,7 @@ impl Planner {
     }
 
     /// Build the full planning prompt with context injected.
-    fn build_prompt(
-        &self,
-        user_request: &UserRequest,
-        _ctx: &SessionContext,
-    ) -> Vec<Message> {
+    fn build_prompt(&self, user_request: &UserRequest, _ctx: &SessionContext) -> Vec<Message> {
         let tools_json = serde_json::to_string_pretty(&user_request.available_tools)
             .unwrap_or_else(|_| "[]".to_string());
 
@@ -147,10 +143,7 @@ impl Planner {
             .strip_prefix("```json")
             .or_else(|| text.trim().strip_prefix("```"))
             .unwrap_or(text.trim());
-        let cleaned = cleaned
-            .strip_suffix("```")
-            .unwrap_or(cleaned)
-            .trim();
+        let cleaned = cleaned.strip_suffix("```").unwrap_or(cleaned).trim();
 
         serde_json::from_str::<GoalFrame>(cleaned)
             .context("Failed to parse GoalFrame JSON from planner response")
@@ -171,11 +164,7 @@ impl Planner {
     }
 
     /// Execute the planning call. Returns a GoalFrame or falls back to a minimal one.
-    pub async fn plan(
-        &self,
-        user_request: &UserRequest,
-        ctx: &SessionContext,
-    ) -> GoalFrame {
+    pub async fn plan(&self, user_request: &UserRequest, ctx: &SessionContext) -> GoalFrame {
         let messages = self.build_prompt(user_request, ctx);
 
         let request = CompletionRequest {
@@ -190,10 +179,7 @@ impl Planner {
                     Ok(gf) => {
                         let issues = gf.validate();
                         if !issues.is_empty() {
-                            warn!(
-                                "GoalFrame validation warnings: {:?}",
-                                issues
-                            );
+                            warn!("GoalFrame validation warnings: {:?}", issues);
                         }
                         info!(
                             "Planner produced GoalFrame: intent={:?}, criteria={}, risks={}",
@@ -207,10 +193,7 @@ impl Planner {
                         warn!("First GoalFrame parse failed: {}", first_err);
 
                         // Retry with repair prompt
-                        let repair = Self::repair_prompt(
-                            &response.content,
-                            &first_err.to_string(),
-                        );
+                        let repair = Self::repair_prompt(&response.content, &first_err.to_string());
                         let repair_request = CompletionRequest {
                             messages: repair,
                             tools: None,
@@ -239,7 +222,10 @@ impl Planner {
                 }
             }
             Err(e) => {
-                warn!("Planner call failed: {}. Falling back to minimal GoalFrame.", e);
+                warn!(
+                    "Planner call failed: {}. Falling back to minimal GoalFrame.",
+                    e
+                );
             }
         }
 
@@ -273,10 +259,7 @@ impl Agent for Planner {
     ) -> Result<CognitiveArtifact> {
         let user_request = match input {
             CognitiveArtifact::UserRequest(req) => req,
-            other => anyhow::bail!(
-                "Planner expected UserRequest, got {:?}",
-                other.kind()
-            ),
+            other => anyhow::bail!("Planner expected UserRequest, got {:?}", other.kind()),
         };
 
         let goal_frame = self.plan(&user_request, ctx).await;
@@ -286,11 +269,7 @@ impl Agent for Planner {
 
 #[async_trait]
 impl CognitiveTransform<UserRequest, GoalFrame> for Planner {
-    async fn transform(
-        &self,
-        input: UserRequest,
-        ctx: &SessionContext,
-    ) -> Result<GoalFrame> {
+    async fn transform(&self, input: UserRequest, ctx: &SessionContext) -> Result<GoalFrame> {
         Ok(self.plan(&input, ctx).await)
     }
 }

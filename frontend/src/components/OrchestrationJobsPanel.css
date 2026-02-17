@@ -29,6 +29,14 @@
   padding: 0.45rem 0.6rem;
 }
 
+.orchestration-input-wide {
+  grid-column: 1 / span 2;
+}
+
+.orchestration-suggest {
+  margin-top: 0;
+}
+
 .orchestration-textarea {
   grid-column: 1 / -1;
   min-height: 64px;

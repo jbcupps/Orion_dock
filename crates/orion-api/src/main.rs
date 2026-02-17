@@ -85,6 +85,8 @@ struct AppState {
     /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
     #[allow(clippy::type_complexity)]
     skill_confirm_nonces: Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
+    /// Pending high-impact operational chat actions that require mentor confirmation.
+    pending_operational_actions: Arc<TokioMutex<HashMap<String, PendingOperationalAction>>>,
     /// Superego L2 behavior mode.
     superego_l2_mode: orion_router::SuperegoL2Mode,
 }
@@ -2901,6 +2903,14 @@ struct OperationalChatResponseBody {
     auto_archived: Option<AutoArchivedInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     routing_telemetry: Option<RoutingTelemetry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agentic_task_launched: Option<AgenticTaskLaunchedInfo>,
+}
+
+#[derive(Serialize, Clone)]
+struct AgenticTaskLaunchedInfo {
+    task_id: String,
+    goal: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -2945,6 +2955,112 @@ struct OperationalToolLogEntry {
     output: String,
 }
 
+#[derive(Serialize)]
+struct ProxyStatusResponse {
+    mode: String,
+    allow_host_docker_internal: bool,
+    allowlist_path: String,
+    internal_log_path: String,
+    external_log_path: String,
+    internal_log_exists: bool,
+    external_log_exists: bool,
+    internal_log_tail: String,
+    external_log_tail: String,
+}
+
+#[derive(Serialize)]
+struct ProxyAllowlistResponse {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ProxyAllowlistUpdateRequest {
+    content: String,
+    mentor_approved: bool,
+}
+
+#[derive(Deserialize)]
+struct ProxyLogsQuery {
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ProxyLogsResponse {
+    lines: usize,
+    internal: String,
+    external: String,
+}
+
+fn proxy_allowlist_path() -> PathBuf {
+    std::env::var("ORION_PROXY_ALLOWLIST_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("docker/proxy/external/allowlist_domains.txt"))
+}
+
+fn proxy_log_dir() -> PathBuf {
+    std::env::var("ORION_PROXY_LOG_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".orion/proxy"))
+}
+
+fn read_file_or_empty(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn read_log_tail(path: &std::path::Path, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return String::new(),
+    };
+    let collected = content
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<&str>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<&str>>();
+    collected.join("\n")
+}
+
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn contains_action_intent(content: &str) -> bool {
+    let normalized = content.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    let markers = [
+        "i'll ",
+        "i will ",
+        "let me ",
+        "i'm going to ",
+        "im going to ",
+        "proceeding now",
+        "proceeding to ",
+        "doing that now",
+        "i can do that now",
+    ];
+    markers.iter().any(|m| normalized.contains(m))
+}
+
 fn strip_tool_result_block(content: &str) -> String {
     content
         .split_once("\n\n[Tool Result]\n")
@@ -2962,6 +3078,9 @@ fn looks_like_provisional_tool_message(content: &str) -> bool {
         "i'll check",
         "i will check",
         "let me look",
+        "i'll do that",
+        "i will do that",
+        "i'll handle that",
         "one moment",
         "hang on",
         "searching",
@@ -2984,6 +3103,364 @@ fn format_fast_tool_reply(output_text: &str) -> String {
         .collect::<Vec<String>>()
         .join("\n");
     format!("Here's what I found:\n\n{}", cleaned.trim())
+}
+
+#[derive(Clone)]
+enum PendingOperationalAction {
+    CreateAgent {
+        name: String,
+        quick_start: bool,
+    },
+    CreateOrchestrationJob {
+        request: CreateOrchestrationJobRequest,
+    },
+}
+
+fn parse_confirmation_signal(message: &str) -> Option<bool> {
+    let normalized = message.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+        .collect::<String>();
+    let positive = [
+        "yes",
+        "y",
+        "confirm",
+        "confirmed",
+        "do it",
+        "proceed",
+        "approve",
+        "go ahead",
+        "sounds good",
+    ];
+    if positive
+        .iter()
+        .any(|s| compact == *s || compact.contains(s))
+    {
+        return Some(true);
+    }
+    let negative = [
+        "no",
+        "n",
+        "cancel",
+        "stop",
+        "dont",
+        "do not",
+        "deny",
+        "never mind",
+    ];
+    if negative
+        .iter()
+        .any(|s| compact == *s || compact.contains(s))
+    {
+        return Some(false);
+    }
+    None
+}
+
+fn parse_time_hh_mm(message: &str) -> Option<(u32, u32)> {
+    let lowered = message.to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    for token in lowered
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | '(' | ')' | '[' | ']'))
+    {
+        let clean = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':');
+        if clean.is_empty() {
+            continue;
+        }
+        candidates.push(clean.to_string());
+    }
+
+    for raw in candidates {
+        if let Some((h, m)) = parse_time_token(&raw) {
+            return Some((h, m));
+        }
+    }
+    None
+}
+
+fn parse_time_token(token: &str) -> Option<(u32, u32)> {
+    let mut t = token.to_ascii_lowercase();
+    t = t.trim().to_string();
+    if t.is_empty() {
+        return None;
+    }
+    let am = t.ends_with("am");
+    let pm = t.ends_with("pm");
+    if am || pm {
+        t.truncate(t.len().saturating_sub(2));
+    }
+    let t = t.trim();
+    if t.is_empty() {
+        return None;
+    }
+
+    let (mut hour, minute) = if let Some((h, m)) = t.split_once(':') {
+        let hour = h.parse::<u32>().ok()?;
+        let minute = m.parse::<u32>().ok()?;
+        (hour, minute)
+    } else {
+        let hour = t.parse::<u32>().ok()?;
+        (hour, 0)
+    };
+    if minute > 59 {
+        return None;
+    }
+    if am || pm {
+        if hour == 0 || hour > 12 {
+            return None;
+        }
+        if pm && hour != 12 {
+            hour += 12;
+        }
+        if am && hour == 12 {
+            hour = 0;
+        }
+        return Some((hour, minute));
+    }
+    if hour > 23 {
+        return None;
+    }
+    Some((hour, minute))
+}
+
+fn extract_number_before_keyword(message: &str, keyword: &str) -> Option<u32> {
+    let normalized = message.to_ascii_lowercase().replace(
+        |c: char| !c.is_ascii_alphanumeric() && !c.is_whitespace(),
+        " ",
+    );
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    for idx in 1..tokens.len() {
+        if tokens[idx] == keyword || tokens[idx].starts_with(keyword) {
+            if let Ok(v) = tokens[idx - 1].parse::<u32>() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn detect_weekday(message: &str) -> Option<u8> {
+    let m = message.to_ascii_lowercase();
+    let days = [
+        ("monday", 1_u8),
+        ("tuesday", 2),
+        ("wednesday", 3),
+        ("thursday", 4),
+        ("friday", 5),
+        ("saturday", 6),
+        ("sunday", 0),
+    ];
+    for (day, value) in days {
+        if m.contains(day) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn infer_job_mode(message: &str) -> orchestration::OrchestrationJobMode {
+    let m = message.to_ascii_lowercase();
+    if m.contains("id check")
+        || m.contains("lightweight")
+        || m.contains("monitor")
+        || m.contains("watch")
+    {
+        return orchestration::OrchestrationJobMode::IdCheck;
+    }
+    orchestration::OrchestrationJobMode::AgenticRun
+}
+
+fn infer_goal_template(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        "Run a scheduled operational task".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn infer_job_name(message: &str) -> String {
+    let normalized = message.trim();
+    if normalized.is_empty() {
+        return "Scheduled Task".to_string();
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if let Some(idx) = lower.find(" for ") {
+        let tail = normalized[idx + 5..].trim();
+        if !tail.is_empty() {
+            let mut words = tail.split_whitespace().take(4).collect::<Vec<_>>();
+            if !words.is_empty() {
+                words.insert(0, "Job:");
+                return words.join(" ");
+            }
+        }
+    }
+    let words = normalized.split_whitespace().take(4).collect::<Vec<_>>();
+    if words.is_empty() {
+        "Scheduled Task".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn infer_cron_expression(message: &str) -> String {
+    let m = message.to_ascii_lowercase();
+    let (hour, minute) = parse_time_hh_mm(message).unwrap_or((6, 0));
+
+    if m.contains("every") && (m.contains(" minute") || m.contains(" minutes")) {
+        let n = extract_number_before_keyword(&m, "minute")
+            .or_else(|| extract_number_before_keyword(&m, "minutes"))
+            .unwrap_or(15)
+            .clamp(1, 59);
+        return format!("0 */{} * * * * *", n);
+    }
+    if m.contains("every") && (m.contains(" hour") || m.contains(" hours")) {
+        let n = extract_number_before_keyword(&m, "hour")
+            .or_else(|| extract_number_before_keyword(&m, "hours"))
+            .unwrap_or(1)
+            .clamp(1, 23);
+        return format!("0 0 */{} * * * *", n);
+    }
+    if m.contains("hourly") || m.contains("every hour") {
+        return "0 0 * * * * *".to_string();
+    }
+    if m.contains("weekdays") || m.contains("weekday") {
+        return format!("0 {} {} * * 1-5 *", minute, hour);
+    }
+    if let Some(dow) = detect_weekday(&m) {
+        return format!("0 {} {} * * {} *", minute, hour, dow);
+    }
+    if m.contains("monthly") {
+        let day = extract_number_before_keyword(&m, "day")
+            .unwrap_or(1)
+            .clamp(1, 28);
+        return format!("0 {} {} {} * * *", minute, hour, day);
+    }
+    if m.contains("daily")
+        || m.contains("every day")
+        || m.contains("each day")
+        || m.contains("every morning")
+    {
+        return format!("0 {} {} * * * *", minute, hour);
+    }
+    if m.contains("weekly") {
+        return format!("0 {} {} * * 1 *", minute, hour);
+    }
+    format!("0 {} {} * * * *", minute, hour)
+}
+
+fn parse_agent_name_from_message(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(start) = trimmed.find('"') {
+        if let Some(end_rel) = trimmed[start + 1..].find('"') {
+            let end = start + 1 + end_rel;
+            let name = trimmed[start + 1..end].trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(idx) = lower.find("named ") {
+        let tail = trimmed[idx + "named ".len()..].trim();
+        if !tail.is_empty() {
+            let mut out = tail.to_string();
+            if let Some(stop_idx) = out.find(|c: char| matches!(c, ',' | '.' | ';')) {
+                out.truncate(stop_idx);
+            }
+            let out = out.trim();
+            if !out.is_empty() {
+                return Some(out.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_pending_action_from_message(message: &str) -> Option<PendingOperationalAction> {
+    let lower = message.to_ascii_lowercase();
+    let asks_for_agent = (lower.contains("create agent")
+        || lower.contains("new agent")
+        || lower.contains("add agent"))
+        && !lower.contains("agentic");
+    if asks_for_agent {
+        let name =
+            parse_agent_name_from_message(message).unwrap_or_else(|| "New Agent".to_string());
+        return Some(PendingOperationalAction::CreateAgent {
+            name,
+            quick_start: false,
+        });
+    }
+
+    let schedule_like = lower.contains("schedule")
+        && (lower.contains("every")
+            || lower.contains("daily")
+            || lower.contains("weekly")
+            || lower.contains("monthly")
+            || lower.contains("at "));
+    let asks_for_job = lower.contains("create job")
+        || lower.contains("schedule job")
+        || lower.contains("set up job")
+        || (lower.contains("scheduled") && lower.contains("job"))
+        || (lower.contains("cron") && lower.contains("job"))
+        || schedule_like;
+    if asks_for_job {
+        return Some(PendingOperationalAction::CreateOrchestrationJob {
+            request: CreateOrchestrationJobRequest {
+                name: infer_job_name(message),
+                cron: infer_cron_expression(message),
+                mode: infer_job_mode(message),
+                goal_template: infer_goal_template(message),
+                enabled: true,
+                significance_policy: orchestration::SignificancePolicy::default(),
+            },
+        });
+    }
+    None
+}
+
+fn pending_action_preview(action: &PendingOperationalAction) -> String {
+    match action {
+        PendingOperationalAction::CreateAgent { name, quick_start } => format!(
+            "I heard a request to create a new agent.\n\n- name: {}\n- quick start: {}\n\nReply `confirm` to create it, or `cancel` to abort.",
+            name,
+            if *quick_start { "yes" } else { "no" }
+        ),
+        PendingOperationalAction::CreateOrchestrationJob { request } => format!(
+            "I heard a request to create a scheduled job.\n\n- name: {}\n- mode: {:?}\n- cron (UTC): {}\n- goal: {}\n\nReply `confirm` to create it, or `cancel` to abort.",
+            request.name, request.mode, request.cron, request.goal_template
+        ),
+    }
+}
+
+fn append_chat_turn(
+    chat_path: &std::path::Path,
+    user: &str,
+    assistant: &str,
+) -> Result<(), String> {
+    let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
+        let content = std::fs::read_to_string(chat_path).map_err(|e| format!("Read: {}", e))?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    updated.push(BirthChatMessage {
+        role: "user".to_string(),
+        content: redact_api_keys(user),
+    });
+    updated.push(BirthChatMessage {
+        role: "assistant".to_string(),
+        content: redact_api_keys(assistant),
+    });
+    std::fs::write(chat_path, serde_json::to_string_pretty(&updated).unwrap())
+        .map_err(|e| format!("Write operational_chat: {}", e))
 }
 
 /// POST /api/agents/{id}/chat/attachments — upload and parse attachments for operational chat.
@@ -3343,6 +3820,82 @@ async fn api_operational_chat(
     }
 
     let chat_path = dir.join("operational_chat.json");
+    // Confirmation-first operational mutations:
+    // allow chat to stage agent/job creation and execute only after explicit confirmation.
+    if body.attachment_ids.is_empty() {
+        if let Some(confirm) = parse_confirmation_signal(&user_message) {
+            let pending = {
+                let mut pending_map = state.pending_operational_actions.lock().await;
+                pending_map.remove(&id)
+            };
+            if let Some(action) = pending {
+                let assistant_content = match (confirm, action) {
+                    (false, _) => "Canceled. No changes were applied.".to_string(),
+                    (true, PendingOperationalAction::CreateAgent { name, quick_start }) => {
+                        let created = api_create_agent(Json(CreateAgentRequest {
+                            name: name.clone(),
+                            quick_start,
+                        }))
+                        .await
+                        .map_err(|(_, e)| (axum::http::StatusCode::BAD_REQUEST, e))?;
+                        format!(
+                            "Confirmed. Created agent \"{}\" with id `{}`. You can load it from the Hive screen.",
+                            name, created.0.id
+                        )
+                    }
+                    (true, PendingOperationalAction::CreateOrchestrationJob { request }) => {
+                        let mut jobs = list_jobs(&dir)
+                            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                        let job = create_job(&mut jobs, request, chrono::Utc::now())
+                            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+                        save_jobs(&dir, &jobs)
+                            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                        format!(
+                            "Confirmed. Scheduled job \"{}\" is now active.\n\n- mode: {:?}\n- cron (UTC): {}\n- next run: {}",
+                            job.name,
+                            job.mode,
+                            job.cron,
+                            job.next_run_at
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_else(|| "n/a".to_string())
+                        )
+                    }
+                };
+                let _ = append_chat_turn(&chat_path, &user_message, &assistant_content);
+                return Ok(Json(OperationalChatResponseBody {
+                    assistant_content,
+                    tool_executed: None,
+                    stored_providers: None,
+                    tool_log: None,
+                    attachment_notice: None,
+                    context_warning: None,
+                    auto_archived: None,
+                    routing_telemetry: None,
+                    agentic_task_launched: None,
+                }));
+            }
+        }
+
+        if let Some(action) = parse_pending_action_from_message(&user_message) {
+            let preview = pending_action_preview(&action);
+            {
+                let mut pending_map = state.pending_operational_actions.lock().await;
+                pending_map.insert(id.clone(), action);
+            }
+            let _ = append_chat_turn(&chat_path, &user_message, &preview);
+            return Ok(Json(OperationalChatResponseBody {
+                assistant_content: preview,
+                tool_executed: None,
+                stored_providers: None,
+                tool_log: None,
+                attachment_notice: None,
+                context_warning: None,
+                auto_archived: None,
+                routing_telemetry: None,
+                agentic_task_launched: None,
+            }));
+        }
+    }
     let attachment_context_entries = if attachment_ids.is_empty() {
         Vec::new()
     } else {
@@ -3596,7 +4149,7 @@ async fn api_operational_chat(
     };
 
     // Build structured tool definitions for tool-aware routing.
-    let tool_defs = tool_extraction::build_tool_definitions(&skill_tool_entries);
+    let tool_defs = tool_extraction::build_operational_tool_definitions(&skill_tool_entries);
     // Redact API keys from user message before storing
     let redacted_user_message = redact_api_keys(&user_message_for_storage);
 
@@ -3718,6 +4271,7 @@ async fn api_operational_chat(
                 context_warning,
                 auto_archived,
                 routing_telemetry: Some(routing_telemetry.clone()),
+                agentic_task_launched: None,
             }));
         }
     }
@@ -3815,12 +4369,49 @@ async fn api_operational_chat(
 
     // Unified tool extraction: structured tool_calls first, then legacy text blocks as fallback.
     let extraction = tool_extraction::extract_tool_calls(&response);
-    let clean_content = extraction.clean_content;
-    let tool_requests: Vec<BirthToolRequest> = extraction
+    let mut clean_content = extraction.clean_content;
+    let mut tool_requests: Vec<BirthToolRequest> = extraction
         .tool_calls
         .iter()
         .map(BirthToolRequest::from)
         .collect();
+
+    // Safety net: if the model describes immediate action but emits no tools,
+    // do one corrective nudge turn to force action-oriented tool use.
+    if tool_requests.is_empty() && contains_action_intent(&clean_content) {
+        let mut nudge_messages = messages.clone();
+        nudge_messages.push(orion_capabilities::cognitive::Message::new(
+            "assistant",
+            &clean_content,
+        ));
+        nudge_messages.push(orion_capabilities::cognitive::Message::new(
+            "user",
+            "You stated immediate action but emitted no tool calls. Execute now: emit the required tool call(s) this turn (or `launch_agentic_task` if the workflow is multi-step). Then report concrete results.",
+        ));
+        match router.route_with_tools(nudge_messages, tool_defs.clone()).await {
+            Ok(nudged_response) => {
+                let nudged = tool_extraction::extract_tool_calls(&nudged_response);
+                clean_content = nudged.clean_content;
+                tool_requests = nudged
+                    .tool_calls
+                    .iter()
+                    .map(BirthToolRequest::from)
+                    .collect();
+                tracing::info!(
+                    agent = %id,
+                    tool_count = tool_requests.len(),
+                    "operational_chat: applied action-intent nudge"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %id,
+                    error = %e,
+                    "operational_chat: action-intent nudge failed"
+                );
+            }
+        }
+    }
 
     tracing::info!(
         agent = %id,
@@ -3846,6 +4437,7 @@ async fn api_operational_chat(
     let mut skill_tool_results: Vec<OperationalToolResult> = Vec::new();
     let mut skill_tool_outputs: Vec<String> = Vec::new();
     let mut skill_tool_log: Vec<OperationalToolLogEntry> = Vec::new();
+    let mut launched_agentic_task: Option<AgenticTaskLaunchedInfo> = None;
     for tr in &tool_requests {
         // Risk-based attachment policy: block high-risk tools on attachment turns,
         // allow read-only/low-risk tools so the agent can still act autonomously.
@@ -3861,8 +4453,10 @@ async fn api_operational_chat(
         if tr.name == "store_secret"
             || tr.name == "store_provider_key"
             || tr.name == "store_vault_secret"
+            || tr.name == "register_email_account"
+            || tr.name == "launch_agentic_task"
         {
-            continue; // handled in the blocking section below
+            continue; // handled in dedicated synthetic-tool blocks below
         }
         // Try to match against registered skill tools
         if let Some((skill_id, tool_desc)) =
@@ -3997,6 +4591,157 @@ async fn api_operational_chat(
                         skill_name: Some(skill_name.clone()),
                         success: false,
                         output: err_text,
+                    });
+                }
+            }
+        }
+    }
+
+    // Execute synthetic configuration tools that need async APIs.
+    for tr in &tool_requests {
+        if tr.name == "register_email_account" {
+            match serde_json::from_value::<RegisterEmailAccountRequest>(tr.arguments.clone()) {
+                Ok(req) => {
+                    match register_email_account_internal(
+                        &id,
+                        &state.skill_vault,
+                        &state.email_accounts,
+                        req,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            let probe_summary = outcome
+                                .probes
+                                .iter()
+                                .map(|p| {
+                                    format!(
+                                        "{}:{} => {} ({})",
+                                        p.host,
+                                        p.port,
+                                        if p.reachable { "ok" } else { "failed" },
+                                        p.message
+                                    )
+                                })
+                                .collect::<Vec<String>>()
+                                .join("; ");
+                            let output = format!(
+                                "Registered account '{}' for {} (imap {}:{} / smtp {}:{}). Connectivity: {}",
+                                outcome.account_id,
+                                outcome.address,
+                                outcome.imap_host,
+                                outcome.imap_port,
+                                outcome.smtp_host,
+                                outcome.smtp_port,
+                                probe_summary
+                            );
+                            skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                            skill_tool_log.push(OperationalToolLogEntry {
+                                tool_name: tr.name.clone(),
+                                skill_name: Some("Email".to_string()),
+                                success: true,
+                                output: output.clone(),
+                            });
+                            skill_tool_results.push(OperationalToolResult {
+                                name: tr.name.clone(),
+                                provider: outcome.account_id,
+                            });
+                        }
+                        Err(e) => {
+                            let output = format!("register_email_account failed: {}", e);
+                            skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                            skill_tool_log.push(OperationalToolLogEntry {
+                                tool_name: tr.name.clone(),
+                                skill_name: Some("Email".to_string()),
+                                success: false,
+                                output,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let output = format!("register_email_account arguments invalid: {}", e);
+                    skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                    skill_tool_log.push(OperationalToolLogEntry {
+                        tool_name: tr.name.clone(),
+                        skill_name: Some("Email".to_string()),
+                        success: false,
+                        output,
+                    });
+                }
+            }
+            continue;
+        }
+
+        if tr.name == "launch_agentic_task" {
+            let goal = tr
+                .arguments
+                .get("goal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let context = tr
+                .arguments
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if goal.is_empty() {
+                let output = "launch_agentic_task failed: goal is required.".to_string();
+                skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                skill_tool_log.push(OperationalToolLogEntry {
+                    tool_name: tr.name.clone(),
+                    skill_name: None,
+                    success: false,
+                    output,
+                });
+                continue;
+            }
+            let merged_goal = if context.is_empty() {
+                goal.clone()
+            } else {
+                format!("{}\n\nContext:\n{}", goal, context)
+            };
+            match launch_agentic_task_internal(
+                &state,
+                &id,
+                AgenticRunRequest {
+                    goal: merged_goal,
+                    max_turns: 24,
+                    auto_approve_safe_tools: false,
+                    router_mode: requested_router_mode,
+                },
+                "chat_escalation".to_string(),
+            )
+            .await
+            {
+                Ok(task) => {
+                    launched_agentic_task = Some(AgenticTaskLaunchedInfo {
+                        task_id: task.task_id.clone(),
+                        goal: goal.clone(),
+                    });
+                    let output = format!(
+                        "Agentic task started (task_id: {}). Stream: {}",
+                        task.task_id, task.stream_url
+                    );
+                    skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                    skill_tool_log.push(OperationalToolLogEntry {
+                        tool_name: tr.name.clone(),
+                        skill_name: None,
+                        success: true,
+                        output,
+                    });
+                }
+                Err(e) => {
+                    let output = format!("launch_agentic_task failed: {}", e);
+                    skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                    skill_tool_log.push(OperationalToolLogEntry {
+                        tool_name: tr.name.clone(),
+                        skill_name: None,
+                        success: false,
+                        output,
                     });
                 }
             }
@@ -4235,6 +4980,7 @@ async fn api_operational_chat(
         context_warning,
         auto_archived,
         routing_telemetry: Some(routing_telemetry),
+        agentic_task_launched: launched_agentic_task,
     }))
 }
 
@@ -4273,6 +5019,23 @@ async fn api_operational_chat_stream(
 
         match result {
             Ok(Json(response)) => {
+                if let Some(entries) = &response.tool_log {
+                    for entry in entries {
+                        let _ = tx
+                            .send(ChatStreamEvent::ToolLog {
+                                entry: serde_json::to_value(entry).unwrap_or_default(),
+                            })
+                            .await;
+                    }
+                }
+                if let Some(launch) = &response.agentic_task_launched {
+                    let _ = tx
+                        .send(ChatStreamEvent::AgenticTaskLaunched {
+                            task_id: launch.task_id.clone(),
+                            goal: launch.goal.clone(),
+                        })
+                        .await;
+                }
                 let _ = tx
                     .send(ChatStreamEvent::Done {
                         response: serde_json::to_value(&response).unwrap_or_default(),
@@ -4301,6 +5064,10 @@ async fn api_operational_chat_stream(
                 ChatStreamEvent::Done { response } => {
                     ("done", response.to_string())
                 }
+                ChatStreamEvent::AgenticTaskLaunched { task_id, goal } => (
+                    "agentic_task_launched",
+                    serde_json::json!({"task_id": task_id, "goal": goal}).to_string(),
+                ),
                 ChatStreamEvent::Error { message } => {
                     ("error", serde_json::json!({"message": message}).to_string())
                 }
@@ -4321,6 +5088,7 @@ enum ChatStreamEvent {
     Status { phase: String },
     Token { text: String },
     ToolLog { entry: serde_json::Value },
+    AgenticTaskLaunched { task_id: String, goal: String },
     Done { response: serde_json::Value },
     Error { message: String },
 }
@@ -5562,111 +6330,312 @@ async fn api_skills_missing_secrets(
     Ok(Json(missing))
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct RegisterEmailAccountRequest {
+    /// Optional account id; auto-generated if not provided.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    pub(crate) provider: orion_core::config::EmailProvider,
+    #[serde(default = "default_email_auth_type")]
+    pub(crate) auth_type: orion_core::config::EmailAuthType,
+    pub(crate) address: String,
+    #[serde(default)]
+    pub(crate) username: Option<String>,
+    #[serde(default)]
+    pub(crate) imap_host: Option<String>,
+    #[serde(default)]
+    pub(crate) imap_port: Option<u16>,
+    #[serde(default)]
+    pub(crate) smtp_host: Option<String>,
+    #[serde(default)]
+    pub(crate) smtp_port: Option<u16>,
+    /// Optional security hint: auto/starttls/implicit/none.
+    #[serde(default)]
+    pub(crate) security: Option<String>,
+    /// Password/token for this account. Stored under email:{id}:password in vault.
+    #[serde(default)]
+    pub(crate) password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EmailSecurityPreference {
+    Auto,
+    Starttls,
+    Implicit,
+    None,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct EmailEndpointProbe {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) reachable: bool,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RegisterEmailAccountOutcome {
+    pub(crate) ok: bool,
+    pub(crate) account_id: String,
+    pub(crate) provider: String,
+    pub(crate) auth_type: String,
+    pub(crate) address: String,
+    pub(crate) username: String,
+    pub(crate) imap_host: String,
+    pub(crate) imap_port: u16,
+    pub(crate) smtp_host: String,
+    pub(crate) smtp_port: u16,
+    pub(crate) imap_tls: orion_core::config::TlsMode,
+    pub(crate) smtp_tls: orion_core::config::TlsMode,
+    pub(crate) remapped_to_container_ingress: bool,
+    pub(crate) probes: Vec<EmailEndpointProbe>,
+}
+
+fn default_email_auth_type() -> orion_core::config::EmailAuthType {
+    orion_core::config::EmailAuthType::AppPassword
+}
+
+fn parse_email_security_preference(raw: Option<&str>) -> EmailSecurityPreference {
+    match raw.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "starttls" => EmailSecurityPreference::Starttls,
+        "implicit" | "ssl" | "tls" => EmailSecurityPreference::Implicit,
+        "none" | "plaintext" => EmailSecurityPreference::None,
+        _ => EmailSecurityPreference::Auto,
+    }
+}
+
+fn infer_tls_mode(
+    security: EmailSecurityPreference,
+    port: u16,
+    fallback: orion_core::config::TlsMode,
+) -> orion_core::config::TlsMode {
+    match security {
+        EmailSecurityPreference::Starttls => orion_core::config::TlsMode::Starttls,
+        EmailSecurityPreference::Implicit => orion_core::config::TlsMode::Implicit,
+        EmailSecurityPreference::None => orion_core::config::TlsMode::None,
+        EmailSecurityPreference::Auto => match port {
+            // Include Proton Bridge defaults and standard STARTTLS ports.
+            143 | 587 | 1025 | 1143 => orion_core::config::TlsMode::Starttls,
+            465 | 993 => orion_core::config::TlsMode::Implicit,
+            _ => fallback,
+        },
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim().to_ascii_lowercase();
+    normalized == "127.0.0.1" || normalized == "localhost" || normalized == "host.docker.internal"
+}
+
+fn normalize_account_id(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    let compact = out.trim_matches('_');
+    if compact.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        compact.to_string()
+    }
+}
+
+async fn probe_email_endpoint(host: &str, port: u16) -> EmailEndpointProbe {
+    let address = format!("{}:{}", host, port);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::TcpStream::connect(&address),
+    )
+    .await
+    {
+        Ok(Ok(_)) => EmailEndpointProbe {
+            host: host.to_string(),
+            port,
+            reachable: true,
+            message: "Connected".to_string(),
+        },
+        Ok(Err(e)) => EmailEndpointProbe {
+            host: host.to_string(),
+            port,
+            reachable: false,
+            message: format!("Connect failed: {}", e),
+        },
+        Err(_) => EmailEndpointProbe {
+            host: host.to_string(),
+            port,
+            reachable: false,
+            message: "Connect timeout".to_string(),
+        },
+    }
+}
+
+pub(crate) async fn register_email_account_internal(
+    agent_id: &str,
+    skill_vault: &Arc<Mutex<SecretsVault>>,
+    email_accounts: &Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
+    body: RegisterEmailAccountRequest,
+) -> Result<RegisterEmailAccountOutcome, String> {
+    let dir = agent_dir(agent_id).ok_or_else(|| "Agent not found".to_string())?;
+    let config_path =
+        agent_config_path(agent_id).ok_or_else(|| "Agent config not found".to_string())?;
+    let mut config = AppConfig::load(&config_path).map_err(|e| format!("Load config: {}", e))?;
+
+    let provider = body.provider;
+    let preset = orion_core::config::provider_preset(provider);
+    let security_pref = parse_email_security_preference(body.security.as_deref());
+
+    let mut imap_host = body
+        .imap_host
+        .clone()
+        .or_else(|| preset.as_ref().map(|p| p.imap_host.to_string()))
+        .ok_or_else(|| "imap_host is required for this provider".to_string())?;
+    let mut smtp_host = body
+        .smtp_host
+        .clone()
+        .or_else(|| preset.as_ref().map(|p| p.smtp_host.to_string()))
+        .ok_or_else(|| "smtp_host is required for this provider".to_string())?;
+
+    let mut remapped_to_container_ingress = false;
+    let running_in_container = std::env::var("ORION_CONTAINER")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if provider == orion_core::config::EmailProvider::Proton && running_in_container {
+        let ingress_host = std::env::var("ORION_EMAIL_BRIDGE_HOST")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "protonbridge_ingress".to_string());
+        if is_loopback_host(&imap_host) {
+            imap_host = ingress_host.clone();
+            remapped_to_container_ingress = true;
+        }
+        if is_loopback_host(&smtp_host) {
+            smtp_host = ingress_host;
+            remapped_to_container_ingress = true;
+        }
+    }
+
+    let imap_port = body
+        .imap_port
+        .or_else(|| preset.as_ref().map(|p| p.imap_port))
+        .unwrap_or(993);
+    let smtp_port = body
+        .smtp_port
+        .or_else(|| preset.as_ref().map(|p| p.smtp_port))
+        .unwrap_or(587);
+    let imap_tls = infer_tls_mode(
+        security_pref,
+        imap_port,
+        preset
+            .as_ref()
+            .map(|p| p.imap_tls)
+            .unwrap_or(orion_core::config::TlsMode::Implicit),
+    );
+    let smtp_tls = infer_tls_mode(
+        security_pref,
+        smtp_port,
+        preset
+            .as_ref()
+            .map(|p| p.smtp_tls)
+            .unwrap_or(orion_core::config::TlsMode::Starttls),
+    );
+
+    let account_id = body.id.unwrap_or_else(|| {
+        normalize_account_id(&format!(
+            "{}_{}",
+            format!("{:?}", provider).to_ascii_lowercase(),
+            body.address
+        ))
+    });
+    let username = body
+        .username
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| body.address.clone());
+
+    let account = orion_core::config::EmailAccountConfig {
+        id: account_id.clone(),
+        provider,
+        auth_type: body.auth_type,
+        address: body.address.clone(),
+        username: Some(username.clone()),
+        imap_host: Some(imap_host.clone()),
+        imap_port: Some(imap_port),
+        imap_tls: Some(imap_tls),
+        smtp_host: Some(smtp_host.clone()),
+        smtp_port: Some(smtp_port),
+        smtp_tls: Some(smtp_tls),
+        scopes_granted: Vec::new(),
+        status: orion_core::config::EmailAccountStatus::Active,
+        last_verified_at: None,
+    };
+
+    config.email_accounts.retain(|a| a.id != account_id);
+    config.email_accounts.push(account.clone());
+    config
+        .save(&config_path)
+        .map_err(|e| format!("Save config: {}", e))?;
+
+    if let Some(password) = &body.password {
+        let mut vault =
+            SecretsVault::load(dir.clone()).unwrap_or_else(|_| SecretsVault::new(dir.clone()));
+        let email_key = format!("email:{}:password", account_id);
+        vault.set_secret(&email_key, password);
+        vault.save().map_err(|e| format!("Save vault: {}", e))?;
+        if let Ok(mut shared) = skill_vault.lock() {
+            shared.set_secret(&email_key, password);
+        }
+    }
+
+    {
+        let mut accounts = email_accounts.write().await;
+        accounts.retain(|a| a.id != account_id);
+        accounts.push(account);
+    }
+
+    let imap_probe = probe_email_endpoint(&imap_host, imap_port).await;
+    let smtp_probe = probe_email_endpoint(&smtp_host, smtp_port).await;
+
+    Ok(RegisterEmailAccountOutcome {
+        ok: true,
+        account_id,
+        provider: format!("{:?}", provider).to_ascii_lowercase(),
+        auth_type: format!("{:?}", body.auth_type).to_ascii_lowercase(),
+        address: body.address,
+        username,
+        imap_host,
+        imap_port,
+        smtp_host,
+        smtp_port,
+        imap_tls,
+        smtp_tls,
+        remapped_to_container_ingress,
+        probes: vec![imap_probe, smtp_probe],
+    })
+}
+
 /// POST /api/agents/{id}/email/accounts — register an email account for the email skill.
 async fn api_register_email_account(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<RegisterEmailAccountRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "Agent not found".to_string(),
-        )
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "Agent config not found".to_string(),
-        )
-    })?;
-    let mut config = AppConfig::load(&config_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Load config: {}", e),
-        )
-    })?;
-
-    let account_id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    let account = orion_core::config::EmailAccountConfig {
-        id: account_id.clone(),
-        provider: body.provider,
-        auth_type: body.auth_type,
-        address: body.address.clone(),
-        imap_host: body.imap_host,
-        imap_port: body.imap_port,
-        smtp_host: body.smtp_host,
-        smtp_port: body.smtp_port,
-        scopes_granted: Vec::new(),
-        status: orion_core::config::EmailAccountStatus::Active,
-        last_verified_at: None,
-    };
-
-    // Remove existing account with same id if present, then add
-    config.email_accounts.retain(|a| a.id != account_id);
-    config.email_accounts.push(account.clone());
-    config.save(&config_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Save config: {}", e),
-        )
-    })?;
-
-    // Store the password in the vault under the email:{id}:password key
-    if let Some(password) = &body.password {
-        let vault_path = dir.clone();
-        let mut vault = SecretsVault::load(vault_path.clone())
-            .unwrap_or_else(|_| SecretsVault::new(vault_path));
-        let email_key = format!("email:{}:password", account_id);
-        vault.set_secret(&email_key, password);
-        let _ = vault.save();
-
-        // Also sync to the shared skill vault
-        if let Ok(mut shared) = state.skill_vault.lock() {
-            shared.set_secret(&email_key, password);
-        }
-    }
-
-    // Update the shared accounts list immediately
-    {
-        let mut accounts = state.email_accounts.write().await;
-        accounts.retain(|a| a.id != account_id);
-        accounts.push(account);
-    }
-
+    let outcome =
+        register_email_account_internal(&id, &state.skill_vault, &state.email_accounts, body)
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     tracing::info!(
         agent = %id,
-        account_id = %account_id,
-        address = %body.address,
+        account_id = %outcome.account_id,
+        address = %outcome.address,
+        remapped = outcome.remapped_to_container_ingress,
         "Registered email account"
     );
-
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "account_id": account_id,
-    })))
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct RegisterEmailAccountRequest {
-    /// Optional account id; auto-generated if not provided.
-    #[serde(default)]
-    id: Option<String>,
-    provider: orion_core::config::EmailProvider,
-    auth_type: orion_core::config::EmailAuthType,
-    address: String,
-    #[serde(default)]
-    imap_host: Option<String>,
-    #[serde(default)]
-    imap_port: Option<u16>,
-    #[serde(default)]
-    smtp_host: Option<String>,
-    #[serde(default)]
-    smtp_port: Option<u16>,
-    /// Password/token for this account. Stored under email:{id}:password in vault.
-    #[serde(default)]
-    password: Option<String>,
+    Ok(Json(serde_json::to_value(outcome).unwrap_or_default()))
 }
 
 /// Copy all secrets from the agent's vault into the shared skill vault.
@@ -6012,6 +6981,8 @@ async fn launch_agentic_task_internal(
         config,
         skill_registry: Arc::clone(&state.skill_registry),
         skill_executor: Arc::clone(&state.skill_executor),
+        skill_vault: Arc::clone(&state.skill_vault),
+        email_accounts: Arc::clone(&state.email_accounts),
         skill_tool_entries,
         stored_providers,
         event_tx,
@@ -6691,6 +7662,103 @@ async fn api_agentic_status(
     }))
 }
 
+/// GET /api/proxy/status — inspect proxy mode and recent logs.
+async fn api_proxy_status() -> Result<Json<ProxyStatusResponse>, (axum::http::StatusCode, String)> {
+    let allowlist_path = proxy_allowlist_path();
+    let log_dir = proxy_log_dir();
+    let internal_log_path = log_dir.join("internal").join("access.log");
+    let external_log_path = log_dir.join("external").join("access.log");
+    Ok(Json(ProxyStatusResponse {
+        mode: std::env::var("PROXY_MODE").unwrap_or_else(|_| "allow_all".to_string()),
+        allow_host_docker_internal: parse_bool_env("PROXY_ALLOW_HOST_DOCKER_INTERNAL", true),
+        allowlist_path: allowlist_path.display().to_string(),
+        internal_log_path: internal_log_path.display().to_string(),
+        external_log_path: external_log_path.display().to_string(),
+        internal_log_exists: internal_log_path.exists(),
+        external_log_exists: external_log_path.exists(),
+        internal_log_tail: read_log_tail(&internal_log_path, 40),
+        external_log_tail: read_log_tail(&external_log_path, 40),
+    }))
+}
+
+/// GET /api/proxy/allowlist — read the external proxy domain allowlist.
+async fn api_proxy_allowlist_get(
+) -> Result<Json<ProxyAllowlistResponse>, (axum::http::StatusCode, String)> {
+    let path = proxy_allowlist_path();
+    Ok(Json(ProxyAllowlistResponse {
+        path: path.display().to_string(),
+        content: read_file_or_empty(&path),
+    }))
+}
+
+/// PUT /api/proxy/allowlist — update the external proxy domain allowlist.
+async fn api_proxy_allowlist_put(
+    Json(body): Json<ProxyAllowlistUpdateRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if !body.mentor_approved {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "mentor_approved=true is required for proxy allowlist updates".to_string(),
+        ));
+    }
+    let path = proxy_allowlist_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Create allowlist directory failed: {}", e),
+            )
+        })?;
+    }
+    std::fs::write(&path, body.content.as_bytes()).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Write allowlist failed: {}", e),
+        )
+    })?;
+
+    // Best-effort live reload for local/docker dev setups.
+    let reload_result = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("docker compose -f docker/docker-compose.yml exec -T proxy_external squid -k reconfigure")
+        .output()
+        .ok()
+        .map(|out| {
+            if out.status.success() {
+                "proxy_external reconfigured".to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    "allowlist updated; proxy reload command failed".to_string()
+                } else {
+                    format!("allowlist updated; proxy reload command failed: {}", stderr)
+                }
+            }
+        })
+        .unwrap_or_else(|| "allowlist updated; proxy reload command unavailable".to_string());
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "reload": reload_result
+    })))
+}
+
+/// GET /api/proxy/logs?lines=N — read recent internal/external proxy logs.
+async fn api_proxy_logs(
+    Query(query): Query<ProxyLogsQuery>,
+) -> Result<Json<ProxyLogsResponse>, (axum::http::StatusCode, String)> {
+    let lines = query.lines.unwrap_or(80).clamp(1, 500);
+    let log_dir = proxy_log_dir();
+    let internal_log = log_dir.join("internal").join("access.log");
+    let external_log = log_dir.join("external").join("access.log");
+    Ok(Json(ProxyLogsResponse {
+        lines,
+        internal: read_log_tail(&internal_log, lines),
+        external: read_log_tail(&external_log, lines),
+    }))
+}
+
 // ============================================================================
 // Orchestration Jobs Endpoints
 // ============================================================================
@@ -6998,6 +8066,7 @@ async fn main() -> std::io::Result<()> {
         email_accounts,
         orchestration_tick_seconds: 30,
         skill_confirm_nonces: Arc::new(TokioMutex::new(HashMap::new())),
+        pending_operational_actions: Arc::new(TokioMutex::new(HashMap::new())),
         superego_l2_mode: parse_superego_l2_mode(),
     };
 
@@ -7043,6 +8112,12 @@ async fn main() -> std::io::Result<()> {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/api/status", get(api_status))
+        .route("/api/proxy/status", get(api_proxy_status))
+        .route(
+            "/api/proxy/allowlist",
+            get(api_proxy_allowlist_get).put(api_proxy_allowlist_put),
+        )
+        .route("/api/proxy/logs", get(api_proxy_logs))
         .route("/api/cognitive/registry", get(api_cognitive_registry))
         .route("/api/identities", get(api_identities))
         .route(

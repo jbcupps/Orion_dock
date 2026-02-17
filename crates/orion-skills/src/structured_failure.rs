@@ -81,9 +81,7 @@ impl StructuredFailure {
                 ..
             } => Some(Constraint::HostUnreachable {
                 host: format!("{}:{}", host, port),
-                try_instead: alternatives
-                    .first()
-                    .map(|(h, p)| format!("{}:{}", h, p)),
+                try_instead: alternatives.first().map(|(h, p)| format!("{}:{}", h, p)),
             }),
             Self::ResourceNotFound {
                 resource,
@@ -95,12 +93,12 @@ impl StructuredFailure {
             Self::AuthenticationFailed {
                 service,
                 user_action_required,
-            } => user_action_required.as_ref().map(|action| {
-                Constraint::AuthenticationRequired {
+            } => user_action_required
+                .as_ref()
+                .map(|action| Constraint::AuthenticationRequired {
                     service: service.clone(),
                     user_action: action.clone(),
-                }
-            }),
+                }),
             _ => None,
         }
     }

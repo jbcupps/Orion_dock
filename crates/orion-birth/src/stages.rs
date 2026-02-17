@@ -189,9 +189,21 @@ impl GenesisPath {
     /// All available Soul Crystallization depth levels (for frontend sub-selector).
     pub fn crystallization_depths() -> Vec<(SoulCrystallizationDepth, &'static str, &'static str)> {
         vec![
-            (SoulCrystallizationDepth::QuickStart, "Quick Start", "~30 seconds"),
-            (SoulCrystallizationDepth::Conversation, "Conversation", "3-5 minutes"),
-            (SoulCrystallizationDepth::DeepDive, "Deep Dive", "10-15 minutes"),
+            (
+                SoulCrystallizationDepth::QuickStart,
+                "Quick Start",
+                "~30 seconds",
+            ),
+            (
+                SoulCrystallizationDepth::Conversation,
+                "Conversation",
+                "3-5 minutes",
+            ),
+            (
+                SoulCrystallizationDepth::DeepDive,
+                "Deep Dive",
+                "10-15 minutes",
+            ),
         ]
     }
 }

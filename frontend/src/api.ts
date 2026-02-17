@@ -657,6 +657,10 @@ export interface OperationalChatResponse {
   context_warning?: ContextWarning;
   auto_archived?: AutoArchivedInfo;
   routing_telemetry?: RoutingTelemetry;
+  agentic_task_launched?: {
+    task_id: string;
+    goal: string;
+  };
 }
 
 export interface ChatAttachmentUploadItem {
@@ -733,6 +737,7 @@ export interface ChatStreamCallbacks {
   onStatus?: (phase: string) => void;
   onToken?: (text: string) => void;
   onToolLog?: (entry: { tool_name: string; skill_name?: string; success: boolean; output: string }) => void;
+  onAgenticTaskLaunched?: (info: { task_id: string; goal: string }) => void;
   onDone?: (response: OperationalChatResponse) => void;
   onError?: (message: string) => void;
 }
@@ -793,6 +798,9 @@ export function sendChatStream(
                   break;
                 case 'tool_log':
                   callbacks?.onToolLog?.(parsed);
+                  break;
+                case 'agentic_task_launched':
+                  callbacks?.onAgenticTaskLaunched?.(parsed);
                   break;
                 case 'done':
                   callbacks?.onDone?.(parsed as OperationalChatResponse);
@@ -1201,6 +1209,40 @@ export function subscribeToAgenticStream(
   }
 
   return es;
+}
+
+export interface AgenticTaskStatusResponse {
+  task_id: string;
+  goal: string;
+  status:
+    | 'running'
+    | 'waiting_for_mentor'
+    | 'waiting_for_confirmation'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  turn: number;
+  steps: Array<{
+    turn: number;
+    step_type: string;
+    content: string;
+    timestamp: string;
+  }>;
+}
+
+export async function fetchAgenticTaskStatus(
+  agentId: string,
+  taskId: string
+): Promise<AgenticTaskStatusResponse> {
+  const base = getBaseUrl();
+  const res = await apiFetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/status?task=${encodeURIComponent(taskId)}`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch agentic task status failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function respondToAgent(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   archiveChat,
+  fetchAgenticTaskStatus,
   fetchChatArchive,
   fetchChatArchives,
   fetchChatHistory,
@@ -23,6 +24,7 @@ interface OperationalChatProps {
   onError: (message: string) => void;
   onBusyChange?: (busy: boolean) => void;
   onRoutingTelemetryChange?: (telemetry: RoutingTelemetry | null) => void;
+  onAgenticTaskLaunched?: (info: { taskId: string; goal: string }) => void;
 }
 
 function formatBytes(size: number): string {
@@ -54,6 +56,7 @@ export default function OperationalChat({
   onError,
   onBusyChange,
   onRoutingTelemetryChange,
+  onAgenticTaskLaunched,
 }: OperationalChatProps) {
   type ActivityLogItem = NonNullable<OperationalChatResponse['tool_log']>[number] & {
     id: string;
@@ -76,10 +79,21 @@ export default function OperationalChat({
   } | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
+  const [liveToolLog, setLiveToolLog] = useState<ActivityLogItem[]>([]);
+  const [agenticLaunchInfo, setAgenticLaunchInfo] = useState<
+    NonNullable<OperationalChatResponse['agentic_task_launched']> | null
+  >(null);
+  const [agenticTaskProgress, setAgenticTaskProgress] = useState<{
+    status: string;
+    turn: number;
+    summary?: string;
+  } | null>(null);
   const [showMentorPrompt, setShowMentorPrompt] = useState(!mentorName);
   const [mentorDraft, setMentorDraft] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const liveToolLogRef = useRef<ActivityLogItem[]>([]);
+  const reportedTaskResultsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -99,6 +113,55 @@ export default function OperationalChat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!agenticLaunchInfo) {
+      setAgenticTaskProgress(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: number | null = null;
+    const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
+    const poll = async () => {
+      try {
+        const status = await fetchAgenticTaskStatus(agentId, agenticLaunchInfo.task_id);
+        if (cancelled) return;
+        const summaryStep = [...status.steps]
+          .reverse()
+          .find((step) => step.step_type === 'done' || step.step_type === 'error');
+        const summary = summaryStep?.content?.trim();
+        setAgenticTaskProgress({
+          status: status.status,
+          turn: status.turn,
+          summary: summary || undefined,
+        });
+        if (terminalStatuses.has(status.status)) {
+          if (!reportedTaskResultsRef.current.has(status.task_id)) {
+            reportedTaskResultsRef.current.add(status.task_id);
+            const finalMessage = summary
+              ? `Agentic task ${status.status}: ${summary}`
+              : `Agentic task ${status.status}. Open the Agent timeline for details.`;
+            setMessages((prev) => [...prev, { role: 'assistant', content: finalMessage }]);
+          }
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+      if (!cancelled) {
+        timer = window.setTimeout(() => {
+          void poll();
+        }, 5000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [agentId, agenticLaunchInfo]);
 
   // Propagate busy state to parent for provider activity indicators
   useEffect(() => {
@@ -227,6 +290,8 @@ export default function OperationalChat({
       setInput('');
       setSending(true);
       setThinkingStatus('Connecting...');
+      setLiveToolLog([]);
+      liveToolLogRef.current = [];
       const userMessage: BirthChatMessageItem = {
         role: 'user',
         content: renderUserMessage(text, attachments),
@@ -248,6 +313,20 @@ export default function OperationalChat({
             : phaseLabels[phase] || 'Processing...';
           setThinkingStatus(label);
         },
+        onToolLog: (entry) => {
+          const liveEntry: ActivityLogItem = {
+            ...entry,
+            id: `${Date.now()}-${entry.tool_name}-${Math.random().toString(16).slice(2, 8)}`,
+          };
+          setLiveToolLog((prev) => {
+            const next = [...prev, liveEntry].slice(-8);
+            liveToolLogRef.current = next;
+            return next;
+          });
+        },
+        onAgenticTaskLaunched: (info) => {
+          setAgenticLaunchInfo(info);
+        },
         onDone: (res) => {
           setThinkingStatus(null);
           setSending(false);
@@ -263,12 +342,28 @@ export default function OperationalChat({
             Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
             return {};
           });
-          if (res.tool_log?.length) {
-            const entries: ActivityLogItem[] = res.tool_log.map((entry, index) => ({
-              ...entry,
-              id: `${Date.now()}-${index}-${entry.tool_name}`,
-            }));
-            setActivityLog((prev) => [...entries, ...prev].slice(0, 20));
+          const liveEntries = liveToolLogRef.current;
+          const finalEntries: ActivityLogItem[] = (res.tool_log ?? []).map((entry, index) => ({
+            ...entry,
+            id: `${Date.now()}-${index}-${entry.tool_name}`,
+          }));
+          const mergedEntries = [...liveEntries, ...finalEntries];
+          if (mergedEntries.length) {
+            const deduped = mergedEntries.filter(
+              (entry, index, all) =>
+                all.findIndex(
+                  (item) =>
+                    item.tool_name === entry.tool_name &&
+                    item.success === entry.success &&
+                    item.output === entry.output
+                ) === index
+            );
+            setActivityLog((prev) => [...deduped, ...prev].slice(0, 20));
+          }
+          setLiveToolLog([]);
+          liveToolLogRef.current = [];
+          if (res.agentic_task_launched) {
+            setAgenticLaunchInfo(res.agentic_task_launched);
           }
           if (res.context_warning) {
             setContextWarning(
@@ -289,6 +384,8 @@ export default function OperationalChat({
         onError: (msg) => {
           setThinkingStatus(null);
           setSending(false);
+          setLiveToolLog([]);
+          liveToolLogRef.current = [];
           onError(msg || 'Send failed');
           setMessages((prev) => prev.slice(0, -1));
         },
@@ -300,6 +397,7 @@ export default function OperationalChat({
       input,
       loadArchives,
       onError,
+      onAgenticTaskLaunched,
       onRoutingTelemetryChange,
       routerMode,
       sending,
@@ -366,6 +464,35 @@ export default function OperationalChat({
           >
             dismiss
           </button>
+        </div>
+      )}
+      {agenticLaunchInfo && (
+        <div className="operational-chat-agentic-launch">
+          <div className="operational-chat-agentic-launch-main">
+            <span>
+              Agentic task started: <strong>{agenticLaunchInfo.goal}</strong>
+            </span>
+            {agenticTaskProgress && (
+              <span className="operational-chat-agentic-progress">
+                Status: {agenticTaskProgress.status.replace(/_/g, ' ')} • Turn {agenticTaskProgress.turn}
+                {agenticTaskProgress.summary ? ` • ${agenticTaskProgress.summary}` : ''}
+              </span>
+            )}
+          </div>
+          {onAgenticTaskLaunched && (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => {
+                onAgenticTaskLaunched({
+                  taskId: agenticLaunchInfo.task_id,
+                  goal: agenticLaunchInfo.goal,
+                });
+              }}
+            >
+              View full timeline
+            </button>
+          )}
         </div>
       )}
       <div className="operational-chat-toolbar">
@@ -455,6 +582,25 @@ export default function OperationalChat({
           <div className="operational-chat-thinking">
             <span className="operational-chat-thinking-dot" />
             <span className="operational-chat-thinking-text">{thinkingStatus}</span>
+          </div>
+        )}
+        {liveToolLog.length > 0 && (
+          <div className="operational-chat-live-tools">
+            {liveToolLog.map((entry) => (
+              <div key={entry.id} className="operational-chat-live-tool-item">
+                <div className="operational-chat-live-tool-title">
+                  <span>{entry.tool_name}</span>
+                  <span className={entry.success ? 'status-ok' : 'status-error'}>
+                    {entry.success ? 'ok' : 'error'}
+                  </span>
+                </div>
+                <div className="operational-chat-live-tool-output">
+                  {entry.output.length > 180
+                    ? `${entry.output.slice(0, 180)}...`
+                    : entry.output}
+                </div>
+              </div>
+            ))}
           </div>
         )}
         <div ref={messagesEndRef} />

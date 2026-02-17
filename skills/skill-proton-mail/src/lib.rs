@@ -297,7 +297,13 @@ impl Skill for ProtonMailSkill {
             ));
         }
 
-        let imap = ImapClient::new(&host, port, &user, &password, orion_core::config::TlsMode::Implicit);
+        let imap = ImapClient::new(
+            &host,
+            port,
+            &user,
+            &password,
+            orion_core::config::TlsMode::Implicit,
+        );
         imap.test_connection()
             .await
             .map_err(|e| SkillError::InitFailed(e.to_string()))?;

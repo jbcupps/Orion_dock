@@ -297,6 +297,33 @@
   flex-shrink: 0;
 }
 
+.operational-chat-agentic-launch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--card-bg, #f8f8f8);
+  font-size: 0.82rem;
+}
+
+.operational-chat-agentic-launch-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.operational-chat-agentic-progress {
+  font-size: 0.75rem;
+  color: var(--muted, #666);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Toolbar (archive buttons) */
 .operational-chat-toolbar {
   display: flex;
@@ -415,4 +442,34 @@
   font-size: 0.82rem;
   color: var(--muted, #666);
   font-style: italic;
+}
+
+.operational-chat-live-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-right: 1rem;
+}
+
+.operational-chat-live-tool-item {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--card-bg, #f8f8f8);
+  padding: 0.45rem 0.55rem;
+}
+
+.operational-chat-live-tool-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.operational-chat-live-tool-output {
+  margin-top: 0.25rem;
+  font-size: 0.76rem;
+  color: var(--muted, #666);
+  white-space: pre-wrap;
+  word-break: break-word;
 }

@@ -215,7 +215,10 @@ impl McpTrustPolicy {
         // Block dangerous metadata endpoints unconditionally.
         for blocked in MCP_BLOCKED_HOSTS {
             if host == *blocked {
-                return Err(format!("host '{}' is blocked (cloud metadata endpoint)", host));
+                return Err(format!(
+                    "host '{}' is blocked (cloud metadata endpoint)",
+                    host
+                ));
             }
         }
 
@@ -501,18 +504,27 @@ pub struct EmailAccountConfig {
     pub auth_type: EmailAuthType,
     /// Display address (e.g. user@gmail.com).
     pub address: String,
+    /// Login username when different from address.
+    #[serde(default)]
+    pub username: Option<String>,
     /// IMAP host (optional for API-only providers).
     #[serde(default)]
     pub imap_host: Option<String>,
     /// IMAP port (default 993).
     #[serde(default)]
     pub imap_port: Option<u16>,
+    /// IMAP TLS mode override (falls back to provider preset when None).
+    #[serde(default)]
+    pub imap_tls: Option<TlsMode>,
     /// SMTP host (optional for API-only providers).
     #[serde(default)]
     pub smtp_host: Option<String>,
     /// SMTP port (default 587).
     #[serde(default)]
     pub smtp_port: Option<u16>,
+    /// SMTP TLS mode override (falls back to provider preset when None).
+    #[serde(default)]
+    pub smtp_tls: Option<TlsMode>,
     /// OAuth2 scopes granted (for display/audit; tokens in vault).
     #[serde(default)]
     pub scopes_granted: Vec<String>,
@@ -794,10 +806,13 @@ impl AppConfig {
                     provider: EmailProvider::ImapFallback,
                     auth_type: EmailAuthType::AppPassword,
                     address: legacy.address.clone(),
+                    username: None,
                     imap_host: Some(legacy.imap_host.clone()),
                     imap_port: Some(legacy.imap_port),
+                    imap_tls: None,
                     smtp_host: Some(legacy.smtp_host.clone()),
                     smtp_port: Some(legacy.smtp_port),
+                    smtp_tls: None,
                     scopes_granted: Vec::new(),
                     status: EmailAccountStatus::Active,
                     last_verified_at: None,
@@ -844,10 +859,7 @@ impl AppConfig {
     /// Migrate any legacy plaintext API keys from config fields into the vault.
     /// Returns a list of providers that were migrated. Call `save()` after this
     /// to persist the config without the key fields.
-    pub fn migrate_keys_to_vault(
-        &mut self,
-        vault: &mut crate::SecretsVault,
-    ) -> Vec<String> {
+    pub fn migrate_keys_to_vault(&mut self, vault: &mut crate::SecretsVault) -> Vec<String> {
         let mut migrated = Vec::new();
 
         // openai_api_key → provider:openai
@@ -864,10 +876,7 @@ impl AppConfig {
         if let Some(ref trinity) = self.trinity.clone() {
             if let Some(ref key) = trinity.ego_api_key {
                 if !key.is_empty() {
-                    let provider = trinity
-                        .ego_provider
-                        .as_deref()
-                        .unwrap_or("openai");
+                    let provider = trinity.ego_provider.as_deref().unwrap_or("openai");
                     let ns_key = format!("provider:{}", provider);
                     if vault.get_secret(&ns_key).is_none() {
                         vault.set_secret(&ns_key, key);
@@ -878,10 +887,7 @@ impl AppConfig {
             }
             if let Some(ref key) = trinity.superego_api_key {
                 if !key.is_empty() {
-                    let provider = trinity
-                        .superego_provider
-                        .as_deref()
-                        .unwrap_or("anthropic");
+                    let provider = trinity.superego_provider.as_deref().unwrap_or("anthropic");
                     let ns_key = format!("provider:{}", provider);
                     if vault.get_secret(&ns_key).is_none() {
                         vault.set_secret(&ns_key, key);
@@ -1170,9 +1176,7 @@ mod tests {
         let policy = McpTrustPolicy::default();
         assert!(policy.validate_url("http://localhost:9090/mcp").is_ok());
         assert!(policy.validate_url("http://127.0.0.1:8080").is_ok());
-        assert!(policy
-            .validate_url("http://orion-toolbox:9090/mcp")
-            .is_ok());
+        assert!(policy.validate_url("http://orion-toolbox:9090/mcp").is_ok());
         assert!(policy
             .validate_url("http://host.docker.internal:3000")
             .is_ok());

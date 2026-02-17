@@ -5,12 +5,12 @@
 //! consults the mentor at genuine decision points via `ask_mentor`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
-use orion_birth::BirthToolRequest;
+use orion_birth::{execute_store_provider_key, BirthToolRequest};
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, RuntimeContext, SkillToolEntry};
 use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
@@ -205,6 +205,8 @@ pub struct AgenticLoopConfig {
     pub config: AppConfig,
     pub skill_registry: Arc<SkillRegistry>,
     pub skill_executor: Arc<SkillExecutor>,
+    pub skill_vault: Arc<StdMutex<SecretsVault>>,
+    pub email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
     pub skill_tool_entries: Vec<SkillToolEntry>,
     pub stored_providers: Vec<String>,
     pub event_tx: broadcast::Sender<AgenticEvent>,
@@ -622,6 +624,67 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             // Process remaining tool requests in this turn (don't skip to next turn).
         }
 
+        // Check for register_email_account synthetic tool
+        if let Some(email_req) = tool_requests
+            .iter()
+            .find(|t| t.name == "register_email_account")
+        {
+            let result_msg = match serde_json::from_value::<crate::RegisterEmailAccountRequest>(
+                email_req.arguments.clone(),
+            ) {
+                Ok(request) => match crate::register_email_account_internal(
+                    &cfg.agent_id,
+                    &cfg.skill_vault,
+                    &cfg.email_accounts,
+                    request,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        let probe_summary = outcome
+                            .probes
+                            .iter()
+                            .map(|p| {
+                                format!(
+                                    "{}:{} => {} ({})",
+                                    p.host,
+                                    p.port,
+                                    if p.reachable { "ok" } else { "failed" },
+                                    p.message
+                                )
+                            })
+                            .collect::<Vec<String>>()
+                            .join("; ");
+                        format!(
+                            "Email account '{}' registered for {}. Connectivity: {}",
+                            outcome.account_id, outcome.address, probe_summary
+                        )
+                    }
+                    Err(e) => format!("register_email_account failed: {}", e),
+                },
+                Err(e) => format!("register_email_account arguments invalid: {}", e),
+            };
+            let success = !result_msg.starts_with("register_email_account failed")
+                && !result_msg.starts_with("register_email_account arguments invalid");
+            let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                turn,
+                tool_name: "register_email_account".to_string(),
+                success,
+                output: result_msg.clone(),
+            });
+            record_step(
+                &cfg.task_handle,
+                turn,
+                "register_email_account",
+                &result_msg,
+            )
+            .await;
+            messages.push(Message::new(
+                "user",
+                format!("## Tool Result: register_email_account\n\n{}", result_msg),
+            ));
+        }
+
         // Check for manage_job synthetic tool
         if let Some(mj) = tool_requests.iter().find(|t| t.name == "manage_job") {
             let result_msg = handle_manage_job(&cfg.agent_dir, &mj.arguments);
@@ -636,6 +699,23 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             messages.push(Message::new(
                 "user",
                 format!("## Tool Result: manage_job\n\n{}", result_msg),
+            ));
+        }
+
+        // Check for manage_proxy synthetic tool
+        if let Some(mp) = tool_requests.iter().find(|t| t.name == "manage_proxy") {
+            let result_msg = handle_manage_proxy(&mp.arguments);
+            let success = !result_msg.starts_with("manage_proxy failed");
+            let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                turn,
+                tool_name: "manage_proxy".to_string(),
+                success,
+                output: result_msg.clone(),
+            });
+            record_step(&cfg.task_handle, turn, "manage_proxy", &result_msg).await;
+            messages.push(Message::new(
+                "user",
+                format!("## Tool Result: manage_proxy\n\n{}", result_msg),
             ));
         }
 
@@ -681,18 +761,123 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             &last_user_for_policy,
             advisory_code.as_deref(),
         );
+        let mut provider_config = cfg.config.clone();
+        let mut provider_vault = SecretsVault::load(provider_config.data_dir.clone())
+            .unwrap_or_else(|_| SecretsVault::new(provider_config.data_dir.clone()));
         for tr in &tool_requests {
             // Skip synthetic tools already handled above
             if tr.name == "task_complete"
                 || tr.name == "ask_mentor"
                 || tr.name == "register_mcp_skill"
+                || tr.name == "register_email_account"
                 || tr.name == "manage_job"
+                || tr.name == "manage_proxy"
                 || tr.name == "write_review"
             {
                 continue;
             }
 
             total_tool_calls += 1;
+
+            if tr.name == "store_secret" || tr.name == "store_provider_key" {
+                let provider = tr
+                    .arguments
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto");
+                let key = tr
+                    .arguments
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let _ = cfg.event_tx.send(AgenticEvent::ToolCall {
+                    turn,
+                    tool_name: tr.name.clone(),
+                    arguments: tr.arguments.clone(),
+                });
+                match execute_store_provider_key(
+                    &mut provider_vault,
+                    &mut provider_config,
+                    provider,
+                    key,
+                ) {
+                    Ok(resolved) => {
+                        let output = format!("Stored key for provider '{}'.", resolved);
+                        let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                            turn,
+                            tool_name: tr.name.clone(),
+                            success: true,
+                            output: output.clone(),
+                        });
+                        tool_results.push(format!("**{}** (Success): {}", tr.name, output));
+                    }
+                    Err(e) => {
+                        let output = format!("Failed to store provider key: {}", e);
+                        let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                            turn,
+                            tool_name: tr.name.clone(),
+                            success: false,
+                            output: output.clone(),
+                        });
+                        tool_results.push(format!("**{}** (Error): {}", tr.name, output));
+                    }
+                }
+                continue;
+            }
+
+            if tr.name == "store_vault_secret" {
+                let key_name = tr
+                    .arguments
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let value = tr
+                    .arguments
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let _ = cfg.event_tx.send(AgenticEvent::ToolCall {
+                    turn,
+                    tool_name: tr.name.clone(),
+                    arguments: tr.arguments.clone(),
+                });
+                if key_name.is_empty() || value.is_empty() {
+                    let output =
+                        "Failed to store vault secret: key and value are required.".to_string();
+                    let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                        turn,
+                        tool_name: tr.name.clone(),
+                        success: false,
+                        output: output.clone(),
+                    });
+                    tool_results.push(format!("**{}** (Error): {}", tr.name, output));
+                    continue;
+                }
+                provider_vault.set_secret(key_name, value);
+                match provider_vault.save() {
+                    Ok(()) => {
+                        let output = format!("Stored vault secret '{}'.", key_name);
+                        let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                            turn,
+                            tool_name: tr.name.clone(),
+                            success: true,
+                            output: output.clone(),
+                        });
+                        tool_results.push(format!("**{}** (Success): {}", tr.name, output));
+                    }
+                    Err(e) => {
+                        let output = format!("Failed to save vault secret '{}': {}", key_name, e);
+                        let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                            turn,
+                            tool_name: tr.name.clone(),
+                            success: false,
+                            output: output.clone(),
+                        });
+                        tool_results.push(format!("**{}** (Error): {}", tr.name, output));
+                    }
+                }
+                continue;
+            }
 
             // Find the skill for this tool
             let skill_match = find_skill_for_tool(&cfg.skill_registry, &tr.name);
@@ -1204,6 +1389,154 @@ async fn register_mcp_skill_impl(
 // ---------------------------------------------------------------------------
 // manage_job synthetic tool
 // ---------------------------------------------------------------------------
+
+fn proxy_allowlist_path() -> PathBuf {
+    std::env::var("ORION_PROXY_ALLOWLIST_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("docker/proxy/external/allowlist_domains.txt"))
+}
+
+fn proxy_log_dir() -> PathBuf {
+    std::env::var("ORION_PROXY_LOG_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".orion/proxy"))
+}
+
+fn read_log_tail(path: &Path, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return String::new(),
+    };
+    let out = content
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<&str>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<&str>>();
+    out.join("\n")
+}
+
+fn handle_manage_proxy(args: &serde_json::Value) -> String {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match action.as_str() {
+        "status" => {
+            let mode = std::env::var("PROXY_MODE").unwrap_or_else(|_| "allow_all".to_string());
+            let allow_host = std::env::var("PROXY_ALLOW_HOST_DOCKER_INTERNAL")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(true);
+            let allowlist_path = proxy_allowlist_path();
+            let log_dir = proxy_log_dir();
+            let internal_log = log_dir.join("internal").join("access.log");
+            let external_log = log_dir.join("external").join("access.log");
+            format!(
+                "Proxy status: mode={}, allow_host_docker_internal={}, allowlist={}, internal_log_exists={}, external_log_exists={}",
+                mode,
+                allow_host,
+                allowlist_path.display(),
+                internal_log.exists(),
+                external_log.exists()
+            )
+        }
+        "get_allowlist" => {
+            let path = proxy_allowlist_path();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            if content.trim().is_empty() {
+                format!("Allowlist at {} is empty.", path.display())
+            } else {
+                format!("Allowlist at {}:\n{}", path.display(), content)
+            }
+        }
+        "update_allowlist" => {
+            let mentor_approved = args
+                .get("mentor_approved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !mentor_approved {
+                return "manage_proxy failed: mentor_approved=true is required for update_allowlist."
+                    .to_string();
+            }
+            let domains = args
+                .get("domains")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let normalized = domains
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            if normalized.is_empty() {
+                return "manage_proxy failed: domains array is required for update_allowlist."
+                    .to_string();
+            }
+            let path = proxy_allowlist_path();
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return format!("manage_proxy failed: create directory failed: {}", e);
+                }
+            }
+            let mut body = String::from(
+                "# Managed by manage_proxy tool. One domain per line.\n# Leading dot matches subdomains.\n",
+            );
+            for d in &normalized {
+                body.push_str(d);
+                body.push('\n');
+            }
+            if let Err(e) = std::fs::write(&path, body) {
+                return format!("manage_proxy failed: write allowlist failed: {}", e);
+            }
+            let reload_note = std::process::Command::new("sh")
+                .arg("-lc")
+                .arg("docker compose -f docker/docker-compose.yml exec -T proxy_external squid -k reconfigure")
+                .output()
+                .ok()
+                .map(|out| if out.status.success() { "reloaded proxy_external".to_string() } else { "allowlist updated but reload command failed".to_string() })
+                .unwrap_or_else(|| "allowlist updated (reload command unavailable)".to_string());
+            format!(
+                "Proxy allowlist updated at {} with {} domain(s); {}.",
+                path.display(),
+                normalized.len(),
+                reload_note
+            )
+        }
+        "get_logs" => {
+            let lines = args
+                .get("lines")
+                .and_then(|v| v.as_u64())
+                .map(|v| (v as usize).clamp(1, 500))
+                .unwrap_or(80);
+            let log_dir = proxy_log_dir();
+            let internal_log = log_dir.join("internal").join("access.log");
+            let external_log = log_dir.join("external").join("access.log");
+            let internal = read_log_tail(&internal_log, lines);
+            let external = read_log_tail(&external_log, lines);
+            format!(
+                "Proxy logs (last {} lines)\n\n[internal]\n{}\n\n[external]\n{}",
+                lines, internal, external
+            )
+        }
+        other => format!(
+            "manage_proxy failed: unknown action '{}'. Use status, get_allowlist, update_allowlist, or get_logs.",
+            other
+        ),
+    }
+}
 
 fn handle_manage_job(agent_dir: &Path, args: &serde_json::Value) -> String {
     use crate::orchestration::{

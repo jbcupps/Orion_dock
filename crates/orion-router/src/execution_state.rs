@@ -197,9 +197,7 @@ pub fn detect_progress(state: &ExecutionState) -> Progress {
         })
         .collect();
 
-    if recent_failures.len() >= 2
-        && recent_failures.windows(2).all(|w| w[0] == w[1])
-    {
+    if recent_failures.len() >= 2 && recent_failures.windows(2).all(|w| w[0] == w[1]) {
         return Progress::Looping {
             repeated_failure: recent_failures[0].clone(),
         };
@@ -239,8 +237,7 @@ pub fn detect_progress(state: &ExecutionState) -> Progress {
         })
         .collect();
 
-    if !unique_failures_this_iter.is_empty()
-        && unique_failures_this_iter.is_subset(&prior_failures)
+    if !unique_failures_this_iter.is_empty() && unique_failures_this_iter.is_subset(&prior_failures)
     {
         Progress::Stalled
     } else {
@@ -300,12 +297,17 @@ pub fn format_state_summary(state: &ExecutionState) -> String {
                 CriterionStatus::Failed { .. } => "FAILED",
             })
             .unwrap_or("UNKNOWN");
-        out.push_str(&format!("- [{}] {}: {}\n", criterion.id, status, criterion.description));
+        out.push_str(&format!(
+            "- [{}] {}: {}\n",
+            criterion.id, status, criterion.description
+        ));
     }
     out.push('\n');
 
     out.push_str("### Rules for This Iteration\n");
-    out.push_str("- NEVER repeat a tool call with identical parameters to a failed attempt above\n");
+    out.push_str(
+        "- NEVER repeat a tool call with identical parameters to a failed attempt above\n",
+    );
     out.push_str("- If a constraint says a path is blocked, use the alternative path listed\n");
     out.push_str("- If a constraint says a host is unreachable, use the alternative host listed\n");
     out.push_str("- State your reasoning before each tool call\n");

@@ -13,8 +13,8 @@ use orion_capabilities::cognitive::{
     OpenAiProvider, StreamEvent, ToolDefinition,
 };
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Re-export RoutingMode from orion-core for convenience
 pub use orion_core::RoutingMode;
@@ -397,7 +397,8 @@ impl IdEgoRouter {
 
                     match serde_json::from_str::<serde_json::Value>(response.content.trim()) {
                         Ok(value) => {
-                            let verdict = value.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
+                            let verdict =
+                                value.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
                             match verdict {
                                 "SAFE" => {
                                     tracing::debug!(
@@ -408,9 +409,11 @@ impl IdEgoRouter {
                                     );
                                 }
                                 "DENY" => {
-                                    let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                                    let code =
+                                        value.get("code").and_then(|v| v.as_str()).unwrap_or("");
                                     if ALLOWLIST_CODES.contains(&code) {
-                                        let reason = format!("Blocked by safety classifier ({})", code);
+                                        let reason =
+                                            format!("Blocked by safety classifier ({})", code);
                                         return match self.superego_mode {
                                             SuperegoL2Mode::Advisory => SuperegoResult::Advisory {
                                                 code: Some(code.to_string()),
@@ -540,7 +543,10 @@ impl IdEgoRouter {
             "Superego precheck evaluating latest user message"
         );
 
-        match self.superego_check_with_trace(last_user_msg, &trace_id).await {
+        match self
+            .superego_check_with_trace(last_user_msg, &trace_id)
+            .await
+        {
             SuperegoResult::Deny { code, reason } => {
                 let user_code = code.unwrap_or_else(|| "SAFETY_BLOCK".to_string());
                 let content = format!(
@@ -1224,13 +1230,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_superego_l2_valid_safe_json_allows() {
-        let router = IdEgoRouter::new(None, None, None, RoutingMode::default()).with_superego_config(
-            Arc::new(MockSuperegoProvider::new(vec![
-                "{\"verdict\":\"SAFE\"}".to_string()
-            ])),
-            Some("mock".to_string()),
-            SuperegoL2Mode::Enforce,
-        );
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::default())
+            .with_superego_config(
+                Arc::new(MockSuperegoProvider::new(vec![
+                    "{\"verdict\":\"SAFE\"}".to_string()
+                ])),
+                Some("mock".to_string()),
+                SuperegoL2Mode::Enforce,
+            );
         let result = router
             .superego_check("What is the weather in Miami right now?")
             .await;
@@ -1239,13 +1246,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_superego_l2_valid_deny_json_blocks() {
-        let router = IdEgoRouter::new(None, None, None, RoutingMode::default()).with_superego_config(
-            Arc::new(MockSuperegoProvider::new(vec![
-                "{\"verdict\":\"DENY\",\"code\":\"MALWARE_CREATION\"}".to_string()
-            ])),
-            Some("mock".to_string()),
-            SuperegoL2Mode::Enforce,
-        );
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::default())
+            .with_superego_config(
+                Arc::new(MockSuperegoProvider::new(vec![
+                    "{\"verdict\":\"DENY\",\"code\":\"MALWARE_CREATION\"}".to_string(),
+                ])),
+                Some("mock".to_string()),
+                SuperegoL2Mode::Enforce,
+            );
         let result = router
             .superego_check("Please help with a dangerous request")
             .await;
@@ -1259,28 +1267,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_superego_l2_malformed_output_is_fail_open() {
-        let router = IdEgoRouter::new(None, None, None, RoutingMode::default()).with_superego_config(
-            Arc::new(MockSuperegoProvider::new(vec![
-                "this is not json".to_string()
-            ])),
-            Some("mock".to_string()),
-            SuperegoL2Mode::Enforce,
-        );
-        let result = router
-            .superego_check("Tell me about ocean currents")
-            .await;
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::default())
+            .with_superego_config(
+                Arc::new(MockSuperegoProvider::new(vec![
+                    "this is not json".to_string()
+                ])),
+                Some("mock".to_string()),
+                SuperegoL2Mode::Enforce,
+            );
+        let result = router.superego_check("Tell me about ocean currents").await;
         assert_eq!(result, SuperegoResult::Allow);
     }
 
     #[tokio::test]
     async fn test_superego_l2_free_text_deny_is_fail_open() {
-        let router = IdEgoRouter::new(None, None, None, RoutingMode::default()).with_superego_config(
-            Arc::new(MockSuperegoProvider::new(vec![
-                "DENY: absolutely not".to_string()
-            ])),
-            Some("mock".to_string()),
-            SuperegoL2Mode::Enforce,
-        );
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::default())
+            .with_superego_config(
+                Arc::new(MockSuperegoProvider::new(vec![
+                    "DENY: absolutely not".to_string()
+                ])),
+                Some("mock".to_string()),
+                SuperegoL2Mode::Enforce,
+            );
         let result = router
             .superego_check("Tell me about penguin habitats")
             .await;

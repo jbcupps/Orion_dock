@@ -139,6 +139,49 @@ pub fn build_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<ToolDefinit
         }),
     });
 
+    defs.push(ToolDefinition {
+        name: "register_email_account".to_string(),
+        description:
+            "Register or update an email account configuration and store password in the vault."
+                .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Optional stable account id (e.g. proton)" },
+                "provider": { "type": "string", "enum": ["gmail", "outlook", "proton", "fastmail", "imap_fallback"] },
+                "auth_type": { "type": "string", "enum": ["app_password", "smtp_token", "o_auth2"], "description": "Defaults to app_password" },
+                "address": { "type": "string", "description": "Mailbox address (display/from address)" },
+                "username": { "type": "string", "description": "Optional login username. Defaults to address." },
+                "password": { "type": "string", "description": "Optional password/token (stored as email:{id}:password)." },
+                "imap_host": { "type": "string" },
+                "imap_port": { "type": "integer" },
+                "smtp_host": { "type": "string" },
+                "smtp_port": { "type": "integer" },
+                "security": { "type": "string", "enum": ["auto", "starttls", "implicit", "none"], "description": "Transport security preference for inferred TLS modes." }
+            },
+            "required": ["provider", "address"]
+        }),
+    });
+
+    defs
+}
+
+/// Build tool definitions for operational chat mode: skill tools + lightweight synthetic tools.
+pub fn build_operational_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<ToolDefinition> {
+    let mut defs = build_tool_definitions(skill_tools);
+    defs.push(ToolDefinition {
+        name: "launch_agentic_task".to_string(),
+        description: "Start an autonomous background task. Use this when work needs 3+ dependent steps, or when you must configure + verify (e.g. store credentials, register integration, then confirm connectivity), or when failure handling needs retries/diagnosis. The mentor can monitor progress in the Agent view."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string", "description": "Primary autonomous task goal" },
+                "context": { "type": "string", "description": "Optional context to include in the goal" }
+            },
+            "required": ["goal"]
+        }),
+    });
     defs
 }
 
@@ -184,6 +227,23 @@ pub fn build_agentic_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<Too
                 "base_url": { "type": "string", "description": "HTTP base URL of the MCP server" }
             },
             "required": ["server_id", "base_url"]
+        }),
+    });
+
+    defs.push(ToolDefinition {
+        name: "manage_proxy".to_string(),
+        description:
+            "View or modify outbound proxy settings and logs. Mutations require mentor_approved=true."
+                .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["status", "get_allowlist", "update_allowlist", "get_logs"] },
+                "domains": { "type": "array", "items": { "type": "string" }, "description": "Domain list for update_allowlist (one domain per entry)." },
+                "lines": { "type": "integer", "description": "Optional number of lines for get_logs (default 80)." },
+                "mentor_approved": { "type": "boolean", "description": "Required true for update_allowlist." }
+            },
+            "required": ["action"]
         }),
     });
 
@@ -277,6 +337,14 @@ mod tests {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"store_provider_key"));
         assert!(names.contains(&"store_vault_secret"));
+        assert!(names.contains(&"register_email_account"));
+    }
+
+    #[test]
+    fn test_build_operational_tool_definitions_includes_launch_agentic_task() {
+        let defs = build_operational_tool_definitions(&[]);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"launch_agentic_task"));
     }
 
     #[test]
@@ -286,6 +354,7 @@ mod tests {
         assert!(names.contains(&"task_complete"));
         assert!(names.contains(&"ask_mentor"));
         assert!(names.contains(&"register_mcp_skill"));
+        assert!(names.contains(&"manage_proxy"));
         assert!(names.contains(&"store_provider_key"));
     }
 

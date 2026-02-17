@@ -132,11 +132,9 @@ impl DockerExecSkill {
     fn http_client(&self) -> Result<reqwest::Client, String> {
         let mut headers = reqwest::header::HeaderMap::new();
         if !self.toolbox_secret.is_empty() {
-            let val = reqwest::header::HeaderValue::from_str(&format!(
-                "Bearer {}",
-                self.toolbox_secret
-            ))
-            .map_err(|e| format!("Invalid toolbox secret: {}", e))?;
+            let val =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.toolbox_secret))
+                    .map_err(|e| format!("Invalid toolbox secret: {}", e))?;
             headers.insert(reqwest::header::AUTHORIZATION, val);
         }
         reqwest::Client::builder()
@@ -195,7 +193,10 @@ impl DockerExecSkill {
 
         let formatted = if exec.success {
             if exec.stdout.is_empty() {
-                format!("Command completed successfully (exit code {})", exec.exit_code)
+                format!(
+                    "Command completed successfully (exit code {})",
+                    exec.exit_code
+                )
             } else {
                 exec.stdout.clone()
             }
@@ -565,24 +566,15 @@ mod tests {
         let tools = skill.tools();
         assert_eq!(tools.len(), 3);
 
-        let exec = tools
-            .iter()
-            .find(|t| t.name == "toolbox_exec")
-            .unwrap();
+        let exec = tools.iter().find(|t| t.name == "toolbox_exec").unwrap();
         assert!(!exec.autonomous);
         assert!(exec.requires_confirmation);
 
-        let install = tools
-            .iter()
-            .find(|t| t.name == "toolbox_install")
-            .unwrap();
+        let install = tools.iter().find(|t| t.name == "toolbox_install").unwrap();
         assert!(!install.autonomous);
         assert!(install.requires_confirmation);
 
-        let status = tools
-            .iter()
-            .find(|t| t.name == "toolbox_status")
-            .unwrap();
+        let status = tools.iter().find(|t| t.name == "toolbox_status").unwrap();
         assert!(status.autonomous);
         assert!(!status.requires_confirmation);
     }
@@ -619,10 +611,8 @@ mod tests {
         let valid = ["curl", "python3-dev", "express", "@types/node", "gcc"];
         for name in valid {
             assert!(
-                name.trim()
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric()
-                        || matches!(c, '.' | '-' | '_' | '+' | ':' | '/' | '@')),
+                name.trim().chars().all(|c| c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '_' | '+' | ':' | '/' | '@')),
                 "Expected '{}' to be valid",
                 name
             );

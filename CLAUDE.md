@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Terminology
+
+- **Entity**: The identity running inside the container at runtime (both operational chat persona and spawned autonomous runs). When discussing behavior, decisions, or actions taken by the runtime identity, use "entity".
+- **Agent**: The software system and implementation (APIs, crates, orchestration runtime, skills framework).
+- **Mentor**: The human operator guiding the entity.
+- **Base identity**: `soul.md` is the entity's foundational identity document. `ethics.md` and `instincts.md` constrain and shape behavior, while `growth.md` captures development over time.
+
 ## Interactive Session Commands
 
 ### "Please start a dev session"
@@ -98,11 +105,11 @@ Orion Dock is a **Docker-first** Rust workspace for Orion's core agent logic, bi
 
 - **Orion API** — Axum HTTP API for the web UI (health, status, identities, create/load agents)
 - **Web UI** — React + Vite frontend (intro, ORION HIVE identity selector, birth/status dashboard)
-- **Birth lifecycle** — Five-stage interactive ceremony (Darkness → Ignition → Connectivity → Genesis → Emergence) that generates cryptographic identity, configures LLM/cloud, and discovers agent identity through conversation
+- **Birth lifecycle** — Five-stage interactive ceremony (Darkness → Ignition → Connectivity → Genesis → Emergence) that generates cryptographic identity, configures LLM/cloud, and discovers entity identity through conversation
 - **Orchestration layer (MVP)** — Scheduled UTC cron jobs, significance scoring, escalation to agentic runs, and mentor-facing attention flags
 - **soul-forge** — Alternative TUI path for scenario-based soul calibration
 
-The **birth process is the key differentiator**: cryptographic identity, conversational discovery, and signed constitutional documents.
+The **birth process is the key differentiator**: cryptographic identity, conversational discovery, and signed constitutional documents. `soul.md` is treated as the entity's base identity.
 
 ### Agent Autonomy (Non-Negotiable)
 

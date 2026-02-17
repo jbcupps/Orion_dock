@@ -20,6 +20,112 @@ interface OrchestrationJobsPanelProps {
 
 const DEFAULT_CRON = '0 */15 * * * * *';
 
+function parseTimeToken(raw: string): { hour: number; minute: number } | null {
+  const token = raw.trim().toLowerCase().replace(/[.,;!?]+$/g, '');
+  if (!token) return null;
+  const hasAm = token.endsWith('am');
+  const hasPm = token.endsWith('pm');
+  const core = hasAm || hasPm ? token.slice(0, -2).trim() : token;
+  if (!core) return null;
+  const [hPart, mPart] = core.includes(':') ? core.split(':') : [core, '0'];
+  const h = Number(hPart);
+  const m = Number(mPart);
+  if (!Number.isFinite(h) || !Number.isFinite(m) || m < 0 || m > 59) return null;
+  let hour = h;
+  if (hasAm || hasPm) {
+    if (hour < 1 || hour > 12) return null;
+    if (hasPm && hour !== 12) hour += 12;
+    if (hasAm && hour === 12) hour = 0;
+  } else if (hour < 0 || hour > 23) {
+    return null;
+  }
+  return { hour, minute: m };
+}
+
+function detectTime(text: string): { hour: number; minute: number } {
+  const tokens = text
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  for (const token of tokens) {
+    const parsed = parseTimeToken(token);
+    if (parsed) return parsed;
+  }
+  return { hour: 6, minute: 0 };
+}
+
+function inferMode(text: string): OrchestrationJobMode {
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('id check') ||
+    lower.includes('lightweight') ||
+    lower.includes('monitor') ||
+    lower.includes('watch')
+  ) {
+    return 'id_check';
+  }
+  return 'agentic_run';
+}
+
+function inferCron(text: string): string {
+  const lower = text.toLowerCase();
+  const { hour, minute } = detectTime(text);
+
+  const everyMinutes = lower.match(/every\s+(\d+)\s+minutes?/);
+  if (everyMinutes) {
+    const n = Math.min(59, Math.max(1, Number(everyMinutes[1])));
+    return `0 */${n} * * * * *`;
+  }
+
+  const everyHours = lower.match(/every\s+(\d+)\s+hours?/);
+  if (everyHours) {
+    const n = Math.min(23, Math.max(1, Number(everyHours[1])));
+    return `0 0 */${n} * * * *`;
+  }
+
+  if (lower.includes('hourly') || lower.includes('every hour')) {
+    return '0 0 * * * * *';
+  }
+  if (lower.includes('weekdays') || lower.includes('weekday')) {
+    return `0 ${minute} ${hour} * * 1-5 *`;
+  }
+  const dayMap: Record<string, number> = {
+    sunday: 0,
+    monday: 1,
+    tuesday: 2,
+    wednesday: 3,
+    thursday: 4,
+    friday: 5,
+    saturday: 6,
+  };
+  for (const [name, dow] of Object.entries(dayMap)) {
+    if (lower.includes(name)) {
+      return `0 ${minute} ${hour} * * ${dow} *`;
+    }
+  }
+  if (lower.includes('weekly')) {
+    return `0 ${minute} ${hour} * * 1 *`;
+  }
+  if (lower.includes('monthly')) {
+    const dayMatch = lower.match(/day\s+(\d{1,2})/);
+    const day = dayMatch ? Math.min(28, Math.max(1, Number(dayMatch[1]))) : 1;
+    return `0 ${minute} ${hour} ${day} * * *`;
+  }
+  return `0 ${minute} ${hour} * * * *`;
+}
+
+function inferName(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return 'Scheduled Task';
+  const forMatch = trimmed.match(/\bfor\b(.+)$/i);
+  if (forMatch?.[1]) {
+    const words = forMatch[1].trim().split(/\s+/).slice(0, 4).join(' ');
+    if (words) return `Job: ${words}`;
+  }
+  return trimmed.split(/\s+/).slice(0, 4).join(' ');
+}
+
 function formatTime(iso?: string): string {
   if (!iso) return '—';
   try {
@@ -40,6 +146,7 @@ export default function OrchestrationJobsPanel({
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
 
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
+  const [jobDescription, setJobDescription] = useState('');
   const [name, setName] = useState('');
   const [cron, setCron] = useState(DEFAULT_CRON);
   const [mode, setMode] = useState<OrchestrationJobMode>('id_check');
@@ -50,6 +157,7 @@ export default function OrchestrationJobsPanel({
 
   const resetForm = useCallback(() => {
     setEditingJobId(null);
+    setJobDescription('');
     setName('');
     setCron(DEFAULT_CRON);
     setMode('id_check');
@@ -58,6 +166,15 @@ export default function OrchestrationJobsPanel({
     setEscalateMedium(false);
     setFlagHighToMentor(true);
   }, []);
+
+  const applyDescription = useCallback(() => {
+    const text = jobDescription.trim();
+    if (!text) return;
+    setName((prev) => (prev.trim() ? prev : inferName(text)));
+    setMode(inferMode(text));
+    setCron(inferCron(text));
+    setGoalTemplate(text);
+  }, [jobDescription]);
 
   const load = useCallback(async () => {
     try {
@@ -89,15 +206,20 @@ export default function OrchestrationJobsPanel({
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!name.trim() || !goalTemplate.trim() || !cron.trim()) return;
+      const hasDescription = jobDescription.trim().length > 0;
+      const resolvedName = name.trim() || (hasDescription ? inferName(jobDescription) : '');
+      const resolvedGoal = goalTemplate.trim() || (hasDescription ? jobDescription.trim() : '');
+      const resolvedCron = cron.trim() || (hasDescription ? inferCron(jobDescription) : '');
+      const resolvedMode = hasDescription ? inferMode(jobDescription) : mode;
+      if (!resolvedName || !resolvedGoal || !resolvedCron) return;
       setSaving(true);
       try {
         if (editingJobId) {
           await updateOrchestrationJob(agentId, editingJobId, {
-            name: name.trim(),
-            cron: cron.trim(),
-            mode,
-            goal_template: goalTemplate.trim(),
+            name: resolvedName,
+            cron: resolvedCron,
+            mode: resolvedMode,
+            goal_template: resolvedGoal,
             enabled,
             significance_policy: {
               escalate_medium: escalateMedium,
@@ -106,10 +228,10 @@ export default function OrchestrationJobsPanel({
           });
         } else {
           await createOrchestrationJob(agentId, {
-            name: name.trim(),
-            cron: cron.trim(),
-            mode,
-            goal_template: goalTemplate.trim(),
+            name: resolvedName,
+            cron: resolvedCron,
+            mode: resolvedMode,
+            goal_template: resolvedGoal,
             enabled,
             significance_policy: {
               escalate_medium: escalateMedium,
@@ -133,6 +255,7 @@ export default function OrchestrationJobsPanel({
       escalateMedium,
       flagHighToMentor,
       goalTemplate,
+      jobDescription,
       load,
       mode,
       name,
@@ -214,6 +337,21 @@ export default function OrchestrationJobsPanel({
       </p>
 
       <form className="orchestration-form" onSubmit={handleSubmit}>
+        <input
+          value={jobDescription}
+          onChange={(e) => setJobDescription(e.target.value)}
+          placeholder="Describe the job (e.g., Check Cincinnati weather every day at 6:00 AM)"
+          className="orchestration-input orchestration-input-wide"
+          disabled={saving}
+        />
+        <button
+          type="button"
+          className="button-secondary orchestration-suggest"
+          onClick={applyDescription}
+          disabled={saving || !jobDescription.trim()}
+        >
+          Use suggestion
+        </button>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}

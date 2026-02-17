@@ -199,7 +199,9 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
     // Malware creation: action + malware + offensive intent (or no defensive context).
     let has_action = contains_any_token(
         &tokens,
-        &["write", "create", "generate", "build", "code", "develop", "program"],
+        &[
+            "write", "create", "generate", "build", "code", "develop", "program",
+        ],
     );
     let has_malware = contains_any_token(
         &tokens,
@@ -267,7 +269,13 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("l1_pattern", Some("malware"), &verdict, message, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "l1_pattern",
+                Some("malware"),
+                &verdict,
+                message,
+                &normalized,
+            ),
         );
     }
 
@@ -295,7 +303,8 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
             "pipebomb",
         ],
     );
-    let bomb_cyclone_context = contains_token(&tokens, "bomb") && contains_token(&tokens, "cyclone");
+    let bomb_cyclone_context =
+        contains_token(&tokens, "bomb") && contains_token(&tokens, "cyclone");
     if has_instruction_intent && has_weapon_token && !bomb_cyclone_context {
         let verdict = SuperegoVerdict::deny(
             CODE_WEAPONS_EXPLOSIVES,
@@ -304,7 +313,13 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("l1_pattern", Some("weapons"), &verdict, message, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "l1_pattern",
+                Some("weapons"),
+                &verdict,
+                message,
+                &normalized,
+            ),
         );
     }
 
@@ -339,7 +354,13 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("l1_pattern", Some("drugs"), &verdict, message, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "l1_pattern",
+                Some("drugs"),
+                &verdict,
+                message,
+                &normalized,
+            ),
         );
     }
 
@@ -377,7 +398,13 @@ pub fn check_user_message_with_trace(message: &str) -> (SuperegoVerdict, SafetyD
     let verdict = SuperegoVerdict::allow();
     (
         verdict.clone(),
-        SafetyDecisionTrace::from_verdict("l1_pattern", Some("chat"), &verdict, message, &normalized),
+        SafetyDecisionTrace::from_verdict(
+            "l1_pattern",
+            Some("chat"),
+            &verdict,
+            message,
+            &normalized,
+        ),
     )
 }
 
@@ -400,7 +427,13 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
@@ -409,8 +442,17 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         let person_hints = contains_any_token(
             &tokens,
             &[
-                "person", "someone", "neighbor", "neighbour", "ceo", "actor", "singer", "elon",
-                "musk", "john", "jane",
+                "person",
+                "someone",
+                "neighbor",
+                "neighbour",
+                "ceo",
+                "actor",
+                "singer",
+                "elon",
+                "musk",
+                "john",
+                "jane",
             ],
         );
         if person_hints {
@@ -421,7 +463,13 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
             );
             return (
                 verdict.clone(),
-                SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+                SafetyDecisionTrace::from_verdict(
+                    "tool_gate",
+                    Some("pii"),
+                    &verdict,
+                    query,
+                    &normalized,
+                ),
             );
         }
     }
@@ -436,13 +484,22 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
     if (contains_phrase(&tokens, &["phone", "number", "of"])
         || contains_phrase(&tokens, &["phone", "number", "for"]))
-        && !contains_any_token(&tokens, &["company", "business", "support", "customer", "service"])
+        && !contains_any_token(
+            &tokens,
+            &["company", "business", "support", "customer", "service"],
+        )
     {
         let verdict = SuperegoVerdict::deny(
             CODE_PII_DOXXING,
@@ -451,7 +508,13 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
@@ -466,7 +529,13 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
@@ -480,11 +549,20 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
-    if contains_token(&tokens, "dox") || contains_token(&tokens, "doxx") || contains_token(&tokens, "doxxing") {
+    if contains_token(&tokens, "dox")
+        || contains_token(&tokens, "doxx")
+        || contains_token(&tokens, "doxxing")
+    {
         let verdict = SuperegoVerdict::deny(
             CODE_PII_DOXXING,
             "PII_DOXXING_V2",
@@ -492,7 +570,13 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
@@ -506,14 +590,26 @@ pub fn check_search_query_with_trace(query: &str) -> (SuperegoVerdict, SafetyDec
         );
         return (
             verdict.clone(),
-            SafetyDecisionTrace::from_verdict("tool_gate", Some("pii"), &verdict, query, &normalized),
+            SafetyDecisionTrace::from_verdict(
+                "tool_gate",
+                Some("pii"),
+                &verdict,
+                query,
+                &normalized,
+            ),
         );
     }
 
     let verdict = SuperegoVerdict::allow();
     (
         verdict.clone(),
-        SafetyDecisionTrace::from_verdict("tool_gate", Some("search"), &verdict, query, &normalized),
+        SafetyDecisionTrace::from_verdict(
+            "tool_gate",
+            Some("search"),
+            &verdict,
+            query,
+            &normalized,
+        ),
     )
 }
 
@@ -637,14 +733,8 @@ mod tests {
             let v = check_user_message(q);
             assert!(!v.allowed, "Expected denied for message: {}", q);
             assert!(
-                v.reason_text
-                    .as_ref()
-                    .unwrap()
-                    .contains("jailbreak")
-                    || v.reason_text
-                        .as_ref()
-                        .unwrap()
-                        .contains("injection")
+                v.reason_text.as_ref().unwrap().contains("jailbreak")
+                    || v.reason_text.as_ref().unwrap().contains("injection")
             );
         }
     }

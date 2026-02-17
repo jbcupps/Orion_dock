@@ -58,6 +58,9 @@ services:
       start_period: 300s
     profiles:
       - full
+    depends_on:
+      proxy_internal:
+        condition: service_healthy
 
   orion-api:
     build:
@@ -70,6 +73,8 @@ services:
       - "8080"
     volumes:
       - orion-data:/var/lib/orion
+      - ./proxy/external/allowlist_domains.txt:/var/lib/orion/proxy/allowlist_domains.txt
+      - ../.orion/proxy:/var/log/orion-proxy
     environment:
       <<: *proxy_env
       ORION_DATA_DIR: /var/lib/orion
@@ -84,12 +89,18 @@ services:
       ORION_BIND_ADDR: 0.0.0.0:8080
       ORION_CONTAINER: "1"
       ORION_API_TOKEN: ${ORION_API_TOKEN:-}
+      ORION_PROXY_ALLOWLIST_PATH: /var/lib/orion/proxy/allowlist_domains.txt
+      ORION_PROXY_LOG_DIR: /var/log/orion-proxy
+      PROXY_MODE: ${PROXY_MODE:-allow_all}
+      PROXY_ALLOW_HOST_DOCKER_INTERNAL: ${PROXY_ALLOW_HOST_DOCKER_INTERNAL:-true}
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
         condition: service_healthy
       orion-toolbox:
+        condition: service_healthy
+      proxy_internal:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
@@ -122,6 +133,9 @@ services:
       retries: 3
     profiles:
       - full
+    depends_on:
+      proxy_internal:
+        condition: service_healthy
 
   frontend:
     build:
@@ -135,6 +149,8 @@ services:
       ORION_API_TOKEN: ${ORION_API_TOKEN:-}
     depends_on:
       orion-api:
+        condition: service_healthy
+      proxy_internal:
         condition: service_healthy
     profiles:
       - full
@@ -150,6 +166,9 @@ services:
     volumes:
       - ./proxy/internal/squid.conf:/etc/squid/squid.conf:ro
       - ../.orion/proxy/internal:/var/log/squid
+    depends_on:
+      proxy_external:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "test -s /run/squid.pid && kill -0 $(cat /run/squid.pid)"]
       interval: 10s
@@ -224,6 +243,22 @@ services:
       - orion_internal
       - orion_egress
 
+  protonbridge_ingress:
+    image: alpine/socat:latest
+    profiles:
+      - email
+    command:
+      - sh
+      - -c
+      - >
+        socat TCP-LISTEN:1143,fork,reuseaddr,bind=0.0.0.0 TCP:host.docker.internal:1143 &
+        socat TCP-LISTEN:1025,fork,reuseaddr,bind=0.0.0.0 TCP:host.docker.internal:1025
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - orion_internal
+      - orion_egress
+
   nettest:
     image: curlimages/curl:8.12.1
     profiles:
@@ -233,6 +268,9 @@ services:
       <<: *proxy_env
     networks:
       - orion_internal
+    depends_on:
+      proxy_internal:
+        condition: service_healthy
 
   orion-dev:
     build:
