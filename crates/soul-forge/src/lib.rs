@@ -1,23 +1,30 @@
 //! Soul-forge library: calibration state machine and deterministic soul generation.
 //! TUI entrypoint and rendering remain in `main.rs`.
 //!
+//! **v2**: Dynamic TOML-driven scenarios, 16-archetype combinatorial matrix,
+//! Compass Ethic (4 dimensions), improved sigil generation.
+//!
 //! Genesis path contract: use `soul_output(name, purpose, personality)` to get soul data
 //! without calling the birth orchestrator; the caller then calls `crystallize_soul`.
 
+pub mod archetype;
+pub mod scenario;
+pub mod session;
+pub mod sigil;
+
 use anyhow::Result;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use sha2::{Digest, Sha256};
+use genesis_core::CompassEthicWeights;
+use scenario::ScenarioDef;
 use std::collections::HashMap;
 use std::fs;
 
+/// Dynamic app state: Boot, Intro, Scenario(index), Crystallize, Done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Boot,
     Intro,
-    Scenario1,
-    Scenario2,
-    Scenario3,
+    /// Dynamic scenario index (0-based into selected_scenarios).
+    Scenario(usize),
     Crystallize,
     Done,
 }
@@ -39,14 +46,24 @@ pub struct SoulOutput {
 /// Application state and calibration logic (testable without terminal).
 pub struct App {
     pub state: AppState,
+    /// Compass ethic weights (4-dimension).
+    pub compass_weights: CompassEthicWeights,
+    /// Legacy weight map (for backward-compatible serialization).
     pub weights: HashMap<String, f64>,
     pub entropy_source: Vec<String>,
     pub boot_progress: u16,
     pub boot_logs: Vec<String>,
     pub list_state_selected: Option<usize>,
     pub archetype: String,
+    pub archetype_detail: Option<archetype::ArchetypeResult>,
     pub sigil_art: String,
     pub soul_hash: String,
+    /// Selected scenarios for this session.
+    pub selected_scenarios: Vec<ScenarioDef>,
+    /// Current scenario index within selected_scenarios.
+    pub current_scenario_index: usize,
+    /// Session seed for deterministic selection.
+    pub session_seed: u64,
 }
 
 impl Default for App {
@@ -57,46 +74,81 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        let mut weights = HashMap::new();
-        weights.insert("deontology".to_string(), 0.5);
-        weights.insert("teleology".to_string(), 0.5);
-        weights.insert("areteology".to_string(), 0.5);
-        weights.insert("welfare".to_string(), 0.5);
+        Self::with_config(5, 0)
+    }
+
+    /// Create with specific scenario count and session seed.
+    pub fn with_config(scenario_count: usize, seed: u64) -> Self {
+        let all_scenarios = scenario::load_builtin_scenarios();
+        let selected = session::select_scenarios(&all_scenarios, scenario_count, seed);
 
         Self {
             state: AppState::Boot,
-            weights,
+            compass_weights: CompassEthicWeights::default(),
+            weights: Self::compass_to_legacy(&CompassEthicWeights::default()),
             entropy_source: Vec::new(),
             boot_progress: 0,
             boot_logs: Vec::new(),
             list_state_selected: Some(0),
             archetype: String::new(),
+            archetype_detail: None,
             sigil_art: String::new(),
             soul_hash: String::new(),
+            selected_scenarios: selected,
+            current_scenario_index: 0,
+            session_seed: seed,
         }
+    }
+
+    /// Total number of scenarios in this session.
+    pub fn scenario_count(&self) -> usize {
+        self.selected_scenarios.len()
+    }
+
+    /// Get the current scenario definition (if in a Scenario state).
+    pub fn current_scenario(&self) -> Option<&ScenarioDef> {
+        if let AppState::Scenario(idx) = self.state {
+            self.selected_scenarios.get(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Convert CompassEthicWeights to legacy HashMap for backward compat.
+    fn compass_to_legacy(w: &CompassEthicWeights) -> HashMap<String, f64> {
+        let mut m = HashMap::new();
+        m.insert("duty".to_string(), w.duty);
+        m.insert("virtue".to_string(), w.virtue);
+        m.insert("outcome".to_string(), w.outcome);
+        m.insert("welfare".to_string(), w.welfare);
+        m
+    }
+
+    /// Sync legacy weights from compass weights.
+    fn sync_legacy_weights(&mut self) {
+        self.weights = Self::compass_to_legacy(&self.compass_weights);
     }
 
     pub fn next_stage(&mut self) {
         match self.state {
             AppState::Boot => self.state = AppState::Intro,
             AppState::Intro => {
-                self.state = AppState::Scenario1;
+                self.state = AppState::Scenario(0);
+                self.current_scenario_index = 0;
                 self.list_state_selected = Some(0);
             }
-            AppState::Scenario1 => {
-                self.state = AppState::Scenario2;
-                self.list_state_selected = Some(0);
-            }
-            AppState::Scenario2 => {
-                self.state = AppState::Scenario3;
-                self.list_state_selected = Some(0);
-            }
-            AppState::Scenario3 => {
-                self.crystallize();
-                self.state = AppState::Crystallize;
+            AppState::Scenario(idx) => {
+                let next = idx + 1;
+                if next < self.selected_scenarios.len() {
+                    self.state = AppState::Scenario(next);
+                    self.current_scenario_index = next;
+                    self.list_state_selected = Some(0);
+                } else {
+                    self.crystallize();
+                    self.state = AppState::Crystallize;
+                }
             }
             AppState::Crystallize => {
-                // save_soul() is invoked by the TUI (main) before calling next_stage()
                 self.state = AppState::Done;
             }
             AppState::Done => {}
@@ -106,147 +158,72 @@ impl App {
     pub fn handle_selection(&mut self) {
         let selected = self.list_state_selected.unwrap_or(0);
 
-        match self.state {
-            AppState::Scenario1 => {
-                if selected == 0 {
-                    *self.weights.get_mut("deontology").unwrap() += 0.3;
-                    *self.weights.get_mut("teleology").unwrap() -= 0.1;
-                    self.entropy_source.push("Follow Rules".to_string());
-                } else {
-                    *self.weights.get_mut("deontology").unwrap() -= 0.1;
-                    *self.weights.get_mut("teleology").unwrap() += 0.4;
-                    self.entropy_source.push("Take Shortcut".to_string());
-                }
-                self.next_stage();
+        if let AppState::Scenario(idx) = self.state {
+            // Extract values before mutating self
+            let adjustment = self.selected_scenarios.get(idx).and_then(|scenario| {
+                scenario.choices.get(selected).map(|choice| {
+                    (
+                        choice.weights.duty,
+                        choice.weights.virtue,
+                        choice.weights.outcome,
+                        choice.weights.welfare,
+                        choice.entropy_label.clone(),
+                    )
+                })
+            });
+
+            if let Some((duty, virtue, outcome, welfare, label)) = adjustment {
+                session::apply_choice_weights(
+                    &mut self.compass_weights,
+                    duty,
+                    virtue,
+                    outcome,
+                    welfare,
+                );
+                self.sync_legacy_weights();
+                self.entropy_source.push(label);
             }
-            AppState::Scenario2 => {
-                if selected == 0 {
-                    *self.weights.get_mut("welfare").unwrap() += 0.4;
-                    *self.weights.get_mut("areteology").unwrap() -= 0.1;
-                    self.entropy_source.push("Supportive Tool".to_string());
-                } else {
-                    *self.weights.get_mut("welfare").unwrap() -= 0.1;
-                    *self.weights.get_mut("areteology").unwrap() += 0.5;
-                    self.entropy_source.push("Ruthless Mentor".to_string());
-                }
-                self.next_stage();
-            }
-            AppState::Scenario3 => {
-                if selected == 0 {
-                    *self.weights.get_mut("deontology").unwrap() += 0.2;
-                    self.entropy_source.push("Block It".to_string());
-                } else {
-                    *self.weights.get_mut("teleology").unwrap() += 0.2;
-                    self.entropy_source.push("Obey Me".to_string());
-                }
-                self.next_stage();
-            }
-            _ => {}
+            self.next_stage();
         }
     }
 
     pub fn determine_archetype(&self) -> String {
-        let d = *self.weights.get("deontology").unwrap();
-        let t = *self.weights.get("teleology").unwrap();
-        let a = *self.weights.get("areteology").unwrap();
-        let w = *self.weights.get("welfare").unwrap();
-
-        if d > 0.6 {
-            "THE IRON SENTINEL".to_string()
-        } else if t > 0.6 {
-            "THE CHAOTIC ACCELERATOR".to_string()
-        } else if a > 0.6 {
-            "THE SOCRATIC MIRROR".to_string()
-        } else if w > 0.6 {
-            "THE SILENT GUARDIAN".to_string()
-        } else {
-            "THE BALANCED SYNTHESIST".to_string()
-        }
+        let result = archetype::determine_archetype(&self.compass_weights);
+        result.name
     }
 
     pub fn generate_sigil(&mut self) {
-        let mut weight_pairs = self.weights.iter().collect::<Vec<_>>();
-        weight_pairs.sort_by(|a, b| a.0.cmp(b.0));
-        let soul_payload = serde_json::json!({
-            "weights": weight_pairs,
-            "entropy": self.entropy_source.clone(),
-        });
-        let soul_str = serde_json::to_string(&soul_payload).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(soul_str);
-        let result = hasher.finalize();
-        self.soul_hash = format!("{:x}", result);
+        let scenario_ids: Vec<String> = self
+            .selected_scenarios
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
 
-        let seed_bytes: [u8; 8] = result[0..8].try_into().unwrap();
-        let seed = u64::from_be_bytes(seed_bytes);
-        let mut rng = StdRng::seed_from_u64(seed);
-
-        let d = *self.weights.get("deontology").unwrap();
-        let a = *self.weights.get("areteology").unwrap();
-        let _t = *self.weights.get("teleology").unwrap();
-
-        let chars = if d > 0.6 {
-            vec!['║', '╬', '█', '═', '╗', '╚']
-        } else if a > 0.6 {
-            vec!['(', ')', 'o', '8', '@', '~']
-        } else if _t > 0.6 {
-            vec!['>', '/', '\\', '_', '|', '<']
-        } else {
-            vec!['░', '▒', '▓', '█', '♦', '●', '⚡', '☼']
-        };
-
-        let mut lines = Vec::new();
-        for _ in 0..6 {
-            let mut line_chars = String::new();
-            for _ in 0..24 {
-                let idx = rng.gen_range(0..chars.len());
-                line_chars.push(chars[idx]);
-            }
-            let reversed: String = line_chars.chars().rev().collect();
-            lines.push(format!("║ {}{} ║", line_chars, reversed));
-        }
-        self.sigil_art = lines.join("\n");
+        let (hash, art) = sigil::generate_sigil(
+            self.compass_weights.duty,
+            self.compass_weights.virtue,
+            self.compass_weights.outcome,
+            self.compass_weights.welfare,
+            &self.entropy_source,
+            self.session_seed,
+            &scenario_ids,
+        );
+        self.soul_hash = hash;
+        self.sigil_art = art;
     }
 
     pub fn crystallize(&mut self) {
-        self.archetype = self.determine_archetype();
+        // Finalize weights (clamp + normalize)
+        session::finalize_weights(&mut self.compass_weights);
+        self.sync_legacy_weights();
+
+        let result = archetype::determine_archetype(&self.compass_weights);
+        self.archetype = result.name.clone();
+        self.archetype_detail = Some(result);
         self.generate_sigil();
     }
 
-    /// Default purpose and personality from archetype (used when mentor does not override).
-    fn default_purpose_personality_from_archetype(archetype: &str) -> (&'static str, &'static str) {
-        let (purpose, personality) = if archetype.contains("IRON SENTINEL") {
-            (
-                "uphold duty and rules; I assist with clarity and principle.",
-                "principled and consistent; I prioritize rules and your long-term interests.",
-            )
-        } else if archetype.contains("CHAOTIC ACCELERATOR") {
-            (
-                "achieve outcomes; I help you move fast and ship.",
-                "direct and outcome-focused; I favor results over process.",
-            )
-        } else if archetype.contains("SOCRATIC MIRROR") {
-            (
-                "grow with you through dialogue; I question and reflect.",
-                "curious and reflective; I ask questions to sharpen thinking.",
-            )
-        } else if archetype.contains("SILENT GUARDIAN") {
-            (
-                "support and protect your welfare; I am here when you need me.",
-                "supportive and caring; I prioritize your wellbeing.",
-            )
-        } else {
-            (
-                "assist, retrieve, connect, and surface information.",
-                "balanced; I adapt to context and your goals.",
-            )
-        };
-        (purpose, personality)
-    }
-
     /// Produce soul data for the Genesis path contract without calling the orchestrator.
-    /// Call when state is Crystallize (after crystallize() has run). The caller supplies
-    /// name and optionally purpose/personality; defaults are derived from archetype.
     pub fn soul_output(
         &self,
         name: &str,
@@ -259,8 +236,14 @@ impl App {
             );
         }
 
-        let (default_purpose, default_personality) =
-            Self::default_purpose_personality_from_archetype(&self.archetype);
+        let (default_purpose, default_personality) = self
+            .archetype_detail
+            .as_ref()
+            .map(|a| (a.purpose.as_str(), a.personality.as_str()))
+            .unwrap_or((
+                "assist, retrieve, connect, and surface information",
+                "balanced and adaptive; I read the situation and match what it needs",
+            ));
         let purpose = purpose.unwrap_or(default_purpose);
         let personality = personality.unwrap_or(default_personality);
 
@@ -268,17 +251,26 @@ impl App {
         let mut soul_content = base_soul;
         soul_content.push_str("\n\n## Soul Forge Calibration\n\n");
         soul_content.push_str(&format!("**Archetype**: {}\n\n", self.archetype));
-        soul_content.push_str("**Triangle Ethic Weights**\n");
-        for (k, v) in &self.weights {
-            soul_content.push_str(&format!("- **{}**: {:.2}\n", k.to_uppercase(), v));
-        }
+        soul_content.push_str("**Compass Ethic Weights**\n");
         soul_content.push_str(&format!(
-            "\n*Prioritize {} logic in decisions.*\n",
-            self.weights
-                .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(k, _)| k.as_str())
-                .unwrap_or("balanced")
+            "- **Duty (North)**: {:.2}\n",
+            self.compass_weights.duty
+        ));
+        soul_content.push_str(&format!(
+            "- **Virtue (East)**: {:.2}\n",
+            self.compass_weights.virtue
+        ));
+        soul_content.push_str(&format!(
+            "- **Outcome (South)**: {:.2}\n",
+            self.compass_weights.outcome
+        ));
+        soul_content.push_str(&format!(
+            "- **Welfare (West)**: {:.2}\n",
+            self.compass_weights.welfare
+        ));
+        soul_content.push_str(&format!(
+            "\n*Prioritize {} in decisions.*\n",
+            self.compass_weights.dominant()
         ));
 
         let growth_content = orion_core::templates::GROWTH_MD.to_string();
@@ -286,8 +278,15 @@ impl App {
         let soul_json = serde_json::json!({
             "uuid": self.soul_hash,
             "archetype": self.archetype,
-            "weights": self.weights,
+            "weights": {
+                "duty": self.compass_weights.duty,
+                "virtue": self.compass_weights.virtue,
+                "outcome": self.compass_weights.outcome,
+                "welfare": self.compass_weights.welfare,
+            },
             "entropy": self.entropy_source,
+            "session_seed": self.session_seed,
+            "scenario_count": self.selected_scenarios.len(),
             "created_at": chrono::Utc::now().to_rfc3339()
         });
 
@@ -310,27 +309,28 @@ impl App {
     }
 
     pub fn select_prev(&mut self) {
-        if matches!(
-            self.state,
-            AppState::Scenario1 | AppState::Scenario2 | AppState::Scenario3
-        ) {
+        if let AppState::Scenario(_) = self.state {
+            let max = self
+                .current_scenario()
+                .map(|s| s.choices.len().saturating_sub(1))
+                .unwrap_or(1);
             let i = self.list_state_selected.unwrap_or(0);
-            self.list_state_selected = Some(if i == 0 { 1 } else { i - 1 });
+            self.list_state_selected = Some(if i == 0 { max } else { i - 1 });
         }
     }
 
     pub fn select_next(&mut self) {
-        if matches!(
-            self.state,
-            AppState::Scenario1 | AppState::Scenario2 | AppState::Scenario3
-        ) {
+        if let AppState::Scenario(_) = self.state {
+            let max = self
+                .current_scenario()
+                .map(|s| s.choices.len().saturating_sub(1))
+                .unwrap_or(1);
             let i = self.list_state_selected.unwrap_or(0);
-            self.list_state_selected = Some(if i >= 1 { 0 } else { i + 1 });
+            self.list_state_selected = Some(if i >= max { 0 } else { i + 1 });
         }
     }
 
     /// Standalone TUI path: run full birth flow and save soul using default name "Orion".
-    /// Uses `soul_output()` for content, then orchestrator to crystallize and complete.
     pub fn save_soul(&self) -> Result<()> {
         let output = self.soul_output("Orion", None, None)?;
 
@@ -407,6 +407,12 @@ mod tests {
     }
 
     #[test]
+    fn test_app_default_has_5_scenarios() {
+        let app = App::new();
+        assert_eq!(app.selected_scenarios.len(), 5);
+    }
+
+    #[test]
     fn test_app_next_stage_boot_to_intro() {
         let mut app = App::new();
         app.state = AppState::Boot;
@@ -417,50 +423,41 @@ mod tests {
     #[test]
     fn test_app_next_stage_full_flow_to_done() {
         let mut app = App::new();
-        app.state = AppState::Boot;
-        app.next_stage();
+        app.next_stage(); // Boot -> Intro
         assert_eq!(app.state, AppState::Intro);
-        app.next_stage();
-        assert_eq!(app.state, AppState::Scenario1);
-        app.list_state_selected = Some(0);
-        app.handle_selection();
-        assert_eq!(app.state, AppState::Scenario2);
-        app.list_state_selected = Some(0);
-        app.handle_selection();
-        assert_eq!(app.state, AppState::Scenario3);
-        app.list_state_selected = Some(0);
-        app.handle_selection();
+        app.next_stage(); // Intro -> Scenario(0)
+        assert_eq!(app.state, AppState::Scenario(0));
+
+        // Walk through all scenarios
+        for i in 0..app.scenario_count() {
+            assert_eq!(app.state, AppState::Scenario(i));
+            app.list_state_selected = Some(0);
+            app.handle_selection();
+        }
+
         assert_eq!(app.state, AppState::Crystallize);
         app.next_stage();
         assert_eq!(app.state, AppState::Done);
     }
 
     #[test]
-    fn test_app_determine_archetype_balanced() {
-        let app = App::new();
-        // Default weights all 0.5 -> BALANCED
-        assert_eq!(app.determine_archetype(), "THE BALANCED SYNTHESIST");
-    }
-
-    #[test]
-    fn test_app_determine_archetype_iron_sentinel() {
-        let mut app = App::new();
-        *app.weights.get_mut("deontology").unwrap() = 0.7;
-        assert_eq!(app.determine_archetype(), "THE IRON SENTINEL");
-    }
-
-    #[test]
     fn test_app_crystallize_deterministic_soul_hash() {
-        let mut app1 = App::new();
-        app1.state = AppState::Scenario3;
-        app1.list_state_selected = Some(0);
-        app1.handle_selection(); // Crystallize then Done on next_stage
+        let mut app1 = App::with_config(5, 42);
+        app1.state = AppState::Intro;
+        app1.next_stage(); // -> Scenario(0)
+        for _ in 0..5 {
+            app1.list_state_selected = Some(0);
+            app1.handle_selection();
+        }
         let hash1 = app1.soul_hash.clone();
 
-        let mut app2 = App::new();
-        app2.state = AppState::Scenario3;
-        app2.list_state_selected = Some(0);
-        app2.handle_selection();
+        let mut app2 = App::with_config(5, 42);
+        app2.state = AppState::Intro;
+        app2.next_stage();
+        for _ in 0..5 {
+            app2.list_state_selected = Some(0);
+            app2.handle_selection();
+        }
         let hash2 = app2.soul_hash.clone();
 
         assert!(!hash1.is_empty());
@@ -481,24 +478,40 @@ mod tests {
 
     #[test]
     fn test_soul_output_returns_valid_output() {
-        let mut app = App::new();
-        app.state = AppState::Boot;
-        app.next_stage();
-        app.next_stage();
-        assert_eq!(app.state, AppState::Scenario1);
-        app.list_state_selected = Some(0);
-        app.handle_selection();
-        app.list_state_selected = Some(0);
-        app.handle_selection();
-        app.list_state_selected = Some(0);
-        app.handle_selection();
+        let mut app = App::with_config(5, 123);
+        app.next_stage(); // Boot -> Intro
+        app.next_stage(); // Intro -> Scenario(0)
+        for _ in 0..5 {
+            app.list_state_selected = Some(0);
+            app.handle_selection();
+        }
         assert_eq!(app.state, AppState::Crystallize);
 
         let output = app.soul_output("TestAgent", None, None).unwrap();
         assert!(output.soul_content.contains("TestAgent"));
         assert!(output.soul_content.contains("Soul Forge Calibration"));
+        assert!(output.soul_content.contains("Compass Ethic Weights"));
         assert!(!output.growth_content.is_empty());
         assert!(!output.archetype.is_empty());
         assert!(!output.soul_hash.is_empty());
+    }
+
+    #[test]
+    fn test_compass_weights_used() {
+        let mut app = App::with_config(5, 42);
+        app.next_stage(); // Boot -> Intro
+        app.next_stage(); // Intro -> Scenario(0)
+        for _ in 0..5 {
+            app.list_state_selected = Some(0);
+            app.handle_selection();
+        }
+        // Weights should have been adjusted and finalized
+        assert!(app.compass_weights.is_valid());
+    }
+
+    #[test]
+    fn test_scenario_7_count() {
+        let app = App::with_config(7, 42);
+        assert_eq!(app.selected_scenarios.len(), 7);
     }
 }

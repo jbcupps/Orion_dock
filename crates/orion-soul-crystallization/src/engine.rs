@@ -45,8 +45,8 @@ pub struct CrystallizationEngine {
 impl CrystallizationEngine {
     pub fn new(depth: DepthLevel) -> Self {
         let initial_phase = match depth {
-            DepthLevel::QuickStart => CrystallizationPhase::SoulGeneration,
-            DepthLevel::Conversation | DepthLevel::DeepDive => CrystallizationPhase::Conversation,
+            DepthLevel::QuickStart => CrystallizationPhase::Crystallization,
+            DepthLevel::Conversation | DepthLevel::DeepDive => CrystallizationPhase::Lattice,
         };
 
         Self {
@@ -139,29 +139,31 @@ impl CrystallizationEngine {
 
     pub fn should_advance_phase(&self) -> bool {
         match self.current_phase {
-            CrystallizationPhase::Spark => false,
-            CrystallizationPhase::Conversation => {
+            CrystallizationPhase::Awakening => false,
+            CrystallizationPhase::Lattice => {
                 let ocean_ok = self.profile.avg_ocean_confidence() >= 0.4;
                 let moral_ok = self.profile.avg_moral_confidence() >= 0.3;
                 let attachment_ok = self.profile.attachment_confidence >= 0.5;
                 let hard_cap = self.turn_count >= 10;
                 (ocean_ok && moral_ok && attachment_ok) || hard_cap
             }
-            CrystallizationPhase::Mirror => self.profile.mirror_text.is_some(),
-            CrystallizationPhase::Forge => false,
-            CrystallizationPhase::SoulGeneration => true,
+            CrystallizationPhase::Reflection => self.profile.mirror_text.is_some(),
+            CrystallizationPhase::Crucible => false,
+            CrystallizationPhase::Crystallization => true,
             CrystallizationPhase::Complete => false,
         }
     }
 
     pub fn advance_phase(&mut self) -> Option<CrystallizationPhase> {
         let next = match (self.current_phase, self.depth) {
-            (CrystallizationPhase::Spark, _) => CrystallizationPhase::Conversation,
-            (CrystallizationPhase::Conversation, _) => CrystallizationPhase::Mirror,
-            (CrystallizationPhase::Mirror, DepthLevel::DeepDive) => CrystallizationPhase::Forge,
-            (CrystallizationPhase::Mirror, _) => CrystallizationPhase::SoulGeneration,
-            (CrystallizationPhase::Forge, _) => CrystallizationPhase::SoulGeneration,
-            (CrystallizationPhase::SoulGeneration, _) => CrystallizationPhase::Complete,
+            (CrystallizationPhase::Awakening, _) => CrystallizationPhase::Lattice,
+            (CrystallizationPhase::Lattice, _) => CrystallizationPhase::Reflection,
+            (CrystallizationPhase::Reflection, DepthLevel::DeepDive) => {
+                CrystallizationPhase::Crucible
+            }
+            (CrystallizationPhase::Reflection, _) => CrystallizationPhase::Crystallization,
+            (CrystallizationPhase::Crucible, _) => CrystallizationPhase::Crystallization,
+            (CrystallizationPhase::Crystallization, _) => CrystallizationPhase::Complete,
             (CrystallizationPhase::Complete, _) => return None,
         };
 
@@ -171,6 +173,8 @@ impl CrystallizationEngine {
 
     pub fn calibrate_ethics(&mut self) {
         self.profile.ethics_weights = calibrate_triangle_ethic(&self.profile);
+        self.profile.compass_weights =
+            crate::ethics_calibrator::calibrate_compass_ethic(&self.profile);
     }
 
     pub fn mark_question_used(&mut self, id: &str) {

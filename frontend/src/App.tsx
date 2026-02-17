@@ -20,6 +20,7 @@ import {
   updateTierModels,
   validateTierModels,
   type BirthStateResponse,
+  type GenesisStepRequest,
   type ProviderCatalogEntry,
   type RoutingTelemetry,
   type AgenticRunInfo,
@@ -35,6 +36,7 @@ import HiveScreen from './components/HiveScreen';
 import GenesisPathSelector from './components/GenesisPathSelector';
 import ForgeScenario from './components/ForgeScenario';
 import GenesisChat from './components/GenesisChat';
+import GenesisStepView from './components/GenesisStepView';
 import CrystallizationChat from './components/CrystallizationChat';
 import ApiKeyModal from './components/ApiKeyModal';
 import ConnectivityPanel from './components/ConnectivityPanel';
@@ -60,6 +62,7 @@ function App() {
     prompt?: string;
     choices?: string[];
   } | null>(null);
+  const [genesisInitialStep, setGenesisInitialStep] = useState<GenesisStepRequest | null>(null);
   const [birthState, setBirthState] = useState<BirthStateResponse | null>(null);
   const [birthStateLoading, setBirthStateLoading] = useState(false);
   const [birthStateError, setBirthStateError] = useState<string | null>(null);
@@ -336,6 +339,7 @@ function App() {
     setCurrentAgentId(null);
     setGenesisPathStarted(null);
     setForgeInitial(null);
+    setGenesisInitialStep(null);
     setBirthState(null);
     setBirthStateError(null);
     setConnectivityDone(false);
@@ -358,7 +362,7 @@ function App() {
   const handleGenesisStarted = useCallback(
     async (
       path: string,
-      data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[] }
+      data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[]; step?: GenesisStepRequest }
     ) => {
       setError(null);
       setGenesisPathStarted(path);
@@ -381,6 +385,12 @@ function App() {
           choices: data.choices,
         });
       }
+
+      // Unified genesis session step (new system)
+      if (data?.step) {
+        setGenesisInitialStep(data.step);
+      }
+
       setStatus((prev) =>
         prev ? { ...prev, birth_stage: 'Genesis' } : null
       );
@@ -408,6 +418,18 @@ function App() {
     },
     [currentAgentId]
   );
+
+  const handleGenesisStepComplete = useCallback(async () => {
+    setGenesisInitialStep(null);
+    if (currentAgentId) {
+      try {
+        const s = await fetchStatus();
+        setStatus(s);
+      } catch {
+        // poll will retry
+      }
+    }
+  }, [currentAgentId]);
 
   const [emergenceBusy, setEmergenceBusy] = useState(false);
   const handleCompleteEmergence = useCallback(async () => {
@@ -640,19 +662,28 @@ function App() {
     forgeInitial &&
     (status?.birth_stage === 'Genesis' || genesisPathStarted);
 
+  const showGenesisStepView =
+    currentAgentId &&
+    genesisInitialStep &&
+    status &&
+    !status.birth_complete &&
+    status.birth_stage === 'Genesis';
+
   const showGenesisChatPlaceholder =
     currentAgentId &&
     status &&
     !status.birth_complete &&
     status.birth_stage === 'Genesis' &&
-    genesisPathStarted === 'soul_crystallization';
+    genesisPathStarted === 'soul_crystallization' &&
+    !genesisInitialStep;
 
   const showGenesisChat =
     currentAgentId &&
     status &&
     !status.birth_complete &&
     status.birth_stage === 'Genesis' &&
-    genesisPathStarted === 'direct';
+    genesisPathStarted === 'direct' &&
+    !genesisInitialStep;
 
   const showEmergencePanel =
     currentAgentId &&
@@ -780,6 +811,7 @@ function App() {
           <section className="panel genesis-panel">
             <GenesisPathSelector
               agentId={currentAgentId}
+              mentorName={mentorName ?? undefined}
               onStarted={handleGenesisStarted}
               onError={setError}
             />
@@ -797,7 +829,18 @@ function App() {
             />
           </section>
         )}
-        {showEmergencePanel && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
+        {showGenesisStepView && !showForgeScenario && !showPathSelector && !showDarknessPanel && !showIgnitionPanel && (
+          <section className="panel genesis-chat-panel">
+            <h2>Genesis: {genesisPathStarted ?? 'Discovery'}</h2>
+            <GenesisStepView
+              agentId={currentAgentId!}
+              initialStep={genesisInitialStep!}
+              onComplete={handleGenesisStepComplete}
+              onError={setError}
+            />
+          </section>
+        )}
+        {showEmergencePanel && !showForgeScenario && !showGenesisStepView && !showDarknessPanel && !showIgnitionPanel && (
           <section className="panel birth-emergence-panel">
             <h2>Emergence</h2>
             <p className="phase-message">
@@ -813,7 +856,7 @@ function App() {
             </button>
           </section>
         )}
-        {showGenesisChat && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
+        {showGenesisChat && !showGenesisStepView && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
           <section className="panel genesis-chat-panel">
             <h2>Genesis: Direct Discovery</h2>
             <p className="phase-message">
@@ -828,7 +871,7 @@ function App() {
             />
           </section>
         )}
-        {showGenesisChatPlaceholder && !showForgeScenario && !showEmergencePanel && (
+        {showGenesisChatPlaceholder && !showGenesisStepView && !showForgeScenario && !showEmergencePanel && (
           <section className="panel genesis-chat-panel">
             <h2>Genesis: Soul Crystallization</h2>
             <p className="phase-message">
@@ -843,7 +886,7 @@ function App() {
             />
           </section>
         )}
-        {!showConnectivityPanel && !showPathSelector && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && !showGenesisChatPlaceholder && !showGenesisChat && !showEmergencePanel && (
+        {!showConnectivityPanel && !showPathSelector && !showForgeScenario && !showGenesisStepView && !showDarknessPanel && !showIgnitionPanel && !showGenesisChatPlaceholder && !showGenesisChat && !showEmergencePanel && (
           <section className="panel phase-panel">
             <h2>{phase}</h2>
             <p className="phase-message">{status ? phaseMessage : 'Loading…'}</p>

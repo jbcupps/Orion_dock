@@ -1,0 +1,17 @@
+[package]
+name = "genesis-soul-forge"
+version.workspace = true
+edition.workspace = true
+description = "Soul Forge genesis path: scenario-based ethical calibration with archetypes and sigils"
+
+[dependencies]
+genesis-core = { path = "../../crates/genesis-core" }
+orion-core = { path = "../../crates/orion-core" }
+soul-forge = { path = "../../crates/soul-forge" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

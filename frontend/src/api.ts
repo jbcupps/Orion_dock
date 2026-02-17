@@ -192,17 +192,103 @@ export async function fetchGenesisPaths(): Promise<GenesisPathItem[]> {
 export async function startGenesis(
   agentId: string,
   path: string,
-  depth?: string
-): Promise<{ ok: boolean; path: string; completed?: boolean; state?: string; prompt?: string; choices?: string[] }> {
+  depth?: string,
+  mentorName?: string
+): Promise<{
+  ok: boolean;
+  path: string;
+  completed?: boolean;
+  state?: string;
+  prompt?: string;
+  choices?: string[];
+  step?: GenesisStepRequest;
+}> {
   const base = getBaseUrl();
+  const body: Record<string, unknown> = { path };
+  if (depth) body.depth = depth;
+  if (mentorName) body.mentor_name = mentorName;
   const res = await apiFetch(`${base}/api/agents/${encodeURIComponent(agentId)}/genesis/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, depth }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Genesis start failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---- Unified Genesis Step Protocol ----
+
+export interface GenesisChoiceOption {
+  label: string;
+  description: string;
+}
+
+export interface GenesisFormField {
+  name: string;
+  label: string;
+  required: boolean;
+  default_value?: string;
+}
+
+export interface GenesisChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface GenesisManifest {
+  agent_name: string;
+  mentor_name: string;
+  archetype: string;
+  birth_method: string;
+  genesis_hash: string;
+  archetype_detail?: string;
+  sigil_art?: string;
+}
+
+export type GenesisStepRequest =
+  | { type: 'Complete'; manifest: GenesisManifest }
+  | { type: 'NeedUserMessage'; prompt: string; conversation: GenesisChatMessage[] }
+  | { type: 'NeedChoice'; prompt: string; choices: GenesisChoiceOption[]; metadata?: Record<string, unknown> }
+  | { type: 'NeedForm'; prompt: string; fields: GenesisFormField[] };
+
+export type GenesisStepResponse =
+  | { type: 'Message'; text: string }
+  | { type: 'Choice'; index: number }
+  | { type: 'Form'; values: Record<string, string> };
+
+export async function genesisStep(
+  agentId: string,
+  response: GenesisStepResponse
+): Promise<GenesisStepRequest> {
+  const base = getBaseUrl();
+  const res = await apiFetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/step`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(response),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Genesis step failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchGenesisSessionState(
+  agentId: string
+): Promise<{ active: boolean; path?: string; snapshot?: unknown }> {
+  const base = getBaseUrl();
+  const res = await apiFetch(
+    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/session/state`
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Genesis session state failed: ${res.status}`);
   }
   return res.json();
 }
@@ -218,6 +304,8 @@ export async function forgeSelect(
   soul_hash?: string;
   sigil_art?: string;
   weights?: Record<string, number>;
+  scenario_index?: number;
+  scenario_total?: number;
 }> {
   const base = getBaseUrl();
   const res = await apiFetch(

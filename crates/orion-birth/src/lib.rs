@@ -16,3 +16,9 @@ pub use chat::{
     parse_tool_requests, redact_api_keys, BirthChatResponse, BirthToolRequest,
 };
 pub use stages::{BirthOrchestrator, BirthStage, GenesisPath, SoulCrystallizationDepth};
+
+// Re-export genesis-core types for consumers that need the unified interface
+pub use genesis_core::{
+    CompassEthicWeights, GenesisContext, GenesisRegistry, GenesisStrategy, SoulManifest,
+    StepRequest, StepResponse,
+};

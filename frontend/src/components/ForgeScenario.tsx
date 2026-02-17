@@ -7,6 +7,8 @@ interface ForgeScenarioProps {
   initialState?: string;
   initialPrompt?: string;
   initialChoices?: string[];
+  initialScenarioIndex?: number;
+  initialScenarioTotal?: number;
   onComplete: (result: {
     archetype: string;
     soul_hash?: string;
@@ -22,12 +24,16 @@ export default function ForgeScenario({
   initialState,
   initialPrompt,
   initialChoices,
+  initialScenarioIndex,
+  initialScenarioTotal,
   onComplete,
   onError,
 }: ForgeScenarioProps) {
-  const [state, setState] = useState(initialState ?? 'scenario1');
+  const [_state, setState] = useState(initialState ?? 'scenario1');
   const [prompt, setPrompt] = useState(initialPrompt ?? '');
   const [choices, setChoices] = useState<string[]>(initialChoices ?? []);
+  const [scenarioIndex, setScenarioIndex] = useState(initialScenarioIndex ?? 0);
+  const [scenarioTotal, setScenarioTotal] = useState(initialScenarioTotal ?? 5);
   const [, setSelected] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{
@@ -61,6 +67,8 @@ export default function ForgeScenario({
       } else {
         setPrompt(data.prompt ?? '');
         setChoices(data.choices ?? []);
+        if (data.scenario_index !== undefined) setScenarioIndex(data.scenario_index);
+        if (data.scenario_total !== undefined) setScenarioTotal(data.scenario_total);
         setSelected(null);
       }
     } catch (e) {
@@ -146,12 +154,12 @@ export default function ForgeScenario({
     );
   }
 
-  const scenarioNum =
-    state === 'scenario1' ? 1 : state === 'scenario2' ? 2 : state === 'scenario3' ? 3 : 0;
+  // Dynamic scenario numbering: use tracked index or fall back to state string parsing
+  const scenarioNum = scenarioIndex + 1;
 
   return (
     <div className="forge-scenario">
-      <h3 className="forge-scenario-title">Calibration {scenarioNum}/3</h3>
+      <h3 className="forge-scenario-title">Calibration {scenarioNum}/{scenarioTotal}</h3>
       <div className="forge-scenario-prompt">{prompt}</div>
       <div className="forge-scenario-choices">
         {choices.map((choice, i) => (

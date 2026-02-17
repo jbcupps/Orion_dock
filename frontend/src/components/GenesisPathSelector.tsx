@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react';
-import { fetchGenesisPaths, startGenesis, type GenesisPathItem } from '../api';
+import { fetchGenesisPaths, startGenesis, type GenesisPathItem, type GenesisStepRequest } from '../api';
 import './GenesisPathSelector.css';
 
 interface GenesisPathSelectorProps {
   agentId: string;
+  mentorName?: string;
   onStarted: (
     path: string,
-    data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[] }
+    data?: {
+      completed?: boolean;
+      state?: string;
+      prompt?: string;
+      choices?: string[];
+      step?: GenesisStepRequest;
+    }
   ) => void | Promise<void>;
   onError: (message: string) => void;
 }
@@ -19,6 +26,7 @@ const DEPTH_OPTIONS: { value: string; label: string; time: string }[] = [
 
 export default function GenesisPathSelector({
   agentId,
+  mentorName,
   onStarted,
   onError,
 }: GenesisPathSelectorProps) {
@@ -57,13 +65,14 @@ export default function GenesisPathSelector({
     const key = depth ? `${item.id}:${depth}` : item.id;
     try {
       setStarting(key);
-      const data = await startGenesis(agentId, item.id, depth);
+      const data = await startGenesis(agentId, item.id, depth, mentorName);
       await Promise.resolve(
         onStarted(data.path, {
           completed: data.completed,
           state: data.state,
           prompt: data.prompt,
           choices: data.choices,
+          step: data.step,
         })
       );
     } catch (e) {

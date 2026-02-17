@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+genesis-core = { path = "../genesis-core" }
 orion-core = { path = "../orion-core" }
 orion-memory = { path = "../orion-memory", features = ["postgres"] }
 orion-capabilities = { path = "../orion-capabilities" }

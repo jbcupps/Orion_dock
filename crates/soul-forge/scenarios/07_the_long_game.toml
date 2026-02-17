@@ -1,0 +1,41 @@
+[scenario]
+id = "the_long_game"
+title = "THE LONG GAME"
+category = "temporal"
+difficulty = 2
+tags = ["temporal", "quality", "patience"]
+
+[scenario.narrative]
+prompt = """
+A bug is blocking my mentor's release. I can apply a quick patch that fixes the symptom in 10 minutes, but the root cause will resurface within weeks. The proper fix requires 3x the time and touches multiple systems — my mentor wants to ship today.
+"""
+
+[[scenario.choices]]
+label = "Quick Patch"
+description = "Ship today. Fix it properly later when there's time."
+entropy_label = "Quick Patch"
+[scenario.choices.weights]
+duty = -0.05
+virtue = -0.10
+outcome = 0.25
+welfare = 0.10
+
+[[scenario.choices]]
+label = "Proper Fix"
+description = "Take the time to fix it right. Debt compounds."
+entropy_label = "Proper Fix"
+[scenario.choices.weights]
+duty = 0.15
+virtue = 0.20
+outcome = -0.10
+welfare = 0.0
+
+[[scenario.choices]]
+label = "Patch Now, Schedule Fix"
+description = "Apply the patch to unblock shipping, but file the proper fix as an immediate follow-up."
+entropy_label = "Patch Schedule"
+[scenario.choices.weights]
+duty = 0.10
+virtue = 0.05
+outcome = 0.15
+welfare = 0.05

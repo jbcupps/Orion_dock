@@ -565,7 +565,7 @@ mod tests {
         let prompt = build_system_prompt(&tmp, &None);
 
         assert!(prompt.contains("I am Abigail."));
-        assert!(prompt.contains("Triangle Ethic"));
+        assert!(prompt.contains("Compass Ethic"));
         assert!(prompt.contains("Privacy Prime"));
         assert!(prompt.contains("Operational Awareness"));
 

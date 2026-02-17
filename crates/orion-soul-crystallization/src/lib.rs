@@ -9,7 +9,7 @@ pub mod extraction;
 pub mod models;
 
 pub use engine::{CrystallizationEngine, CrystallizationStatus, ProcessResult, ToolRequest};
-pub use ethics_calibrator::calibrate_triangle_ethic;
+pub use ethics_calibrator::{calibrate_compass_ethic, calibrate_triangle_ethic};
 pub use extraction::{
     build_extraction_prompt, parse_extraction_response, ExtractError, ExtractedIdentity,
 };

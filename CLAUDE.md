@@ -177,15 +177,17 @@ These principles appear at multiple layers:
 |-------|------|
 | `orion-core` | Config, keyring, DPAPI, templates, vault, verifier, secrets, document signing, email auth, provider presets |
 | `orion-memory` | SQLite (default) and Postgres (feature: `postgres`) store, migrations |
+| `genesis-core` | Shared genesis contract: GenesisStrategy trait, SoulManifest, CompassEthicWeights, StepRequest/StepResponse, GenesisRegistry |
 | `orion-birth` | Birth stage machine, chat runtime, prompts, Genesis path enum and dispatch |
-| `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction) |
+| `orion-soul-crystallization` | Depth-based psychometric engine (CrystallizationEngine, extraction, 4-dim Compass Ethic calibration) |
 | `orion-capabilities` | Cognitive (LLM) providers (OpenAI, Anthropic, local), sensory modules, provider model catalog |
 | `orion-router` | IdEgoRouter, tier-aware model override, ego model override, Pro council DAG |
 | `orion-email` | Email OAuth2 adapters (Gmail, Outlook) with PKCE |
 | `orion-api` | Axum HTTP API server |
 | `orion-uat` | Headless UAT driver |
 | `orion-skills` | Skill framework, MCP protocol, WASM runtime, sandbox, transport layer (IMAP, SMTP, service discovery) |
-| `soul-forge` | Scenario-based calibration (lib: `soul_output()` for Genesis path; TUI binary for standalone) |
+| `soul-forge` | Scenario-based calibration (14 TOML scenarios, 16 combinatorial archetypes, Compass Ethic weights, sigil generation) |
+| `genesis-paths/*` | GenesisStrategy implementations wrapping each genesis engine (quick-start, direct-discovery, soul-crystallization, soul-forge) |
 | `skills/*` | Skill plugins (filesystem, http, shell, web-search, web-browse, perplexity-search, email, proton-mail) |
 
 Orchestration is currently implemented as an MVP module at `crates/orion-api/src/orchestration.rs` (not yet split into a dedicated crate).
@@ -227,7 +229,7 @@ Capability categories (tracked in `CapabilityDescriptor.category`):
 - `/api/agents/:id/skills*` — Skill listing, missing secrets, direct execution
 - `/api/agents/:id/agent/*` — Agentic runs (start, stream, status, respond, confirm, cancel, list)
 - `/api/agents/:id/orchestration/*` — Scheduled jobs CRUD, run-now, and orchestration logs
-- `/api/genesis/paths` + `/api/agents/:id/genesis/*` — Genesis path selection and progression
+- `/api/genesis/paths` + `/api/agents/:id/genesis/*` — Genesis path selection, unified step protocol, and session state
 - `/api/agents/:id/tier-models` (GET/PUT) — Read/update per-provider tier model mappings
 - `/api/agents/:id/tier-models/refresh` (POST) — Refresh provider catalogs from upstream APIs
 - `/api/agents/:id/tier-models/validate` (POST) — Validate selected tier models against catalogs
@@ -273,16 +275,16 @@ Key functions: `generate_master_key()`, `sign_agent_lineage()`, `verify_agent_li
 
 ### Modular Genesis Paths
 
-Every Genesis path must produce `(name, purpose, personality)`. The caller uses `orion_core::templates::fill_soul_template` to generate soul markdown, then calls `BirthOrchestrator::crystallize_soul(soul_content, growth_content)`.
+Every Genesis path implements the `GenesisStrategy` trait from `genesis-core` and produces a `SoulManifest`. The unified step protocol uses `StepRequest` (NeedUserMessage, NeedChoice, NeedForm, Complete) and `StepResponse` (Message, Choice, Form) for all path types. The API manages sessions via `GenesisRegistry`.
 
 | Path | Mechanism |
 |------|-----------|
 | **Quick Start** | Auto-generate standard identity and constitutional documents from agent name. No ceremony — signs and completes immediately. (~5 sec) |
 | **Direct Discovery** | LLM chat with `GENESIS_SYSTEM_PROMPT`; `recommend_crystallize` tool. (~1 min) |
-| **Soul Crystallization** | `CrystallizationEngine` (Spark → Conversation → Mirror → Forge → SoulGeneration → Complete); depth-based (Quick Start/Conversation/Deep Dive). (30s–15min) |
-| **Soul Forge** | Three ethical dilemmas → Triangle Ethic weights, deterministic archetype, SHA-256 soul hash, visual sigil. (~2 min) |
+| **Soul Crystallization** | `CrystallizationEngine` (Awakening → Lattice → Reflection → Crucible → Crystallization → Complete); depth-based (Quick Start/Conversation/Deep Dive), 4-dim Compass Ethic calibration. (30s–15min) |
+| **Soul Forge** | 5-7 ethical dilemmas from 14 TOML scenarios → 4-dim Compass Ethic weights, 16 combinatorial archetypes (4 pure + 12 compound), SHA-256 soul hash, visual sigil. (~2 min) |
 
-New paths plug in by: (1) extending `GenesisPath` enum in orion-birth, (2) adding path-specific engine if needed, (3) producing soul_content + growth_content and calling `crystallize_soul`.
+New paths plug in by: (1) implementing `GenesisStrategy` in a `genesis-paths/*` crate, (2) registering the factory in `build_genesis_registry()` in `orion-api`, (3) producing a `SoulManifest` as the Complete step.
 
 ### Quick-Start Genesis Path
 
@@ -408,7 +410,7 @@ See `example.env` for the full list. Key variables:
 
 ## Cross-Repo Context (Phoenix Stack)
 
-Orion Dock is part of the **Phoenix** AI Ethical Stack. It shares the Triangle Ethic, Ed25519 identity, and constitutional document patterns with:
+Orion Dock is part of the **Phoenix** AI Ethical Stack. It shares the Compass Ethic (4-dimension: duty/virtue/outcome/welfare), Ed25519 identity, and constitutional document patterns with:
 - **SAO** (Secure Agent Orchestrator) — multi-agent coordination, identity verified via Ed25519.
 - **Ethical_AI_Reg** — ethics layer for scoring; potential Superego integration.
 - **abigail** — sister agent project.

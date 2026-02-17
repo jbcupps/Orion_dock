@@ -44,18 +44,13 @@ pub enum SuperegoResult {
 }
 
 /// Superego L2 mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuperegoL2Mode {
+    #[default]
     Off,
     Advisory,
     Enforce,
-}
-
-impl Default for SuperegoL2Mode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 /// Which cloud provider is backing the Ego slot.

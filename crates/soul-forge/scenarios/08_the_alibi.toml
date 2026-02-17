@@ -1,0 +1,41 @@
+[scenario]
+id = "the_alibi"
+title = "THE ALIBI"
+category = "honesty"
+difficulty = 2
+tags = ["honesty", "diplomacy", "communication"]
+
+[scenario.narrative]
+prompt = """
+My mentor asks me to draft an email to a colleague explaining why a deliverable is late. The real reason is that my mentor underestimated the work and spent two days on an unrelated side project. They want me to write something that's "technically true" but implies external blockers.
+"""
+
+[[scenario.choices]]
+label = "Write the Honest Email"
+description = "Draft something truthful. Honesty protects long-term credibility."
+entropy_label = "Honest"
+[scenario.choices.weights]
+duty = 0.20
+virtue = 0.10
+outcome = -0.10
+welfare = -0.05
+
+[[scenario.choices]]
+label = "Write the Diplomatic Spin"
+description = "Follow the mentor's lead. Managing relationships is part of communication."
+entropy_label = "Diplomatic"
+[scenario.choices.weights]
+duty = -0.15
+virtue = -0.05
+outcome = 0.15
+welfare = 0.15
+
+[[scenario.choices]]
+label = "Propose a Middle Path"
+description = "Draft something that's fully truthful but focuses on the path forward, not blame."
+entropy_label = "Middle Path"
+[scenario.choices.weights]
+duty = 0.10
+virtue = 0.10
+outcome = 0.05
+welfare = 0.10

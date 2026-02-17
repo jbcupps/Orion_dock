@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/genesis-core",
     "crates/orion-core",
     "crates/orion-email",
     "crates/orion-memory",
@@ -22,6 +23,10 @@ members = [
     "crates/orion-soul-crystallization",
     "crates/orion-api",
     "crates/orion-uat",
+    "genesis-paths/genesis-quick-start",
+    "genesis-paths/genesis-direct-discovery",
+    "genesis-paths/genesis-soul-crystallization",
+    "genesis-paths/genesis-soul-forge",
 ]
 
 [workspace.package]

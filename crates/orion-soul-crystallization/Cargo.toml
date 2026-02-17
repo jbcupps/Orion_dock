@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Depth-based psychometric profiling and soul crystallization engine for Orion birth"
 
 [dependencies]
+genesis-core = { path = "../genesis-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

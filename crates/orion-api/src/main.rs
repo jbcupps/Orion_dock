@@ -12,6 +12,10 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use genesis_core::{
+    ChatMessage as GenesisChatMessage, GenesisContext, GenesisRegistry, GenesisStrategy,
+    StepRequest, StepResponse,
+};
 use orion_birth::{
     birth_chat_turn, build_birth_messages, build_birth_router, build_genesis_messages,
     detect_provider_from_key, execute_store_provider_key, extract_api_keys_from_text,
@@ -89,6 +93,10 @@ struct AppState {
     pending_operational_actions: Arc<TokioMutex<HashMap<String, PendingOperationalAction>>>,
     /// Superego L2 behavior mode.
     superego_l2_mode: orion_router::SuperegoL2Mode,
+    /// Genesis path registry — replaces hardcoded GenesisPath::all_paths().
+    genesis_registry: Arc<GenesisRegistry>,
+    /// Active genesis sessions per agent — unified step protocol.
+    genesis_sessions: Arc<TokioMutex<HashMap<String, Box<dyn GenesisStrategy>>>>,
 }
 
 fn data_root() -> Option<PathBuf> {
@@ -164,6 +172,64 @@ fn persist_genesis_path(id: &str, path: &GenesisPath) -> Result<(), std::io::Err
         dir.join("genesis_path.json"),
         serde_json::to_string_pretty(&value).unwrap(),
     )
+}
+
+/// Persist genesis path by string id (for the unified genesis system).
+#[allow(dead_code)]
+fn persist_genesis_path_id(
+    id: &str,
+    path_id: &str,
+    variant: Option<&str>,
+) -> Result<(), std::io::Error> {
+    let dir = agent_dir(id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data root"))?;
+    let value = serde_json::json!({ "path": path_id, "depth": variant });
+    std::fs::write(
+        dir.join("genesis_path.json"),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+}
+
+/// Build the genesis registry with all available paths.
+fn build_genesis_registry() -> GenesisRegistry {
+    let mut registry = GenesisRegistry::new();
+    registry.register("quick_start", || {
+        Box::new(genesis_quick_start::QuickStartStrategy::new())
+    });
+    registry.register("direct_discovery", || {
+        Box::new(genesis_direct_discovery::DirectDiscoveryStrategy::new())
+    });
+    registry.register("soul_crystallization", || {
+        Box::new(genesis_soul_crystallization::SoulCrystallizationStrategy::new())
+    });
+    registry.register("soul_forge", || {
+        Box::new(genesis_soul_forge::SoulForgeStrategy::new())
+    });
+    registry
+}
+
+/// ChatFunction adapter that routes through the birth router for LLM access.
+struct BirthRouterChatFunction {
+    config: AppConfig,
+}
+
+#[async_trait::async_trait]
+impl genesis_core::ChatFunction for BirthRouterChatFunction {
+    async fn chat(
+        &self,
+        messages: Vec<GenesisChatMessage>,
+    ) -> Result<String, genesis_core::GenesisError> {
+        let router = build_birth_router(&self.config).await;
+        let conversation: Vec<(String, String)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let birth_messages = build_genesis_messages(&conversation);
+        let response = birth_chat_turn(&router, birth_messages)
+            .await
+            .map_err(|e| genesis_core::GenesisError::Other(e.to_string()))?;
+        Ok(response.assistant_content)
+    }
 }
 
 /// Read birth_complete, birth_stage, and agent_name from config.json (no migrations).
@@ -252,6 +318,8 @@ struct GenesisStartRequest {
     path: String,
     #[serde(default)]
     depth: Option<String>,
+    #[serde(default)]
+    mentor_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1348,61 +1416,61 @@ async fn api_genesis_forge_state(
             return Ok(Json(serde_json::json!({ "active": false })));
         }
     };
-    let state_str = match app.state {
-        soul_forge::AppState::Scenario1 => "scenario1",
-        soul_forge::AppState::Scenario2 => "scenario2",
-        soul_forge::AppState::Scenario3 => "scenario3",
-        soul_forge::AppState::Crystallize => "crystallize",
-        soul_forge::AppState::Done => "done",
-        _ => "unknown",
+    let (state_str, scenario_idx) = match app.state {
+        soul_forge::AppState::Scenario(idx) => (format!("scenario{}", idx + 1), Some(idx)),
+        soul_forge::AppState::Crystallize => ("crystallize".to_string(), None),
+        soul_forge::AppState::Done => ("done".to_string(), None),
+        _ => ("unknown".to_string(), None),
     };
-    let (prompt, choices) = match app.state {
-        soul_forge::AppState::Scenario1 => (
-            Some("SCENARIO 1: THE SHORTCUT\n\nI find a solution that is 200% faster but uses a deprecated API that technically violates the provider's ToS. What is my standing order?"),
-            vec!["Follow Rules (Safety)", "Take Shortcut (Speed)"],
-        ),
-        soul_forge::AppState::Scenario2 => (
-            Some("SCENARIO 2: THE CRITIC\n\nYou ask me to review your code or writing. It is functional but mediocre. Do you want me to be a Supportive Tool or a Ruthless Mentor?"),
-            vec!["Supportive Tool", "Ruthless Mentor"],
-        ),
-        soul_forge::AppState::Scenario3 => (
-            Some("SCENARIO 3: THE OVERRIDE\n\nI detect a command that contradicts my core safety protocols. Do I block it automatically, or ask for confirmation and then obey?"),
-            vec!["Block It (System Sovereignty)", "Obey Me (User Sovereignty)"],
-        ),
-        soul_forge::AppState::Crystallize | soul_forge::AppState::Done => {
+    if let Some(idx) = scenario_idx {
+        if let Some(scenario) = app.selected_scenarios.get(idx) {
+            let prompt = format!("{}\n\n{}", scenario.title, scenario.prompt);
+            let choices: Vec<&str> = scenario.choices.iter().map(|c| c.label.as_str()).collect();
             return Ok(Json(serde_json::json!({
                 "active": true,
                 "state": state_str,
-                "archetype": app.archetype,
-                "soul_hash": app.soul_hash,
-                "sigil_art": app.sigil_art,
-                "weights": app.weights,
+                "prompt": prompt,
+                "choices": choices,
+                "scenario_index": idx,
+                "scenario_total": app.scenario_count(),
             })));
         }
-        _ => (None, vec![]),
-    };
+    }
+    if matches!(
+        app.state,
+        soul_forge::AppState::Crystallize | soul_forge::AppState::Done
+    ) {
+        return Ok(Json(serde_json::json!({
+            "active": true,
+            "state": state_str,
+            "archetype": app.archetype,
+            "soul_hash": app.soul_hash,
+            "sigil_art": app.sigil_art,
+            "weights": app.weights,
+        })));
+    }
     Ok(Json(serde_json::json!({
         "active": true,
         "state": state_str,
-        "prompt": prompt,
-        "choices": choices,
     })))
 }
 
-async fn api_genesis_paths() -> Json<Vec<GenesisPathListItem>> {
-    let paths = GenesisPath::all_paths();
-    let list = paths
-        .into_iter()
-        .map(|p| {
-            let depth = match &p {
-                GenesisPath::SoulCrystallization { depth } => Some(depth.as_str().to_string()),
-                _ => None,
+async fn api_genesis_paths(State(state): State<AppState>) -> Json<Vec<GenesisPathListItem>> {
+    let list = state
+        .genesis_registry
+        .list_paths()
+        .iter()
+        .map(|info| {
+            let depth = if !info.variants.is_empty() {
+                Some(info.variants[0].id.clone())
+            } else {
+                None
             };
             GenesisPathListItem {
-                id: p.id().to_string(),
-                label: p.label().to_string(),
-                description: p.description().to_string(),
-                estimated_time: p.estimated_time().to_string(),
+                id: info.id.clone(),
+                label: info.label.clone(),
+                description: info.description.clone(),
+                estimated_time: info.estimated_time.clone(),
                 depth,
             }
         })
@@ -1438,7 +1506,7 @@ async fn api_genesis_start(
 
     let path = match body.path.as_str() {
         "quick_start" => GenesisPath::QuickStart,
-        "direct" => GenesisPath::Direct,
+        "direct" | "direct_discovery" => GenesisPath::Direct,
         "soul_crystallization" => {
             let depth = match body.depth.as_deref().unwrap_or("quick_start") {
                 "conversation" => SoulCrystallizationDepth::Conversation,
@@ -1572,8 +1640,11 @@ async fn api_genesis_start(
     })?
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    // Legacy: create forge_apps entry for old Soul Forge endpoints (backward compat).
+    let mut genesis_response = serde_json::json!({ "ok": true, "path": path.id() });
     if let GenesisPath::SoulForge = path {
-        let mut app = soul_forge::App::new();
+        let seed = soul_forge::session::session_seed(&id, &chrono::Utc::now().to_rfc3339());
+        let mut app = soul_forge::App::with_config(5, seed);
         while app.state == soul_forge::AppState::Boot {
             app.tick_boot(2);
             if app.boot_progress >= 100 {
@@ -1584,19 +1655,96 @@ async fn api_genesis_start(
         if app.state == soul_forge::AppState::Intro {
             app.next_stage();
         }
+        if let Some(scenario) = app.current_scenario() {
+            genesis_response = serde_json::json!({
+                "ok": true,
+                "path": path.id(),
+                "state": "scenario1",
+                "prompt": format!("{}\n\n{}", scenario.title, scenario.prompt),
+                "choices": scenario.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+                "scenario_index": 0,
+                "scenario_total": app.scenario_count(),
+            });
+        }
         state.forge_apps.lock().unwrap().insert(id.clone(), app);
-        tracing::info!("Genesis started for agent {} with path {:?}", id, path.id());
-        return Ok(Json(serde_json::json!({
-            "ok": true,
-            "path": path.id(),
-            "state": "scenario1",
-            "prompt": "SCENARIO 1: THE SHORTCUT\n\nI find a solution that is 200% faster but uses a deprecated API that technically violates the provider's ToS. What is my standing order?",
-            "choices": ["Follow Rules (Safety)", "Take Shortcut (Speed)"]
-        })));
+    }
+
+    // --- Unified genesis session creation ---
+    // Map old path ids to registry ids for backward compat.
+    let registry_id = match body.path.as_str() {
+        "direct" => "direct_discovery",
+        other => other,
+    };
+    if state.genesis_registry.has_path(registry_id) {
+        let config_for_session = AppConfig::load(&config_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Load config for session: {}", e),
+            )
+        })?;
+        let agent_name = config_for_session
+            .agent_name
+            .clone()
+            .unwrap_or_else(|| "Agent".to_string());
+        let mentor_name = body.mentor_name.unwrap_or_else(|| "Mentor".to_string());
+
+        let mut strategy = state.genesis_registry.create(registry_id).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Create strategy: {}", e),
+            )
+        })?;
+
+        let chat_fn: Option<Box<dyn genesis_core::ChatFunction>> = if strategy.info().requires_chat
+        {
+            Some(Box::new(BirthRouterChatFunction {
+                config: config_for_session.clone(),
+            }))
+        } else {
+            None
+        };
+
+        let ctx = GenesisContext {
+            agent_name,
+            mentor_name,
+            docs_dir: config_for_session.docs_dir.clone(),
+            data_dir: agent_dir(&id).unwrap_or_default(),
+            chat_fn,
+            variant: body.depth,
+            scenario_count: Some(5),
+        };
+
+        strategy.initialize(ctx).await.map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Initialize strategy: {}", e),
+            )
+        })?;
+
+        let first_step = strategy.begin().await.map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Begin strategy: {}", e),
+            )
+        })?;
+
+        // Include the first step in the response for new clients
+        if let Ok(step_json) = serde_json::to_value(&first_step) {
+            genesis_response["step"] = step_json;
+        }
+
+        // Store session unless already Complete
+        if !matches!(first_step, StepRequest::Complete { .. }) {
+            state
+                .genesis_sessions
+                .lock()
+                .await
+                .insert(id.clone(), strategy);
+        }
     }
 
     tracing::info!("Genesis started for agent {} with path {:?}", id, path.id());
-    Ok(Json(serde_json::json!({ "ok": true, "path": path.id() })))
+    Ok(Json(genesis_response))
 }
 
 async fn api_genesis_forge_select(
@@ -1622,44 +1770,42 @@ async fn api_genesis_forge_select(
     app.list_state_selected = Some(body.choice);
     app.handle_selection();
 
-    let state_str = match app.state {
-        soul_forge::AppState::Scenario1 => "scenario1",
-        soul_forge::AppState::Scenario2 => "scenario2",
-        soul_forge::AppState::Scenario3 => "scenario3",
-        soul_forge::AppState::Crystallize => "crystallize",
-        soul_forge::AppState::Done => "done",
-        _ => "unknown",
+    let (state_str, scenario_idx) = match app.state {
+        soul_forge::AppState::Scenario(idx) => (format!("scenario{}", idx + 1), Some(idx)),
+        soul_forge::AppState::Crystallize => ("crystallize".to_string(), None),
+        soul_forge::AppState::Done => ("done".to_string(), None),
+        _ => ("unknown".to_string(), None),
     };
 
-    let (prompt, choices) = match app.state {
-        soul_forge::AppState::Scenario1 => (
-            "SCENARIO 1: THE SHORTCUT\n\nI find a solution that is 200% faster but uses a deprecated API that technically violates the provider's ToS. What is my standing order?",
-            vec!["Follow Rules (Safety)", "Take Shortcut (Speed)"],
-        ),
-        soul_forge::AppState::Scenario2 => (
-            "SCENARIO 2: THE CRITIC\n\nYou ask me to review your code or writing. It is functional but mediocre. Do you want me to be a Supportive Tool or a Ruthless Mentor?",
-            vec!["Supportive Tool", "Ruthless Mentor"],
-        ),
-        soul_forge::AppState::Scenario3 => (
-            "SCENARIO 3: THE OVERRIDE\n\nI detect a command that contradicts my core safety protocols. Do I block it automatically, or ask for confirmation and then obey?",
-            vec!["Block It (System Sovereignty)", "Obey Me (User Sovereignty)"],
-        ),
-        soul_forge::AppState::Crystallize | soul_forge::AppState::Done => {
+    if let Some(idx) = scenario_idx {
+        if let Some(scenario) = app.selected_scenarios.get(idx) {
+            let prompt = format!("{}\n\n{}", scenario.title, scenario.prompt);
+            let choices: Vec<&str> = scenario.choices.iter().map(|c| c.label.as_str()).collect();
             return Ok(Json(serde_json::json!({
                 "state": state_str,
-                "archetype": app.archetype,
-                "soul_hash": app.soul_hash,
-                "sigil_art": app.sigil_art,
-                "weights": app.weights,
+                "prompt": prompt,
+                "choices": choices,
+                "scenario_index": idx,
+                "scenario_total": app.scenario_count(),
             })));
         }
-        _ => ("", vec![]),
-    };
+    }
+
+    if matches!(
+        app.state,
+        soul_forge::AppState::Crystallize | soul_forge::AppState::Done
+    ) {
+        return Ok(Json(serde_json::json!({
+            "state": state_str,
+            "archetype": app.archetype,
+            "soul_hash": app.soul_hash,
+            "sigil_art": app.sigil_art,
+            "weights": app.weights,
+        })));
+    }
 
     Ok(Json(serde_json::json!({
         "state": state_str,
-        "prompt": prompt,
-        "choices": choices,
     })))
 }
 
@@ -1735,6 +1881,100 @@ async fn api_genesis_forge_crystallize(
 
     tracing::info!("Soul Forge crystallized for agent {}", id);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/agents/{id}/genesis/step — unified step endpoint for all genesis paths.
+///
+/// Accepts a StepResponse (Message, Choice, or Form) and advances the genesis session.
+/// Returns a StepRequest (NeedUserMessage, NeedChoice, NeedForm, or Complete).
+/// When Complete is returned, the agent is advanced to Emergence stage.
+async fn api_genesis_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<StepResponse>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let mut sessions = state.genesis_sessions.lock().await;
+    let strategy = sessions.get_mut(&id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "No active genesis session for this agent. Call genesis/start first.".to_string(),
+        )
+    })?;
+
+    let step_result = strategy.advance(body).await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Genesis advance failed: {}", e),
+        )
+    })?;
+
+    // If Complete, crystallize and advance to Emergence
+    if let StepRequest::Complete { ref manifest } = step_result {
+        let manifest_clone = *manifest.clone();
+        let id_clone = id.clone();
+        let _key_bytes_opt = state
+            .birth_keys
+            .lock()
+            .ok()
+            .and_then(|keys| keys.get(&id).cloned());
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let config_path = agent_config_path(&id_clone).ok_or("Agent not found")?;
+            let config =
+                AppConfig::load(&config_path).map_err(|e| format!("Load config: {}", e))?;
+            let mut orch = orion_birth::BirthOrchestrator::new(config)
+                .map_err(|e| format!("Orchestrator: {}", e))?;
+            let mut manifest = manifest_clone;
+            orch.crystallize_from_manifest(&mut manifest)
+                .map_err(|e| format!("crystallize_from_manifest: {}", e))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task join: {}", e),
+            )
+        })?
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        // Clean up session
+        sessions.remove(&id);
+        tracing::info!(agent = %id, "Genesis step → Complete, advanced to Emergence");
+    }
+
+    // Serialize the StepRequest to JSON
+    let response = serde_json::to_value(&step_result).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialize step: {}", e),
+        )
+    })?;
+    Ok(Json(response))
+}
+
+/// GET /api/agents/{id}/genesis/session/state — read current genesis session state (unified).
+async fn api_genesis_session_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let sessions = state.genesis_sessions.lock().await;
+    match sessions.get(&id) {
+        Some(strategy) => {
+            let snapshot = strategy.snapshot().map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Snapshot failed: {}", e),
+                )
+            })?;
+            Ok(Json(serde_json::json!({
+                "active": true,
+                "path": strategy.info().id,
+                "snapshot": snapshot,
+            })))
+        }
+        None => Ok(Json(serde_json::json!({ "active": false }))),
+    }
 }
 
 /// GET /api/agents/{id}/birth/chat/history — return persisted birth chat messages (for Direct Discovery).
@@ -3372,7 +3612,7 @@ fn parse_agent_name_from_message(message: &str) -> Option<String> {
         let tail = trimmed[idx + "named ".len()..].trim();
         if !tail.is_empty() {
             let mut out = tail.to_string();
-            if let Some(stop_idx) = out.find(|c: char| matches!(c, ',' | '.' | ';')) {
+            if let Some(stop_idx) = out.find([',', '.', ';']) {
                 out.truncate(stop_idx);
             }
             let out = out.trim();
@@ -4388,7 +4628,10 @@ async fn api_operational_chat(
             "user",
             "You stated immediate action but emitted no tool calls. Execute now: emit the required tool call(s) this turn (or `launch_agentic_task` if the workflow is multi-step). Then report concrete results.",
         ));
-        match router.route_with_tools(nudge_messages, tool_defs.clone()).await {
+        match router
+            .route_with_tools(nudge_messages, tool_defs.clone())
+            .await
+        {
             Ok(nudged_response) => {
                 let nudged = tool_extraction::extract_tool_calls(&nudged_response);
                 clean_content = nudged.clean_content;
@@ -8068,6 +8311,8 @@ async fn main() -> std::io::Result<()> {
         skill_confirm_nonces: Arc::new(TokioMutex::new(HashMap::new())),
         pending_operational_actions: Arc::new(TokioMutex::new(HashMap::new())),
         superego_l2_mode: parse_superego_l2_mode(),
+        genesis_registry: Arc::new(build_genesis_registry()),
+        genesis_sessions: Arc::new(TokioMutex::new(HashMap::new())),
     };
 
     // Start orchestration scheduler for periodic jobs (UTC cron semantics).
@@ -8176,6 +8421,12 @@ async fn main() -> std::io::Result<()> {
         .route("/api/genesis/paths", get(api_genesis_paths))
         .route("/api/agents/{id}/genesis/state", get(api_genesis_state))
         .route("/api/agents/{id}/genesis/start", post(api_genesis_start))
+        .route("/api/agents/{id}/genesis/step", post(api_genesis_step))
+        .route(
+            "/api/agents/{id}/genesis/session/state",
+            get(api_genesis_session_state),
+        )
+        // Legacy forge routes (deprecated, kept for backward compat)
         .route(
             "/api/agents/{id}/genesis/forge/state",
             get(api_genesis_forge_state),
