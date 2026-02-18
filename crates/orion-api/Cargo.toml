@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["json", "macros", "multipart"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 orion-core = { path = "../orion-core" }
 orion-birth = { path = "../orion-birth" }
 orion-capabilities = { path = "../orion-capabilities" }
