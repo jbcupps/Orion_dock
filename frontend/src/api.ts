@@ -18,13 +18,6 @@ function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respons
   return fetch(input, { ...init, headers });
 }
 
-/** Append ?token= for EventSource (SSE) when API token is configured. */
-function authUrl(url: string): string {
-  const token = getApiToken();
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
-}
 
 export interface HealthResponse {
   status: string;
@@ -293,36 +286,6 @@ export async function fetchGenesisSessionState(
   return res.json();
 }
 
-export async function forgeSelect(
-  agentId: string,
-  choice: number
-): Promise<{
-  state: string;
-  prompt?: string;
-  choices?: string[];
-  archetype?: string;
-  soul_hash?: string;
-  sigil_art?: string;
-  weights?: Record<string, number>;
-  scenario_index?: number;
-  scenario_total?: number;
-}> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/select`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ choice }),
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Forge select failed: ${res.status}`);
-  }
-  return res.json();
-}
-
 export async function fetchGenesisState(
   agentId: string
 ): Promise<{ path: string | null; depth?: string | null }> {
@@ -333,59 +296,6 @@ export async function fetchGenesisState(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Genesis state failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function fetchForgeState(
-  agentId: string
-): Promise<{
-  active: boolean;
-  state?: string;
-  prompt?: string;
-  choices?: string[];
-  archetype?: string;
-  soul_hash?: string;
-  sigil_art?: string;
-  weights?: Record<string, number>;
-}> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/state`
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Forge state failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-export interface ForgeCrystallizeBody {
-  name: string;
-  purpose?: string;
-  personality?: string;
-}
-
-export async function forgeCrystallize(
-  agentId: string,
-  body: ForgeCrystallizeBody
-): Promise<{ ok: boolean }> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/genesis/forge/crystallize`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: body.name.trim(),
-        purpose: body.purpose?.trim() || undefined,
-        personality: body.personality?.trim() || undefined,
-      }),
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Forge crystallize failed: ${res.status}`);
   }
   return res.json();
 }
@@ -405,44 +315,6 @@ export async function completeEmergence(agentId: string): Promise<void> {
 export interface BirthChatMessageItem {
   role: string;
   content: string;
-}
-
-export async function fetchBirthChatHistory(
-  agentId: string
-): Promise<{ messages: BirthChatMessageItem[] }> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat/history`
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Birth chat history failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function sendBirthChat(
-  agentId: string,
-  message: string
-): Promise<{
-  assistant_content: string;
-  tool_requests: { name: string; arguments: unknown }[];
-  crystallized?: boolean;
-}> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/birth/chat`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: message.trim() }),
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Birth chat failed: ${res.status}`);
-  }
-  return res.json();
 }
 
 // ---- Connectivity API ----
@@ -839,6 +711,8 @@ export function sendChatStream(
 ): AbortController {
   const base = getBaseUrl();
   const controller = new AbortController();
+  // Abort after 2 minutes if no response completes
+  const timeoutId = setTimeout(() => controller.abort(), 120_000);
   const payload: Record<string, unknown> = { message: message.trim() };
   if (routerMode) payload.router_mode = routerMode;
   if (attachmentIds.length > 0) payload.attachment_ids = attachmentIds;
@@ -898,7 +772,8 @@ export function sendChatStream(
                   break;
               }
             } catch {
-              // ignore parse errors
+              // Surface parse failures so the UI doesn't hang silently
+              callbacks?.onError?.(`Malformed SSE data for event "${eventType}": ${data.slice(0, 200)}`);
             }
           }
         }
@@ -907,6 +782,8 @@ export function sendChatStream(
       if ((e as Error).name !== 'AbortError') {
         callbacks?.onError?.((e as Error).message || 'Stream failed');
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   })();
 
@@ -1264,39 +1141,55 @@ export function subscribeToAgenticStream(
   agentId: string,
   taskId: string,
   onEvent: (eventName: string, data: unknown) => void,
-  onError?: (error: Event) => void
-): EventSource {
+  onError?: (error: unknown) => void
+): { close: () => void } {
   const base = getBaseUrl();
-  const url = authUrl(`${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`);
-  const es = new EventSource(url);
+  const url = `${base}/api/agents/${encodeURIComponent(agentId)}/agent/stream?task=${encodeURIComponent(taskId)}`;
+  const controller = new AbortController();
 
-  const eventTypes = [
-    'thinking',
-    'tool_call',
-    'tool_result',
-    'mentor_needed',
-    'confirmation_needed',
-    'done',
-    'error',
-    'lagged',
-  ];
-
-  for (const eventType of eventTypes) {
-    es.addEventListener(eventType, (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        onEvent(eventType, data);
-      } catch {
-        onEvent(eventType, event.data);
+  (async () => {
+    try {
+      const res = await apiFetch(url, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        onError?.(new Error(`SSE stream failed: ${res.status}`));
+        return;
       }
-    });
-  }
+      const reader = res.body?.getReader();
+      if (!reader) { onError?.(new Error('No response body')); return; }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            try {
+              const parsed = JSON.parse(data);
+              if (eventType) onEvent(eventType, parsed);
+            } catch {
+              if (eventType) onEvent(eventType, data);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        onError?.(e);
+      }
+    }
+  })();
 
-  if (onError) {
-    es.onerror = onError;
-  }
-
-  return es;
+  return { close: () => controller.abort() };
 }
 
 export interface AgenticTaskStatusResponse {
@@ -1487,9 +1380,9 @@ export async function exportAgent(
   const res = await apiFetch(
     `${base}/api/agents/${encodeURIComponent(agentId)}/export`,
     {
-      headers: {
-        'x-orion-private-key': trimmedKey,
-      },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ private_key: trimmedKey }),
     }
   );
   if (!res.ok) {
@@ -1540,6 +1433,49 @@ export async function importAgent(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `Import failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---- Skills API ----
+
+export interface SkillToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  trust_tier: string;
+  tools: SkillToolInfo[];
+}
+
+export interface MissingSkillSecret {
+  skill_id: string;
+  skill_name: string;
+  secret_name: string;
+  secret_description: string;
+  required: boolean;
+}
+
+export async function fetchSkills(agentId: string): Promise<SkillInfo[]> {
+  const base = getBaseUrl();
+  const res = await apiFetch(`${base}/api/agents/${agentId}/skills`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch skills failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchMissingSecrets(agentId: string): Promise<MissingSkillSecret[]> {
+  const base = getBaseUrl();
+  const res = await apiFetch(`${base}/api/agents/${agentId}/skills/missing-secrets`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Fetch missing secrets failed: ${res.status}`);
   }
   return res.json();
 }

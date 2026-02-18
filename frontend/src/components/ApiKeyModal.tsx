@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import { storeProviderKey } from '../api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 const PROVIDER_PLACEHOLDERS: Record<string, string> = {
   openai: 'sk-...',
@@ -66,10 +67,15 @@ export default function ApiKeyModal({
   );
 
   const placeholder = PROVIDER_PLACEHOLDERS[provider] || 'API key';
+  const trapRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
     <div className="api-key-modal-overlay" onClick={onClose}>
       <div
+        ref={trapRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${provider} API key`}
         className="api-key-modal"
         onClick={(e) => e.stopPropagation()}
       >

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::RwLock;
 
-use orion_core::secrets::SecretsVault;
+use orion_core::skill_keychain::SkillKeychain;
 use orion_skills::capability::email::{
     EmailProviderCapabilities, EmailTransportCapability, EmailTransportInfo, FetchOptions,
     OutgoingEmail,
@@ -38,7 +38,7 @@ pub struct ProtonMailSkill {
     /// Lazily-initialized IMAP transport. Set by `initialize()` or on first tool call.
     transport: tokio::sync::OnceCell<Arc<RwLock<ProtonMailTransport>>>,
     /// Shared secrets vault for lazy credential lookup.
-    vault: Option<Arc<Mutex<SecretsVault>>>,
+    vault: Option<Arc<Mutex<SkillKeychain>>>,
     event_sender: Option<Arc<tokio::sync::broadcast::Sender<SkillEvent>>>,
 }
 
@@ -102,7 +102,7 @@ impl ProtonMailSkill {
 
     /// Create with vault access — enables lazy IMAP initialization on first tool call.
     /// Reads "protonmail" (password) and "protonmail_user" (email address) from vault.
-    pub fn with_secrets(manifest: SkillManifest, vault: Arc<Mutex<SecretsVault>>) -> Self {
+    pub fn with_secrets(manifest: SkillManifest, vault: Arc<Mutex<SkillKeychain>>) -> Self {
         Self {
             manifest,
             transport: tokio::sync::OnceCell::new(),

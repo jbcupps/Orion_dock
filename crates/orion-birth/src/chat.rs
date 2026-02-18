@@ -4,7 +4,7 @@
 use crate::prompts::system_prompt_for_stage_with_context;
 use crate::stages::{BirthOrchestrator, BirthStage};
 use orion_capabilities::cognitive::Message;
-use orion_core::{AppConfig, RoutingMode, SecretsVault, TrinityConfig};
+use orion_core::{AppConfig, ProviderKeyring, RoutingMode, SkillKeychain, TrinityConfig};
 use orion_router::IdEgoRouter;
 use serde::{Deserialize, Serialize};
 
@@ -84,18 +84,18 @@ pub async fn build_birth_router(config: &AppConfig) -> IdEgoRouter {
 }
 
 fn ego_from_config(config: &AppConfig) -> (Option<String>, Option<String>) {
-    // First try vault (namespaced provider keys)
-    if let Ok(vault) = SecretsVault::load(config.data_dir.clone()) {
+    // First try provider keyring (bare provider names, no prefix)
+    if let Ok(keyring) = ProviderKeyring::load(config.data_dir.clone()) {
         if let Some(ref trinity) = config.trinity {
             if let Some(ref provider) = trinity.ego_provider {
-                if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
+                if let Some(key) = keyring.get_key_str(provider) {
                     return (Some(provider.clone()), Some(key.to_string()));
                 }
             }
         }
-        // Fallback: check vault for preferred providers
+        // Fallback: check keyring for preferred providers
         for provider in &["anthropic", "openai"] {
-            if let Some(key) = vault.get_secret(&format!("provider:{}", provider)) {
+            if let Some(key) = keyring.get_key_str(provider) {
                 return (Some(provider.to_string()), Some(key.to_string()));
             }
         }
@@ -175,6 +175,7 @@ pub fn extract_api_keys_from_text(text: &str) -> Vec<(&'static str, String)> {
 }
 
 /// Known provider names accepted by the store_provider_key tool.
+/// Note: tavily is a skill secret (not an LLM provider) and routes to SkillKeychain.
 const ALLOWED_PROVIDERS: &[&str] = &[
     "openai",
     "anthropic",
@@ -184,14 +185,20 @@ const ALLOWED_PROVIDERS: &[&str] = &[
     "tavily",
 ];
 
-/// Execute the store_provider_key tool: resolve provider (including "auto"), store in vault
-/// with namespaced key (`provider:{name}`), update config provider name (not the key), save.
+/// Execute the store_provider_key tool: resolve provider (including "auto"), store in keyring
+/// (bare name, no prefix), update config provider name (not the key), save.
+///
+/// - Tavily routes to `skill_keychain` only (not an LLM provider).
+/// - Perplexity is dual-use: stored in both keyring and skill_keychain.
+/// - All other LLM providers go to the keyring only.
+///
 /// Returns the resolved provider name so the caller can rebuild the router.
 pub fn execute_store_provider_key(
-    vault: &mut SecretsVault,
+    keyring: &mut ProviderKeyring,
     config: &mut AppConfig,
     provider: &str,
     key: &str,
+    skill_keychain: Option<&mut SkillKeychain>,
 ) -> anyhow::Result<String> {
     let key = key.trim();
     if key.is_empty() {
@@ -214,21 +221,42 @@ pub fn execute_store_provider_key(
             ALLOWED_PROVIDERS.join(", ")
         );
     }
-    vault.set_secret(&format!("provider:{}", resolved), key);
-    vault
-        .save()
-        .map_err(|e| anyhow::anyhow!("Failed to save vault: {}", e))?;
+
+    if resolved == "tavily" {
+        // Tavily is a skill secret, not an LLM provider.
+        if let Some(kc) = skill_keychain {
+            kc.set_secret("tavily", key);
+            kc.save()
+                .map_err(|e| anyhow::anyhow!("Failed to save skill keychain: {}", e))?;
+        }
+    } else {
+        keyring.set_key_str(&resolved, key);
+        keyring
+            .save()
+            .map_err(|e| anyhow::anyhow!("Failed to save provider keyring: {}", e))?;
+
+        // Perplexity is dual-use: also store in skill keychain for search skill.
+        if resolved == "perplexity" {
+            if let Some(kc) = skill_keychain {
+                kc.set_secret("perplexity", key);
+                kc.save()
+                    .map_err(|e| anyhow::anyhow!("Failed to save skill keychain: {}", e))?;
+            }
+        }
+    }
 
     // Update config with provider name only (no key stored in config).
-    if config.trinity.is_none() {
-        config.trinity = Some(TrinityConfig::default());
+    if resolved != "tavily" {
+        if config.trinity.is_none() {
+            config.trinity = Some(TrinityConfig::default());
+        }
+        if let Some(ref mut trinity) = config.trinity {
+            trinity.ego_provider = Some(resolved.clone());
+        }
+        config
+            .save(&config.config_path())
+            .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))?;
     }
-    if let Some(ref mut trinity) = config.trinity {
-        trinity.ego_provider = Some(resolved.clone());
-    }
-    config
-        .save(&config.config_path())
-        .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))?;
     Ok(resolved)
 }
 
@@ -353,7 +381,7 @@ pub fn parse_tool_requests(content: &str) -> (String, Vec<BirthToolRequest>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orion_core::AppConfig;
+    use orion_core::{AppConfig, ProviderKeyring};
     use std::path::Path;
 
     fn test_config(base: &Path) -> AppConfig {
@@ -407,13 +435,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let mut config = test_config(&tmp);
-        let mut vault = SecretsVault::new(config.data_dir.clone());
+        let mut keyring = ProviderKeyring::new(config.data_dir.clone());
         let resolved =
-            execute_store_provider_key(&mut vault, &mut config, "openai", "sk-test-key").unwrap();
+            execute_store_provider_key(&mut keyring, &mut config, "openai", "sk-test-key", None)
+                .unwrap();
         assert_eq!(resolved, "openai");
-        // Key stored in vault with provider: namespace, not in config
+        // Key stored in keyring (bare name), not in config
         assert_eq!(config.openai_api_key, None);
-        assert_eq!(vault.get_secret("provider:openai"), Some("sk-test-key"));
+        assert_eq!(keyring.get_key_str("openai"), Some("sk-test-key"));
         // Config records the provider name (not the key)
         assert_eq!(
             config.trinity.as_ref().unwrap().ego_provider.as_deref(),

@@ -842,7 +842,7 @@ body {
   padding: 0.4rem 0.65rem;
   border: none;
   background: transparent;
-  color: var(--fg);
+  color: var(--text);
   font-size: 0.78rem;
   font-family: inherit;
   cursor: pointer;
@@ -907,7 +907,7 @@ body {
   padding: 0.4rem 0.65rem;
   border: none;
   background: transparent;
-  color: var(--fg);
+  color: var(--text);
   font-size: 0.78rem;
   font-family: inherit;
   cursor: pointer;

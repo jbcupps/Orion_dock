@@ -209,6 +209,8 @@ Capability categories (tracked in `CapabilityDescriptor.category`):
 
 **Connection process pattern:** Skills follow a discover → configure → connect → operate lifecycle. The `discover_email_service` tool pattern (DNS probing, autoconfig, presets) can be reused for other skills needing service configuration.
 
+**Skill troubleshooting:** When a skill fails to build, configure, or execute, the entity follows a deterministic troubleshooting protocol embedded in its system prompt (see `crates/orion-core/src/system_prompt.rs`, "Skill Troubleshooting Protocol"). The full playbook with binary-split diagnosis, failure records, and Orion-specific gotchas (trust tier timeouts, network permission mismatches, MCP persistence) lives at `documents/SKILL_TROUBLESHOOTING_PLAYBOOK.md`.
+
 ### Runtime Surfaces
 
 - **Web**: Frontend (port 3000) → orion-api (port 8080) → Postgres, Ollama. Frontend proxies `/api`, `/health` to API via Vite dev proxy or nginx.

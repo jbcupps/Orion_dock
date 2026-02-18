@@ -351,9 +351,9 @@ impl App {
                 }
                 if orch.current_stage() == orion_birth::BirthStage::Connectivity {
                     let config = orch.config();
-                    let vault = orion_core::SecretsVault::load(config.data_dir.clone())
-                        .unwrap_or_else(|_| orion_core::SecretsVault::new(config.data_dir.clone()));
-                    let stored: Vec<String> = vault
+                    let keyring = orion_core::ProviderKeyring::load(config.data_dir.clone())
+                        .unwrap_or_else(|_| orion_core::ProviderKeyring::new(config.data_dir.clone()));
+                    let stored: Vec<String> = keyring
                         .list_providers()
                         .into_iter()
                         .map(String::from)

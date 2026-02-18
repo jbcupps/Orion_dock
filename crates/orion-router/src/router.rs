@@ -247,13 +247,38 @@ impl IdEgoRouter {
         }
     }
 
-    /// Perform a heartbeat check to verify the local LLM is reachable.
-    /// If using HTTP provider, sends a minimal request; if using stub, always succeeds.
+    /// Perform a heartbeat check to verify at least one LLM is reachable.
+    ///
+    /// Tries the local Id provider first. If that fails (e.g. Ollama is cold)
+    /// but Ego (cloud) is configured, pings Ego. Only returns an error when
+    /// *both* Id and Ego are unreachable.
     pub async fn heartbeat(&self) -> anyhow::Result<()> {
-        match &self.local_http {
+        let id_result = match &self.local_http {
             Some(provider) => provider.heartbeat().await,
             None => stub_heartbeat().await,
+        };
+
+        if id_result.is_ok() {
+            return Ok(());
         }
+
+        // Id failed — try Ego if configured.
+        if let Some(ego) = &self.ego {
+            let ego_result = ego
+                .complete(&CompletionRequest::simple(vec![Message::new(
+                    "user",
+                    "heartbeat",
+                )]))
+                .await;
+            if ego_result.is_ok() {
+                tracing::info!("heartbeat: Id unreachable but Ego responded — proceeding");
+                return Ok(());
+            }
+            tracing::warn!("heartbeat: both Id and Ego failed");
+        }
+
+        // Both failed (or no Ego configured) — propagate the original Id error.
+        id_result
     }
 
     /// Check if using a local HTTP provider (vs in-process stub).

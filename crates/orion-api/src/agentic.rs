@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use orion_birth::{execute_store_provider_key, BirthToolRequest};
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, RuntimeContext, SkillToolEntry};
-use orion_core::{AppConfig, McpServerDefinition, SecretsVault, ThinkingModelTier};
+use orion_core::{AppConfig, McpServerDefinition, ProviderKeyring, SkillKeychain, ThinkingModelTier};
 use orion_skills::manifest::SkillId;
 use orion_skills::protocol::mcp::McpSkillRuntime;
 use orion_skills::skill::{Skill, ToolDescriptor};
@@ -126,8 +126,30 @@ pub struct AgenticTask {
     pub confirmation_tx: Option<oneshot::Sender<bool>>,
     pub steps: Vec<AgenticStep>,
     pub turn: u32,
+    pub tool_calls: u32,
     pub cancel_tx: mpsc::Sender<()>,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    pub completed_at: Option<std::time::Instant>,
+}
+
+impl AgenticTask {
+    /// Returns true when the task is in a terminal state (completed, failed, or cancelled).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            AgenticTaskStatus::Completed
+                | AgenticTaskStatus::Failed
+                | AgenticTaskStatus::Cancelled
+        )
+    }
+
+    /// Returns elapsed time since the task reached a terminal state.
+    /// Returns `Duration::ZERO` if not yet terminal.
+    pub fn completed_at_elapsed(&self) -> std::time::Duration {
+        self.completed_at
+            .map(|t| t.elapsed())
+            .unwrap_or(std::time::Duration::ZERO)
+    }
 }
 
 /// Mentor response request body.
@@ -205,7 +227,8 @@ pub struct AgenticLoopConfig {
     pub config: AppConfig,
     pub skill_registry: Arc<SkillRegistry>,
     pub skill_executor: Arc<SkillExecutor>,
-    pub skill_vault: Arc<StdMutex<SecretsVault>>,
+    pub provider_keyring: Arc<std::sync::RwLock<ProviderKeyring>>,
+    pub skill_keychain: Arc<StdMutex<SkillKeychain>>,
     pub email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
     pub skill_tool_entries: Vec<SkillToolEntry>,
     pub stored_providers: Vec<String>,
@@ -215,6 +238,11 @@ pub struct AgenticLoopConfig {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub run_source: String,
     pub superego_l2_mode: orion_router::SuperegoL2Mode,
+    /// When true and `router_mode` is `ThinkHarder`, the loop uses the Pro
+    /// council (MoA DAG) to generate a reasoning plan, then feeds that plan
+    /// into a standard tool-capable model for execution.  Requires 2+
+    /// connected providers; degrades to standard routing otherwise.
+    pub use_council: bool,
 }
 
 /// Run the autonomous agentic loop. Call from `tokio::spawn`.
@@ -239,51 +267,12 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         ),
     ];
 
-    // Build router
-    let (ego_name, ego_key) = resolve_ego_credentials(&cfg.config);
-    let routing_mode = match cfg.router_mode {
-        // Auto is the fast tier and should prefer a single cloud call path first.
-        AgenticRouterMode::Auto => orion_core::RoutingMode::EgoPrimary,
-        AgenticRouterMode::ThinkHard | AgenticRouterMode::ThinkHarder => {
-            // Thinking presets prioritize Ego for deeper reasoning while preserving Id fallback.
-            orion_core::RoutingMode::EgoPrimary
-        }
-    };
-    let tier = match cfg.router_mode {
-        AgenticRouterMode::Auto => ThinkingModelTier::Fast,
-        AgenticRouterMode::ThinkHard => ThinkingModelTier::Standard,
-        AgenticRouterMode::ThinkHarder => ThinkingModelTier::Pro,
-    };
-    let ego_model = ego_name
-        .as_deref()
-        .map(|provider| cfg.config.effective_tier_model(provider, tier));
-    let ego_name_for_sup = ego_name.clone();
-    let ego_key_for_sup = ego_key.clone();
-    let mut router = orion_router::IdEgoRouter::with_provider_auto_detect(
-        cfg.config.local_llm_base_url.clone(),
-        ego_name.as_deref(),
-        ego_key,
-        ego_model,
-        routing_mode,
-    )
-    .await;
-    if cfg.superego_l2_mode != orion_router::SuperegoL2Mode::Off {
-        let (sup_name, sup_key) = resolve_superego_credentials(
-            &cfg.config,
-            ego_name_for_sup.as_deref(),
-            ego_key_for_sup.as_deref(),
-        );
-        if let Some(key) = sup_key {
-            let (provider, _) =
-                orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
-            if let Some(provider) = provider {
-                router = router.with_superego_config(provider, sup_name, cfg.superego_l2_mode);
-            }
-        }
-    }
-
     // Build structured tool definitions for tool-aware routing (includes synthetic agentic tools).
     let mut tool_defs = tool_extraction::build_agentic_tool_definitions(&cfg.skill_tool_entries);
+
+    // Build initial router — credentials are re-resolved every turn inside the loop,
+    // but we need an initial router for the pre-flight heartbeat check.
+    let mut router = build_router_from_keyring(&cfg).await;
 
     // Pre-flight: verify at least one LLM is reachable before entering the loop.
     if let Err(e) = router.heartbeat().await {
@@ -312,6 +301,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     let mut tools_changed = false;
 
     loop {
+        // Re-resolve credentials from disk every turn so newly stored API keys
+        // (e.g. via store_provider_key) are picked up immediately instead of
+        // falling back to the local Id model with stale credentials.
+        router = build_router_from_keyring(&cfg).await;
         // Refresh system prompt and tool definitions when tools have been added mid-run.
         if tools_changed {
             let refreshed_entries = crate::build_skill_tool_entries(&cfg.skill_registry);
@@ -385,30 +378,59 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
         // Trim context if conversation is getting long
         trim_context(&mut messages, context_token_budget(cfg.router_mode));
 
-        // LLM call with structured tool definitions for reliable tool invocation.
-        let response = match router
-            .route_with_tools(messages.clone(), tool_defs.clone())
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let err_msg = format!("LLM call failed: {}", e);
-                let _ = cfg.event_tx.send(AgenticEvent::Error {
-                    message: err_msg.clone(),
-                });
-                update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
-                persist_run_summary(
-                    &cfg.agent_dir,
-                    &cfg.task_id,
-                    &cfg.goal,
-                    &cfg.run_source,
-                    &err_msg,
-                    "failed",
-                    turn,
-                    total_tool_calls,
-                    cfg.started_at,
-                );
-                break;
+        // LLM call — council path for ThinkHarder, standard routing otherwise.
+        //
+        // Council generates a deep-reasoning plan via multi-provider MoA DAG,
+        // but cannot do structured tool calling. So when council produces a
+        // plan we feed it into a standard tool-capable model for execution.
+        let response = if cfg.use_council && cfg.router_mode == AgenticRouterMode::ThinkHarder {
+            match council_then_execute(&cfg, &messages, &tool_defs, &router).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = format!("Council+execution failed: {}", e);
+                    let _ = cfg.event_tx.send(AgenticEvent::Error {
+                        message: err_msg.clone(),
+                    });
+                    update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
+                    persist_run_summary(
+                        &cfg.agent_dir,
+                        &cfg.task_id,
+                        &cfg.goal,
+                        &cfg.run_source,
+                        &err_msg,
+                        "failed",
+                        turn,
+                        total_tool_calls,
+                        cfg.started_at,
+                    );
+                    break;
+                }
+            }
+        } else {
+            match router
+                .route_with_tools(messages.clone(), tool_defs.clone())
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = format!("LLM call failed: {}", e);
+                    let _ = cfg.event_tx.send(AgenticEvent::Error {
+                        message: err_msg.clone(),
+                    });
+                    update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
+                    persist_run_summary(
+                        &cfg.agent_dir,
+                        &cfg.task_id,
+                        &cfg.goal,
+                        &cfg.run_source,
+                        &err_msg,
+                        "failed",
+                        turn,
+                        total_tool_calls,
+                        cfg.started_at,
+                    );
+                    break;
+                }
             }
         };
 
@@ -629,12 +651,12 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             .iter()
             .find(|t| t.name == "register_email_account")
         {
-            let result_msg = match serde_json::from_value::<crate::RegisterEmailAccountRequest>(
+            let result_msg = match serde_json::from_value::<crate::routes::skills::RegisterEmailAccountRequest>(
                 email_req.arguments.clone(),
             ) {
-                Ok(request) => match crate::register_email_account_internal(
+                Ok(request) => match crate::routes::skills::register_email_account_internal(
                     &cfg.agent_id,
-                    &cfg.skill_vault,
+                    &cfg.skill_keychain,
                     &cfg.email_accounts,
                     request,
                 )
@@ -762,8 +784,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             advisory_code.as_deref(),
         );
         let mut provider_config = cfg.config.clone();
-        let mut provider_vault = SecretsVault::load(provider_config.data_dir.clone())
-            .unwrap_or_else(|_| SecretsVault::new(provider_config.data_dir.clone()));
+        let mut provider_keyring = ProviderKeyring::load(provider_config.data_dir.clone())
+            .unwrap_or_else(|_| ProviderKeyring::new(provider_config.data_dir.clone()));
+        let mut skill_kc = SkillKeychain::load(provider_config.data_dir.clone())
+            .unwrap_or_else(|_| SkillKeychain::new(provider_config.data_dir.clone()));
         for tr in &tool_requests {
             // Skip synthetic tools already handled above
             if tr.name == "task_complete"
@@ -796,10 +820,11 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                     arguments: tr.arguments.clone(),
                 });
                 match execute_store_provider_key(
-                    &mut provider_vault,
+                    &mut provider_keyring,
                     &mut provider_config,
                     provider,
                     key,
+                    Some(&mut skill_kc),
                 ) {
                     Ok(resolved) => {
                         let output = format!("Stored key for provider '{}'.", resolved);
@@ -853,8 +878,8 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                     tool_results.push(format!("**{}** (Error): {}", tr.name, output));
                     continue;
                 }
-                provider_vault.set_secret(key_name, value);
-                match provider_vault.save() {
+                skill_kc.set_secret(key_name, value);
+                match skill_kc.save() {
                     Ok(()) => {
                         let output = format!("Stored vault secret '{}'.", key_name);
                         let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
@@ -866,7 +891,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                         tool_results.push(format!("**{}** (Success): {}", tr.name, output));
                     }
                     Err(e) => {
-                        let output = format!("Failed to save vault secret '{}': {}", key_name, e);
+                        let output = format!("Failed to save skill secret '{}': {}", key_name, e);
                         let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
                             turn,
                             tool_name: tr.name.clone(),
@@ -1059,6 +1084,13 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             }
         }
 
+        // Sync counters to task handle so API listings reflect live state.
+        {
+            let mut task = cfg.task_handle.lock().await;
+            task.turn = turn;
+            task.tool_calls = total_tool_calls;
+        }
+
         // Feed tool results back to the LLM
         if !tool_results.is_empty() {
             let results_msg = format!("## Tool Results\n\n{}", tool_results.join("\n\n"));
@@ -1131,26 +1163,24 @@ fn truncate_output(s: &str, max_len: usize) -> String {
     }
 }
 
-fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String>) {
-    let vault = SecretsVault::load(config.data_dir.clone())
-        .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+fn resolve_ego_credentials(config: &AppConfig, keyring: &ProviderKeyring) -> (Option<String>, Option<String>) {
     // Respect active provider preference if set.
     if let Some(ref pref) = config.active_provider_preference {
         let normalized = AppConfig::normalize_provider_name(pref);
-        if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
+        if let Some(key) = keyring.get_key_str(&normalized) {
             return (Some(normalized), Some(key.to_string()));
         }
     }
-    let providers: Vec<String> = vault
+    let providers: Vec<String> = keyring
         .list_providers()
         .into_iter()
-        .filter_map(|k| k.strip_prefix("provider:").map(String::from))
+        .map(String::from)
         .collect();
     let preferred = ["anthropic", "openai"];
     let mut found_name: Option<String> = None;
     let mut found_key: Option<String> = None;
     for pref in &preferred {
-        if let Some(key) = vault.get_secret(&format!("provider:{}", pref)) {
+        if let Some(key) = keyring.get_key_str(pref) {
             found_name = Some(pref.to_string());
             found_key = Some(key.to_string());
             break;
@@ -1158,12 +1188,10 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
     }
     if found_name.is_none() {
         for p in &providers {
-            if p != "tavily" {
-                if let Some(key) = vault.get_secret(&format!("provider:{}", p)) {
-                    found_name = Some(p.clone());
-                    found_key = Some(key.to_string());
-                    break;
-                }
+            if let Some(key) = keyring.get_key_str(p) {
+                found_name = Some(p.clone());
+                found_key = Some(key.to_string());
+                break;
             }
         }
     }
@@ -1172,15 +1200,14 @@ fn resolve_ego_credentials(config: &AppConfig) -> (Option<String>, Option<String
 
 fn resolve_superego_credentials(
     config: &AppConfig,
+    keyring: &ProviderKeyring,
     ego_name: Option<&str>,
     ego_key: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    let vault = SecretsVault::load(config.data_dir.clone())
-        .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
     if let Some(trinity) = &config.trinity {
         if let Some(provider) = trinity.superego_provider.as_deref() {
             let normalized = AppConfig::normalize_provider_name(provider);
-            if let Some(key) = vault.get_secret(&format!("provider:{}", normalized)) {
+            if let Some(key) = keyring.get_key_str(&normalized) {
                 return (Some(normalized), Some(key.to_string()));
             }
         }
@@ -1188,7 +1215,241 @@ fn resolve_superego_credentials(
     (ego_name.map(str::to_string), ego_key.map(str::to_string))
 }
 
-/// Estimate token count for a text string using a character-based heuristic.
+/// Build (or rebuild) the IdEgoRouter from the current on-disk keyring.
+///
+/// Called once before the loop for the pre-flight heartbeat and then at the top
+/// of every turn so that credentials stored mid-run (e.g. via `store_provider_key`)
+/// are picked up immediately.
+async fn build_router_from_keyring(cfg: &AgenticLoopConfig) -> orion_router::IdEgoRouter {
+    let (ego_name, ego_key, sup_creds) = {
+        let keyring = cfg.provider_keyring.read().unwrap();
+        let (ego_n, ego_k) = resolve_ego_credentials(&cfg.config, &keyring);
+        let sup = if cfg.superego_l2_mode != orion_router::SuperegoL2Mode::Off {
+            Some(resolve_superego_credentials(
+                &cfg.config,
+                &keyring,
+                ego_n.as_deref(),
+                ego_k.as_deref(),
+            ))
+        } else {
+            None
+        };
+        (ego_n, ego_k, sup)
+    };
+    let routing_mode = match cfg.router_mode {
+        AgenticRouterMode::Auto
+        | AgenticRouterMode::ThinkHard
+        | AgenticRouterMode::ThinkHarder => orion_core::RoutingMode::EgoPrimary,
+    };
+    let tier = match cfg.router_mode {
+        AgenticRouterMode::Auto => ThinkingModelTier::Fast,
+        AgenticRouterMode::ThinkHard => ThinkingModelTier::Standard,
+        AgenticRouterMode::ThinkHarder => ThinkingModelTier::Pro,
+    };
+    let ego_model = ego_name
+        .as_deref()
+        .map(|provider| cfg.config.effective_tier_model(provider, tier));
+    let mut router = orion_router::IdEgoRouter::with_provider_auto_detect(
+        cfg.config.local_llm_base_url.clone(),
+        ego_name.as_deref(),
+        ego_key,
+        ego_model,
+        routing_mode,
+    )
+    .await;
+    if let Some((sup_name, Some(key))) = sup_creds {
+        let (provider, _) =
+            orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
+        if let Some(provider) = provider {
+            router = router.with_superego_config(provider, sup_name, cfg.superego_l2_mode);
+        }
+    }
+    router
+}
+
+// ---------------------------------------------------------------------------
+// Council helpers (ThinkHarder in agentic loop)
+// ---------------------------------------------------------------------------
+
+/// Resolve connected providers for council execution, priority-ordered.
+///
+/// Returns up to 3 `(provider_name, api_key)` tuples.  The active provider
+/// preference is tried first, followed by the hardcoded preference order.
+fn resolve_council_providers(
+    keyring: &ProviderKeyring,
+    preference: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+
+    if let Some(pref) = preference {
+        let normalized = AppConfig::normalize_provider_name(pref);
+        if provider_supports_council(&normalized) {
+            if let Some(key) = keyring.get_key_str(&normalized) {
+                result.push((normalized, key.to_string()));
+            }
+        }
+    }
+
+    let preferred = ["anthropic", "openai", "google", "xai", "perplexity"];
+    for pref in &preferred {
+        if result.iter().any(|(n, _)| n == *pref) {
+            continue;
+        }
+        if let Some(key) = keyring.get_key_str(pref) {
+            result.push((pref.to_string(), key.to_string()));
+            if result.len() >= 3 {
+                break;
+            }
+        }
+    }
+
+    if result.len() < 3 {
+        let providers: Vec<String> = keyring
+            .list_providers()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for p in &providers {
+            let normalized = AppConfig::normalize_provider_name(p);
+            if !provider_supports_council(&normalized) {
+                continue;
+            }
+            if result.iter().any(|(n, _)| *n == normalized) {
+                continue;
+            }
+            if let Some(key) = keyring.get_key_str(p) {
+                result.push((normalized, key.to_string()));
+                if result.len() >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn provider_supports_council(provider: &str) -> bool {
+    matches!(
+        AppConfig::normalize_provider_name(provider).as_str(),
+        "openai" | "anthropic" | "perplexity" | "xai" | "google"
+    )
+}
+
+/// Run the Pro council to produce a deep-reasoning plan, then feed that plan
+/// into a standard tool-capable model for execution.
+///
+/// Council cannot do structured tool calling, so the two-phase approach is:
+///   1. Council (draft → critique → synthesis) produces a reasoning plan.
+///   2. That plan is injected as context for a standard `route_with_tools`
+///      call so the tool-capable model can translate the plan into concrete
+///      tool invocations.
+///
+/// Degrades gracefully:
+///   - <2 providers → skips council, uses standard `route_with_tools`.
+///   - Council error → falls back to standard `route_with_tools`.
+async fn council_then_execute(
+    cfg: &AgenticLoopConfig,
+    messages: &[Message],
+    tool_defs: &[orion_capabilities::cognitive::ToolDefinition],
+    router: &orion_router::IdEgoRouter,
+) -> anyhow::Result<orion_capabilities::cognitive::CompletionResponse> {
+    // Resolve council providers from current keyring snapshot.
+    let council_providers = {
+        let keyring = cfg.provider_keyring.read().unwrap();
+        resolve_council_providers(&keyring, cfg.config.active_provider_preference.as_deref())
+    };
+
+    if council_providers.len() < 2 {
+        tracing::info!(
+            "council_then_execute: <2 providers ({}), using standard routing",
+            council_providers.len()
+        );
+        return router
+            .route_with_tools(messages.to_vec(), tool_defs.to_vec())
+            .await;
+    }
+
+    let provider_configs: Vec<orion_router::council::ProviderConfig> = council_providers
+        .into_iter()
+        .map(|(name, key)| {
+            let model = cfg
+                .config
+                .effective_tier_model(&name, ThinkingModelTier::Pro);
+            orion_router::council::ProviderConfig {
+                name,
+                api_key: key,
+                model,
+            }
+        })
+        .collect();
+
+    tracing::info!(
+        providers = ?provider_configs.iter().map(|p| format!("{}:{}", p.name, p.model)).collect::<Vec<_>>(),
+        "council_then_execute: running council for agentic turn"
+    );
+
+    // Open memory store for council persistence (Sqlite only; Postgres uses
+    // block_on() which panics in async context).
+    let council_memory: Option<orion_memory::MemoryStore> = match cfg.config.memory_backend {
+        orion_core::MemoryBackend::Postgres => None,
+        orion_core::MemoryBackend::Sqlite => {
+            let config_for_store = cfg.config.clone();
+            tokio::task::spawn_blocking(move || {
+                orion_memory::MemoryStore::open_with_config(&config_for_store).ok()
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+    };
+
+    // Phase 1: Council reasoning.
+    let council_result = orion_router::council::run_council(
+        messages,
+        &provider_configs,
+        council_memory.as_ref(),
+    )
+    .await;
+
+    let council_plan = match council_result {
+        Ok(resp) => resp.content,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "council_then_execute: council failed, falling back to standard routing"
+            );
+            return router
+                .route_with_tools(messages.to_vec(), tool_defs.to_vec())
+                .await;
+        }
+    };
+
+    tracing::info!(
+        plan_len = council_plan.len(),
+        "council_then_execute: council produced plan, forwarding to tool-capable model"
+    );
+
+    // Phase 2: Feed the council plan into a tool-capable model.
+    // We append the council plan as a "system-like" user message so the
+    // tool-capable model treats it as authoritative reasoning to act on.
+    let mut augmented_messages = messages.to_vec();
+    augmented_messages.push(Message::new(
+        "user",
+        format!(
+            "## Council Reasoning (Pro)\n\n\
+             The following plan was produced by a multi-provider reasoning council. \
+             Execute it using the available tools. Do not second-guess the plan; \
+             translate it into concrete tool calls.\n\n\
+             ---\n\n{}",
+            council_plan
+        ),
+    ));
+
+    router
+        .route_with_tools(augmented_messages, tool_defs.to_vec())
+        .await
+}
 /// ~4 characters per token is a standard approximation for English text,
 /// plus a fixed overhead per message for role/formatting.
 fn estimate_tokens(text: &str) -> usize {
@@ -1240,6 +1501,9 @@ async fn update_status(task: &Arc<Mutex<AgenticTask>>, status: AgenticTaskStatus
     let mut t = task.lock().await;
     t.status = status;
     t.turn = turn;
+    if t.is_terminal() && t.completed_at.is_none() {
+        t.completed_at = Some(std::time::Instant::now());
+    }
 }
 
 async fn record_step(task: &Arc<Mutex<AgenticTask>>, turn: u32, step_type: &str, content: &str) {
@@ -1285,7 +1549,9 @@ fn persist_run_summary(
         serde_json::to_string_pretty(&run_data).unwrap_or_default(),
     );
 
-    // Append summary entry to operational_chat.json
+    // Append a single assistant entry to operational_chat.json so the task
+    // result persists across page reloads. Avoid adding a fake "user" message
+    // which would appear as if the mentor said something.
     let chat_path = agent_dir.join("operational_chat.json");
     let mut history: Vec<serde_json::Value> = if chat_path.exists() {
         std::fs::read_to_string(&chat_path)
@@ -1297,12 +1563,8 @@ fn persist_run_summary(
     };
 
     history.push(serde_json::json!({
-        "role": "user",
-        "content": format!("[Agentic Task]: {}", goal),
-    }));
-    history.push(serde_json::json!({
         "role": "assistant",
-        "content": format!("[Task Complete]: {} ({} turns, {} tool calls)", summary, turns, tool_calls),
+        "content": format!("[Agentic Task Complete] Goal: {} — {} ({} turns, {} tool calls)", goal, summary, turns, tool_calls),
     }));
 
     let _ = std::fs::write(

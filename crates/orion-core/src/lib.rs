@@ -16,12 +16,15 @@ pub mod global_config;
 pub mod keyring;
 pub mod local_llm_url;
 pub mod policy;
+pub mod provider_keyring;
 pub mod sao_bridge;
 pub mod secrets;
+pub mod skill_keychain;
 pub mod superego;
 pub mod system_prompt;
 pub mod templates;
 pub mod vault;
+pub mod vault_migration;
 pub mod verifier;
 
 pub use config::{
@@ -49,7 +52,11 @@ pub use policy::{
     CapabilityGateResult,
 };
 pub use sao_bridge::{AgentState, SaoBridgeClient, SaoBridgeError};
+pub use provider_keyring::{is_known_llm_provider, ProviderKeyring, KNOWN_LLM_PROVIDERS};
+#[deprecated(note = "Use ProviderKeyring for provider keys and SkillKeychain for skill secrets")]
 pub use secrets::SecretsVault;
+pub use skill_keychain::SkillKeychain;
+pub use vault_migration::migrate_if_needed;
 pub use superego::{
     check_message, check_search_query, check_search_query_with_trace, check_user_message,
     check_user_message_with_trace, SafetyDecisionTrace, SuperegoVerdict, CODE_ILLEGAL_DRUGS,

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use orion_core::SecretsVault;
+use orion_core::SkillKeychain;
 
 use crate::manifest::{CapabilityDescriptor, SkillId, SkillManifest, TrustTier};
 use crate::skill::{Skill, SkillError, SkillResult};
@@ -28,7 +28,7 @@ pub struct MissingSkillSecret {
 pub struct SkillRegistry {
     skills: RwLock<HashMap<SkillId, RegisteredSkill>>,
     pub skill_paths: Vec<PathBuf>,
-    secrets: Option<Arc<Mutex<SecretsVault>>>,
+    secrets: Option<Arc<Mutex<SkillKeychain>>>,
 }
 
 impl Default for SkillRegistry {
@@ -46,8 +46,8 @@ impl SkillRegistry {
         }
     }
 
-    /// Create a registry backed by a SecretsVault for secret validation.
-    pub fn with_secrets(secrets: Arc<Mutex<SecretsVault>>) -> Self {
+    /// Create a registry backed by a SkillKeychain for secret validation.
+    pub fn with_secrets(secrets: Arc<Mutex<SkillKeychain>>) -> Self {
         Self {
             skills: RwLock::new(HashMap::new()),
             skill_paths: Vec::new(),

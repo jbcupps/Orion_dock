@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use orion_capabilities::sensory::web_search;
-use orion_core::secrets::SecretsVault;
+use orion_core::skill_keychain::SkillKeychain;
 use orion_core::superego;
 use orion_skills::channel::TriggerDescriptor;
 use orion_skills::manifest::{CapabilityDescriptor, NetworkPermission, Permission, SkillManifest};
@@ -17,13 +17,13 @@ use orion_skills::skill::{
 
 pub struct WebSearchSkill {
     manifest: SkillManifest,
-    vault: Arc<Mutex<SecretsVault>>,
+    keychain: Arc<Mutex<SkillKeychain>>,
 }
 
 impl WebSearchSkill {
-    /// Create a new WebSearchSkill with access to the shared secrets vault.
-    pub fn with_secrets(manifest: SkillManifest, vault: Arc<Mutex<SecretsVault>>) -> Self {
-        Self { manifest, vault }
+    /// Create a new WebSearchSkill with access to the shared skill keychain.
+    pub fn with_secrets(manifest: SkillManifest, keychain: Arc<Mutex<SkillKeychain>>) -> Self {
+        Self { manifest, keychain }
     }
 
     /// Parse the embedded skill.toml into a SkillManifest.
@@ -49,7 +49,7 @@ impl Skill for WebSearchSkill {
 
     fn health(&self) -> SkillHealth {
         let has_key = self
-            .vault
+            .keychain
             .lock()
             .map(|v| v.exists("tavily"))
             .unwrap_or(false);
@@ -140,13 +140,13 @@ impl Skill for WebSearchSkill {
             return Ok(ToolOutput::error(format!("Search blocked: {}", reason)));
         }
 
-        // Get Tavily API key from vault
+        // Get Tavily API key from keychain
         let api_key = {
-            let vault = self
-                .vault
+            let kc = self
+                .keychain
                 .lock()
-                .map_err(|e| SkillError::ToolFailed(format!("Vault lock error: {}", e)))?;
-            vault
+                .map_err(|e| SkillError::ToolFailed(format!("Keychain lock error: {}", e)))?;
+            kc
                 .get_secret("tavily")
                 .map(|s| s.to_string())
                 .ok_or_else(|| {
@@ -203,7 +203,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         let skill = WebSearchSkill::with_secrets(WebSearchSkill::default_manifest(), vault);
         let tools = skill.tools();
         assert_eq!(tools.len(), 1);
@@ -218,7 +218,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         {
             let mut v = vault.lock().unwrap();
             v.set_secret("tavily", "tvly-test-key");
@@ -247,7 +247,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         let skill = WebSearchSkill::with_secrets(WebSearchSkill::default_manifest(), vault);
         let params = ToolParams::new().with("query", "test query");
         let ctx = ExecutionContext {

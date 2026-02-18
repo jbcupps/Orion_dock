@@ -16,7 +16,6 @@ orion-capabilities = { path = "../orion-capabilities" }
 orion-router = { path = "../orion-router" }
 orion-memory = { path = "../orion-memory" }
 orion-skills = { path = "../orion-skills" }
-soul-forge = { path = "../soul-forge" }
 genesis-core = { path = "../genesis-core" }
 genesis-quick-start = { path = "../../genesis-paths/genesis-quick-start" }
 genesis-direct-discovery = { path = "../../genesis-paths/genesis-direct-discovery" }
@@ -49,3 +48,4 @@ skill-perplexity-search = { path = "../../skills/skill-perplexity-search" }
 skill-proton-mail = { path = "../../skills/skill-proton-mail" }
 skill-email = { path = "../../skills/skill-email" }
 cron = "0.15.0"
+anyhow.workspace = true

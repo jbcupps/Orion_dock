@@ -135,16 +135,20 @@ pub fn curated_provider_models(provider: &str) -> Vec<String> {
         ],
         "xai" => vec![
             "grok-4-1-fast-reasoning",
+            "grok-4-1-fast-non-reasoning",
             "grok-4-fast-reasoning",
-            "grok-4",
+            "grok-4-fast-non-reasoning",
+            "grok-4-0709",
+            "grok-code-fast-1",
             "grok-3",
-            "grok-2-latest",
+            "grok-3-mini",
         ],
         "google" => vec![
             "gemini-3-pro-preview",
             "gemini-3-flash-preview",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
         ],
         _ => vec![],
     }
@@ -660,9 +664,9 @@ impl AppConfig {
                 pro: "sonar-reasoning-pro".to_string(),
             },
             "xai" => TierModels {
-                fast: "grok-2-latest".to_string(),
+                fast: "grok-3-mini".to_string(),
                 standard: "grok-4-fast-reasoning".to_string(),
-                pro: "grok-4".to_string(),
+                pro: "grok-4-0709".to_string(),
             },
             "google" => TierModels {
                 fast: "gemini-3-flash-preview".to_string(),
@@ -856,44 +860,48 @@ impl AppConfig {
         migrated
     }
 
-    /// Migrate any legacy plaintext API keys from config fields into the vault.
+    /// Migrate any legacy plaintext API keys from config fields into the provider keyring.
     /// Returns a list of providers that were migrated. Call `save()` after this
     /// to persist the config without the key fields.
-    pub fn migrate_keys_to_vault(&mut self, vault: &mut crate::SecretsVault) -> Vec<String> {
+    pub fn migrate_keys_to_keyring(
+        &mut self,
+        keyring: &mut crate::ProviderKeyring,
+    ) -> Vec<String> {
         let mut migrated = Vec::new();
 
-        // openai_api_key → provider:openai
+        // openai_api_key → keyring
         if let Some(ref key) = self.openai_api_key {
-            if !key.is_empty() && vault.get_secret("provider:openai").is_none() {
-                vault.set_secret("provider:openai", key);
+            if !key.is_empty() && !keyring.has_key("openai") {
+                keyring.set_key_str("openai", key);
                 migrated.push("openai".to_string());
-                tracing::info!("Migrated openai_api_key from config to vault");
+                tracing::info!("Migrated openai_api_key from config to keyring");
             }
         }
         self.openai_api_key = None;
 
-        // trinity.ego_api_key → provider:{ego_provider}
+        // trinity.ego_api_key → keyring
         if let Some(ref trinity) = self.trinity.clone() {
             if let Some(ref key) = trinity.ego_api_key {
                 if !key.is_empty() {
                     let provider = trinity.ego_provider.as_deref().unwrap_or("openai");
-                    let ns_key = format!("provider:{}", provider);
-                    if vault.get_secret(&ns_key).is_none() {
-                        vault.set_secret(&ns_key, key);
+                    if !keyring.has_key(provider) {
+                        keyring.set_key_str(provider, key);
                         migrated.push(provider.to_string());
-                        tracing::info!("Migrated ego_api_key from config to vault ({})", provider);
+                        tracing::info!(
+                            "Migrated ego_api_key from config to keyring ({})",
+                            provider
+                        );
                     }
                 }
             }
             if let Some(ref key) = trinity.superego_api_key {
                 if !key.is_empty() {
                     let provider = trinity.superego_provider.as_deref().unwrap_or("anthropic");
-                    let ns_key = format!("provider:{}", provider);
-                    if vault.get_secret(&ns_key).is_none() {
-                        vault.set_secret(&ns_key, key);
+                    if !keyring.has_key(provider) {
+                        keyring.set_key_str(provider, key);
                         migrated.push(provider.to_string());
                         tracing::info!(
-                            "Migrated superego_api_key from config to vault ({})",
+                            "Migrated superego_api_key from config to keyring ({})",
                             provider
                         );
                     }

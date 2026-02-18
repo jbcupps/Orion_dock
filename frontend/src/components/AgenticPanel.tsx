@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  startAgenticRun,
-  subscribeToAgenticStream,
-  respondToAgent,
-  confirmAgentTool,
-  cancelAgenticRun,
-} from '../api';
+import { useAgenticStream } from '../hooks/useAgenticStream';
 import './AgenticPanel.css';
 
 interface AgenticPanelProps {
@@ -18,25 +12,6 @@ interface AgenticPanelProps {
   externalTask?: { taskId: string; goal: string } | null;
   onExternalTaskConsumed?: () => void;
 }
-
-interface TimelineStep {
-  id: number;
-  type: string;
-  turn: number;
-  content: string;
-  toolName?: string;
-  success?: boolean;
-  collapsed: boolean;
-}
-
-type RunStatus =
-  | 'idle'
-  | 'running'
-  | 'waiting_for_mentor'
-  | 'waiting_for_confirmation'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
 
 type AgenticRouterMode = 'auto' | 'think_hard' | 'think_harder';
 
@@ -56,19 +31,14 @@ export default function AgenticPanel({
   externalTask,
   onExternalTaskConsumed,
 }: AgenticPanelProps) {
+  const stream = useAgenticStream(agentId, onError);
+
   const [goal, setGoal] = useState('');
   const [autoApprove, setAutoApprove] = useState(false);
   const routerMode = routerModeProp ?? 'auto';
   const [maxTurns, setMaxTurns] = useState(ROUTER_MAX_TURN_DEFAULTS[routerMode]);
-  const [status, setStatus] = useState<RunStatus>('idle');
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const [turn, setTurn] = useState(0);
-  const [steps, setSteps] = useState<TimelineStep[]>([]);
   const [mentorInput, setMentorInput] = useState('');
-  const [starting, setStarting] = useState(false);
   const timelineEndRef = useRef<HTMLDivElement>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const stepIdRef = useRef(0);
   const activeTierLabel =
     routerMode === 'think_harder'
       ? 'Pro'
@@ -76,44 +46,15 @@ export default function AgenticPanel({
         ? 'Standard'
         : 'Fast';
 
-  // Scroll to bottom when new steps arrive
+  // Scroll to bottom when new entries arrive
   useEffect(() => {
     timelineEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [steps]);
+  }, [stream.entries]);
 
-  // Cleanup EventSource on unmount
+  // Propagate busy state to parent
   useEffect(() => {
-    return () => {
-      eventSourceRef.current?.close();
-    };
-  }, []);
-
-  // Propagate busy state to parent for provider activity indicators
-  useEffect(() => {
-    const busy =
-      status === 'running' ||
-      status === 'waiting_for_mentor' ||
-      status === 'waiting_for_confirmation';
-    onBusyChange?.(busy);
-  }, [status, onBusyChange]);
-
-  const addStep = useCallback(
-    (type: string, turnNum: number, content: string, extra?: Partial<TimelineStep>) => {
-      const id = ++stepIdRef.current;
-      setSteps((prev) => [
-        ...prev,
-        {
-          id,
-          type,
-          turn: turnNum,
-          content,
-          collapsed: type === 'thinking' || type === 'tool_result',
-          ...extra,
-        },
-      ]);
-    },
-    []
-  );
+    onBusyChange?.(stream.isActive);
+  }, [stream.isActive, onBusyChange]);
 
   // Sync maxTurns when parent changes routerMode
   useEffect(() => {
@@ -125,182 +66,65 @@ export default function AgenticPanel({
     setMaxTurns(ROUTER_MAX_TURN_DEFAULTS[nextMode]);
   }, [onRouterModeChange]);
 
-  const attachToTaskStream = useCallback(
-    (nextTaskId: string) => {
-      eventSourceRef.current?.close();
-      const es = subscribeToAgenticStream(
-        agentId,
-        nextTaskId,
-        (eventName, rawData) => {
-          // Backend sends {event, data: {…}} via serde tagged enum; unwrap nested payload
-          const envelope = rawData as Record<string, unknown>;
-          const data = (envelope.data ?? envelope) as Record<string, unknown>;
-          switch (eventName) {
-            case 'thinking':
-              setTurn(data.turn as number);
-              addStep('thinking', data.turn as number, data.content as string);
-              break;
-            case 'tool_call':
-              addStep('tool_call', data.turn as number, JSON.stringify(data.arguments, null, 2), {
-                toolName: data.tool_name as string,
-              });
-              break;
-            case 'tool_result':
-              addStep('tool_result', data.turn as number, data.output as string, {
-                toolName: data.tool_name as string,
-                success: data.success as boolean,
-              });
-              break;
-            case 'mentor_needed':
-              setStatus('waiting_for_mentor');
-              setTurn(data.turn as number);
-              addStep('mentor_needed', data.turn as number, data.question as string);
-              break;
-            case 'confirmation_needed':
-              setStatus('waiting_for_confirmation');
-              setTurn(data.turn as number);
-              addStep(
-                'confirmation_needed',
-                data.turn as number,
-                `Tool: ${data.tool_name}\nArguments: ${JSON.stringify(data.arguments, null, 2)}`,
-                { toolName: data.tool_name as string }
-              );
-              break;
-            case 'done':
-              setStatus((data.status as string) === 'cancelled' ? 'cancelled' : 'completed');
-              addStep('done', data.turns_used as number, data.summary as string);
-              es.close();
-              break;
-            case 'error':
-              setStatus('failed');
-              addStep('error', 0, data.message as string);
-              es.close();
-              break;
-          }
-        },
-        () => {
-          // SSE connection error — could be normal close or network issue
-        }
-      );
-      eventSourceRef.current = es;
-    },
-    [addStep, agentId]
-  );
+  // Handle external task (launched from chat)
+  useEffect(() => {
+    if (!externalTask?.taskId) return;
+    if (stream.taskId === externalTask.taskId && stream.status !== 'idle') return;
+    setGoal(externalTask.goal || '');
+    stream.reset();
+    stream.attachToTask(externalTask.taskId);
+    onExternalTaskConsumed?.();
+  }, [
+    stream,
+    externalTask,
+    onExternalTaskConsumed,
+  ]);
 
   const handleStart = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      const text = goal.trim();
-      if (!text || starting) return;
-
-      setStarting(true);
-      setSteps([]);
-      setTurn(0);
-      stepIdRef.current = 0;
-
-      try {
-        const result = await startAgenticRun(agentId, {
-          goal: text,
-          max_turns: maxTurns,
-          auto_approve_safe_tools: autoApprove,
-          router_mode: routerMode,
-        });
-        setTaskId(result.task_id);
-        setStatus('running');
-        attachToTaskStream(result.task_id);
-      } catch (e) {
-        onError(e instanceof Error ? e.message : 'Failed to start agentic run');
-        setStatus('idle');
-      } finally {
-        setStarting(false);
-      }
+      await stream.start(goal, { maxTurns, autoApprove, routerMode });
     },
-    [agentId, goal, maxTurns, autoApprove, routerMode, starting, onError, attachToTaskStream]
+    [goal, maxTurns, autoApprove, routerMode, stream],
   );
-
-  useEffect(() => {
-    if (!externalTask?.taskId) return;
-    if (taskId === externalTask.taskId && status !== 'idle') return;
-    setGoal(externalTask.goal || '');
-    setSteps([]);
-    setTurn(0);
-    stepIdRef.current = 0;
-    setTaskId(externalTask.taskId);
-    setStatus('running');
-    attachToTaskStream(externalTask.taskId);
-    onExternalTaskConsumed?.();
-  }, [
-    attachToTaskStream,
-    externalTask,
-    onExternalTaskConsumed,
-    status,
-    taskId,
-  ]);
 
   const handleMentorRespond = useCallback(async () => {
-    if (!taskId || !mentorInput.trim()) return;
-    try {
-      await respondToAgent(agentId, taskId, mentorInput.trim());
-      setMentorInput('');
-      setStatus('running');
-      addStep('mentor_response', turn, mentorInput.trim());
-    } catch (e) {
-      onError(e instanceof Error ? e.message : 'Failed to send response');
-    }
-  }, [agentId, taskId, mentorInput, turn, onError, addStep]);
+    await stream.respondToMentor(mentorInput);
+    setMentorInput('');
+  }, [stream, mentorInput]);
 
-  const handleConfirm = useCallback(
-    async (approved: boolean) => {
-      if (!taskId) return;
-      try {
-        await confirmAgentTool(agentId, taskId, approved);
-        setStatus('running');
-        addStep('confirmation_response', turn, approved ? 'Approved' : 'Denied');
-      } catch (e) {
-        onError(e instanceof Error ? e.message : 'Failed to confirm');
-      }
-    },
-    [agentId, taskId, turn, onError, addStep]
-  );
-
-  const handleCancel = useCallback(async () => {
-    if (!taskId) return;
-    try {
-      await cancelAgenticRun(agentId, taskId);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : 'Failed to cancel');
-    }
-  }, [agentId, taskId, onError]);
-
-  const toggleCollapse = useCallback((stepId: number) => {
-    setSteps((prev) =>
-      prev.map((s) => (s.id === stepId ? { ...s, collapsed: !s.collapsed } : s))
-    );
+  const toggleCollapse = useCallback((entryId: number) => {
+    // Collapse state is UI-only; manage via local override map
+    setCollapsed((prev) => ({ ...prev, [entryId]: !prev[entryId] }));
   }, []);
+  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
 
-  const isActive =
-    status === 'running' ||
-    status === 'waiting_for_mentor' ||
-    status === 'waiting_for_confirmation';
+  const isCollapsed = useCallback(
+    (entry: { id: number; type: string }) => {
+      if (entry.id in collapsed) return collapsed[entry.id];
+      return entry.type === 'thinking' || entry.type === 'tool_result';
+    },
+    [collapsed],
+  );
 
   return (
     <div className="agentic-panel">
-      {status === 'idle' ? (
+      {stream.status === 'idle' ? (
         <form onSubmit={handleStart} className="agentic-goal-form">
           <textarea
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             placeholder={`Give ${agentName || 'your agent'} a task to work on autonomously...`}
             className="agentic-goal-input"
-            disabled={starting}
+            disabled={stream.starting}
           />
           <div className="agentic-goal-actions">
             <button
               type="submit"
               className="button-primary"
-              disabled={starting || !goal.trim()}
+              disabled={stream.starting || !goal.trim()}
             >
-              {starting ? 'Starting...' : 'Run Task'}
+              {stream.starting ? 'Starting...' : 'Run Task'}
             </button>
             <label>
               <input
@@ -344,29 +168,26 @@ export default function AgenticPanel({
         <>
           <div className="agentic-header">
             <div>
-              <span className={`agentic-status-badge agentic-status-${status}`}>
-                {status.replace(/_/g, ' ')}
+              <span className={`agentic-status-badge agentic-status-${stream.status}`}>
+                {stream.status.replace(/_/g, ' ')}
               </span>
               <span className="agentic-tier-badge">Tier: {activeTierLabel}</span>
               <span className="agentic-turn-counter">
-                Turn {turn}/{maxTurns}
+                Turn {stream.turn}/{maxTurns}
               </span>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
-              {isActive && (
-                <button className="button-secondary" onClick={handleCancel}>
+              {stream.isActive && (
+                <button className="button-secondary" onClick={stream.cancel}>
                   Cancel
                 </button>
               )}
-              {!isActive && (
+              {!stream.isActive && (
                 <button
                   className="button-primary"
                   onClick={() => {
-                    setStatus('idle');
-                    setTaskId(null);
-                    setSteps([]);
+                    stream.reset();
                     setGoal('');
-                    eventSourceRef.current?.close();
                   }}
                 >
                   New Task
@@ -376,85 +197,90 @@ export default function AgenticPanel({
           </div>
 
           <div className="agentic-timeline">
-            {steps.map((step) => (
-              <div
-                key={step.id}
-                className={`agentic-step agentic-step-${step.type}${step.success === false ? ' agentic-step-error' : ''}`}
-              >
-                <div className="agentic-step-label">
-                  <span>
-                    {step.toolName ? `${step.type}: ${step.toolName}` : step.type.replace(/_/g, ' ')}
-                  </span>
-                  <span>Turn {step.turn}</span>
-                  {step.collapsed && step.content.length > 100 && (
-                    <button
-                      className="agentic-step-toggle"
-                      onClick={() => toggleCollapse(step.id)}
-                    >
-                      expand
-                    </button>
-                  )}
-                  {!step.collapsed &&
-                    (step.type === 'thinking' || step.type === 'tool_result') && (
+            {stream.entries.map((entry) => {
+              const entryCollapsed = isCollapsed(entry);
+              return (
+                <div
+                  key={entry.id}
+                  className={`agentic-step agentic-step-${entry.type}${entry.success === false ? ' agentic-step-error' : ''}`}
+                >
+                  <div className="agentic-step-label">
+                    <span>
+                      {entry.toolName ? `${entry.type}: ${entry.toolName}` : entry.type.replace(/_/g, ' ')}
+                    </span>
+                    <span>Turn {entry.turn}</span>
+                    {entryCollapsed && entry.content.length > 100 && (
                       <button
                         className="agentic-step-toggle"
-                        onClick={() => toggleCollapse(step.id)}
+                        onClick={() => toggleCollapse(entry.id)}
+                        aria-label="Expand step details"
                       >
-                        collapse
+                        expand
                       </button>
                     )}
-                </div>
-                <div
-                  className={`agentic-step-content${step.collapsed ? ' collapsed' : ''}`}
-                  onClick={() => step.collapsed && toggleCollapse(step.id)}
-                >
-                  {step.content}
-                </div>
+                    {!entryCollapsed &&
+                      (entry.type === 'thinking' || entry.type === 'tool_result') && (
+                        <button
+                          className="agentic-step-toggle"
+                          onClick={() => toggleCollapse(entry.id)}
+                          aria-label="Collapse step details"
+                        >
+                          collapse
+                        </button>
+                      )}
+                  </div>
+                  <div
+                    className={`agentic-step-content${entryCollapsed ? ' collapsed' : ''}`}
+                    onClick={() => entryCollapsed && toggleCollapse(entry.id)}
+                  >
+                    {entry.content}
+                  </div>
 
-                {step.type === 'mentor_needed' &&
-                  status === 'waiting_for_mentor' &&
-                  step.id === steps[steps.length - 1]?.id && (
-                    <div className="agentic-mentor-form">
-                      <input
-                        type="text"
-                        value={mentorInput}
-                        onChange={(e) => setMentorInput(e.target.value)}
-                        placeholder="Your response..."
-                        className="agentic-mentor-input"
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleMentorRespond();
-                        }}
-                      />
-                      <button
-                        className="button-primary"
-                        onClick={handleMentorRespond}
-                        disabled={!mentorInput.trim()}
-                      >
-                        Respond
-                      </button>
-                    </div>
-                  )}
+                  {entry.type === 'mentor_needed' &&
+                    stream.status === 'waiting_for_mentor' &&
+                    entry.id === stream.entries[stream.entries.length - 1]?.id && (
+                      <div className="agentic-mentor-form">
+                        <input
+                          type="text"
+                          value={mentorInput}
+                          onChange={(e) => setMentorInput(e.target.value)}
+                          placeholder="Your response..."
+                          className="agentic-mentor-input"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleMentorRespond();
+                          }}
+                        />
+                        <button
+                          className="button-primary"
+                          onClick={handleMentorRespond}
+                          disabled={!mentorInput.trim()}
+                        >
+                          Respond
+                        </button>
+                      </div>
+                    )}
 
-                {step.type === 'confirmation_needed' &&
-                  status === 'waiting_for_confirmation' &&
-                  step.id === steps[steps.length - 1]?.id && (
-                    <div className="agentic-confirm-actions">
-                      <button
-                        className="button-approve"
-                        onClick={() => handleConfirm(true)}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        className="button-deny"
-                        onClick={() => handleConfirm(false)}
-                      >
-                        Deny
-                      </button>
-                    </div>
-                  )}
-              </div>
-            ))}
+                  {entry.type === 'confirmation_needed' &&
+                    stream.status === 'waiting_for_confirmation' &&
+                    entry.id === stream.entries[stream.entries.length - 1]?.id && (
+                      <div className="agentic-confirm-actions">
+                        <button
+                          className="button-approve"
+                          onClick={() => stream.confirm(true)}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          className="button-deny"
+                          onClick={() => stream.confirm(false)}
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    )}
+                </div>
+              );
+            })}
             <div ref={timelineEndRef} />
           </div>
         </>

@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use orion_capabilities::sensory::web_fetch;
 use orion_capabilities::sensory::web_search;
-use orion_core::{check_search_query, SecretsVault};
+use orion_core::{check_search_query, SkillKeychain};
 use orion_skills::channel::TriggerDescriptor;
 use orion_skills::manifest::{CapabilityDescriptor, NetworkPermission, Permission, SkillManifest};
 use orion_skills::skill::{
@@ -72,7 +72,7 @@ pub enum ErrorClass {
 
 pub struct WebBrowseSkill {
     manifest: SkillManifest,
-    vault: Arc<Mutex<SecretsVault>>,
+    keychain: Arc<Mutex<SkillKeychain>>,
     client: reqwest::Client,
 }
 
@@ -82,7 +82,7 @@ impl WebBrowseSkill {
         SkillManifest::parse(toml_str).expect("embedded skill.toml must be valid")
     }
 
-    pub fn with_secrets(manifest: SkillManifest, vault: Arc<Mutex<SecretsVault>>) -> Self {
+    pub fn with_secrets(manifest: SkillManifest, keychain: Arc<Mutex<SkillKeychain>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(10))
@@ -93,7 +93,7 @@ impl WebBrowseSkill {
 
         Self {
             manifest,
-            vault,
+            keychain,
             client,
         }
     }
@@ -210,13 +210,13 @@ impl WebBrowseSkill {
         }
 
         let (tavily_key, perplexity_key) = {
-            let vault = self
-                .vault
+            let kc = self
+                .keychain
                 .lock()
-                .map_err(|e| SkillError::ToolFailed(format!("Vault lock: {}", e)))?;
+                .map_err(|e| SkillError::ToolFailed(format!("Keychain lock: {}", e)))?;
             (
-                vault.get_secret("tavily").map(str::to_string),
-                vault.get_secret("perplexity").map(str::to_string),
+                kc.get_secret("tavily").map(str::to_string),
+                kc.get_secret("perplexity").map(str::to_string),
             )
         };
 
@@ -650,7 +650,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_wb_search_no_keys");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         let skill = WebBrowseSkill::with_secrets(WebBrowseSkill::default_manifest(), vault);
         let params = ToolParams::new()
             .with("query", "test query")
@@ -675,7 +675,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_wb_browser_no_url");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         let skill = WebBrowseSkill::with_secrets(WebBrowseSkill::default_manifest(), vault);
         let params = ToolParams::new().with("strategy", "browser_only");
         let ctx = ExecutionContext {
@@ -692,7 +692,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_wb_http_blocked");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let vault = Arc::new(Mutex::new(SecretsVault::new(tmp.clone())));
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(tmp.clone())));
         let skill = WebBrowseSkill::with_secrets(WebBrowseSkill::default_manifest(), vault);
         let params = ToolParams::new()
             .with("url", "http://127.0.0.1/")

@@ -3195,6 +3195,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 name = "orion-api"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "async-stream",
  "async-trait",
  "axum",
@@ -3227,7 +3228,6 @@ dependencies = [
  "skill-shell",
  "skill-web-browse",
  "skill-web-search",
- "soul-forge",
  "tokio",
  "tokio-stream",
  "tower-http 0.5.2",
@@ -3299,6 +3299,7 @@ dependencies = [
  "ed25519-dalek",
  "rand 0.8.5",
  "reqwest 0.11.27",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",

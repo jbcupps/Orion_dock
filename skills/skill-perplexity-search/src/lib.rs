@@ -4,7 +4,7 @@
 //! answers grounded in real-time web data, with source citations.
 
 use async_trait::async_trait;
-use orion_core::SecretsVault;
+use orion_core::SkillKeychain;
 use orion_skills::{
     CapabilityDescriptor, CostEstimate, ExecutionContext, HealthStatus, NetworkPermission,
     Permission, Skill, SkillConfig, SkillError, SkillHealth, SkillManifest, SkillResult,
@@ -71,7 +71,7 @@ struct SearchResult {
 
 pub struct PerplexitySearchSkill {
     manifest: SkillManifest,
-    vault: Arc<Mutex<SecretsVault>>,
+    keychain: Arc<Mutex<SkillKeychain>>,
 }
 
 impl PerplexitySearchSkill {
@@ -80,16 +80,16 @@ impl PerplexitySearchSkill {
         SkillManifest::parse(toml_str).expect("Failed to parse perplexity-search skill.toml")
     }
 
-    pub fn with_secrets(manifest: SkillManifest, vault: Arc<Mutex<SecretsVault>>) -> Self {
-        Self { manifest, vault }
+    pub fn with_secrets(manifest: SkillManifest, keychain: Arc<Mutex<SkillKeychain>>) -> Self {
+        Self { manifest, keychain }
     }
 
     fn get_api_key(&self) -> SkillResult<String> {
-        let vault = self
-            .vault
+        let kc = self
+            .keychain
             .lock()
-            .map_err(|e| SkillError::ToolFailed(format!("Failed to lock vault: {}", e)))?;
-        vault
+            .map_err(|e| SkillError::ToolFailed(format!("Failed to lock keychain: {}", e)))?;
+        kc
             .get_secret("perplexity")
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -210,7 +210,7 @@ impl Skill for PerplexitySearchSkill {
 
     fn health(&self) -> SkillHealth {
         let has_key = self
-            .vault
+            .keychain
             .lock()
             .map(|v| v.exists("perplexity"))
             .unwrap_or(false);
@@ -338,7 +338,7 @@ mod tests {
     }
 
     fn test_skill() -> PerplexitySearchSkill {
-        let vault = Arc::new(Mutex::new(SecretsVault::new(
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(
             std::env::temp_dir().join("orion_pplx_test"),
         )));
         PerplexitySearchSkill::with_secrets(test_manifest(), vault)
@@ -379,7 +379,7 @@ mod tests {
         let _skill = test_skill();
         // Even without a key, the superego check should run first
         // and block PII queries before we hit the missing key error
-        let vault = Arc::new(Mutex::new(SecretsVault::new(
+        let vault = Arc::new(Mutex::new(SkillKeychain::new(
             std::env::temp_dir().join("orion_pplx_test_block"),
         )));
         {

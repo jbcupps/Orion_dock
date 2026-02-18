@@ -1,0 +1,181 @@
+/* Inline task monitor — embedded in chat message flow */
+.task-monitor {
+  margin-top: 0.4rem;
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  background: var(--card-bg, #f8f8f8);
+  overflow: hidden;
+}
+
+.task-monitor-terminal {
+  border-color: var(--muted, #ccc);
+}
+
+.task-monitor-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.65rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.82rem;
+  color: var(--text, #1a1a1a);
+  text-align: left;
+}
+
+.task-monitor-header:hover {
+  background: color-mix(in srgb, var(--card-bg, #f8f8f8) 80%, var(--accent, #4e7be6) 20%);
+}
+
+.task-monitor-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.task-monitor-badge-running {
+  background: #e8f0fe;
+  color: #1a56db;
+}
+
+.task-monitor-badge-completed {
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+
+.task-monitor-badge-failed {
+  background: #fce8e6;
+  color: #c5221f;
+}
+
+.task-monitor-badge-cancelled {
+  background: #f3e8fd;
+  color: #7b1fa2;
+}
+
+.task-monitor-stats {
+  font-size: 0.76rem;
+  color: var(--muted, #666);
+  flex: 1;
+}
+
+.task-monitor-chevron {
+  font-size: 0.65rem;
+  color: var(--muted, #999);
+  flex-shrink: 0;
+}
+
+.task-monitor-summary {
+  padding: 0.25rem 0.65rem 0.45rem;
+  font-size: 0.8rem;
+  color: var(--muted, #555);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Expanded details */
+.task-monitor-details {
+  border-top: 1px solid var(--border, #e0e0e0);
+  padding: 0.55rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.task-monitor-goal {
+  font-size: 0.78rem;
+  color: var(--muted, #666);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-monitor-empty {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted, #999);
+}
+
+.task-monitor-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.task-monitor-step {
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg, #fff);
+}
+
+.task-monitor-step-thinking {
+  border-left: 3px solid var(--accent, #4e7be6);
+}
+
+.task-monitor-step-tool_result {
+  border-left: 3px solid var(--ok, #2f8f46);
+}
+
+.task-monitor-step-tool_error {
+  border-left: 3px solid var(--error, #b23a3a);
+}
+
+.task-monitor-step-done {
+  border-left: 3px solid var(--ok, #2f8f46);
+  background: #f4faf5;
+}
+
+.task-monitor-step-error {
+  border-left: 3px solid var(--error, #b23a3a);
+  background: #fef6f5;
+}
+
+.task-monitor-step-ask_mentor {
+  border-left: 3px solid #e6a817;
+}
+
+.task-monitor-step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.task-monitor-step-type {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted, #666);
+}
+
+.task-monitor-step-turn {
+  font-size: 0.68rem;
+  color: var(--muted, #999);
+}
+
+.task-monitor-step-content {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text, #1a1a1a);
+}
+
+.task-monitor-timeline-btn {
+  align-self: flex-start;
+  font-size: 0.76rem;
+  padding: 0.2rem 0.55rem;
+  margin-top: 0.2rem;
+}

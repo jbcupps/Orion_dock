@@ -10,7 +10,7 @@ use orion_core::config::{
     provider_preset, EmailAccountConfig, EmailAccountStatus, EmailProvider, TlsMode,
 };
 use orion_core::email_auth;
-use orion_core::secrets::SecretsVault;
+use orion_core::skill_keychain::SkillKeychain;
 use orion_skills::channel::{SkillEvent, TriggerDescriptor, TriggerFrequency, TriggerPriority};
 use orion_skills::manifest::{
     CapabilityDescriptor, NetworkPermission, Permission, SkillId, SkillManifest,
@@ -29,7 +29,7 @@ pub const EMAIL_SKILL_ID: &str = "com.orion.skills.email";
 /// Generic email skill supporting multiple accounts and providers.
 pub struct EmailSkill {
     manifest: SkillManifest,
-    vault: Option<Arc<Mutex<SecretsVault>>>,
+    keychain: Option<Arc<Mutex<SkillKeychain>>>,
     accounts: Arc<RwLock<Vec<EmailAccountConfig>>>,
     event_sender: Option<Arc<tokio::sync::broadcast::Sender<SkillEvent>>>,
 }
@@ -83,21 +83,21 @@ impl EmailSkill {
     pub fn new(manifest: SkillManifest) -> Self {
         Self {
             manifest,
-            vault: None,
+            keychain: None,
             accounts: Arc::new(RwLock::new(Vec::new())),
             event_sender: None,
         }
     }
 
-    /// Create with vault and account list for credential lookup.
+    /// Create with keychain and account list for credential lookup.
     pub fn with_secrets(
         manifest: SkillManifest,
-        vault: Arc<Mutex<SecretsVault>>,
+        keychain: Arc<Mutex<SkillKeychain>>,
         accounts: Arc<RwLock<Vec<EmailAccountConfig>>>,
     ) -> Self {
         Self {
             manifest,
-            vault: Some(vault),
+            keychain: Some(keychain),
             accounts,
             event_sender: None,
         }
@@ -140,14 +140,14 @@ impl EmailSkill {
         }
     }
 
-    /// Get IMAP credentials from vault for an account.
+    /// Get IMAP credentials from keychain for an account.
     fn get_credentials(&self, account: &EmailAccountConfig) -> SkillResult<(String, String)> {
-        let vault = self.vault.as_ref().ok_or_else(|| {
-            SkillError::MissingSecret("No vault configured for credential lookup".to_string())
+        let keychain = self.keychain.as_ref().ok_or_else(|| {
+            SkillError::MissingSecret("No keychain configured for credential lookup".to_string())
         })?;
-        let guard = vault
+        let guard = keychain
             .lock()
-            .map_err(|e| SkillError::ToolFailed(format!("Vault lock: {}", e)))?;
+            .map_err(|e| SkillError::ToolFailed(format!("Keychain lock: {}", e)))?;
 
         let password = email_auth::get_password(&guard, &account.id).ok_or_else(|| {
             SkillError::MissingSecret(format!(
