@@ -291,6 +291,13 @@ impl IdEgoRouter {
         self.ego.is_some()
     }
 
+    /// Returns true when a cloud Ego provider is available for agentic
+    /// (tool-calling) work.  Id (local) must never be used for autonomous
+    /// loops — it is heartbeat-class only.
+    pub fn ego_available_for_agentic(&self) -> bool {
+        self.ego.is_some()
+    }
+
     /// Get the name of the Ego provider, if configured.
     pub fn ego_provider_name(&self) -> Option<&EgoProvider> {
         self.ego_provider.as_ref()
@@ -1393,5 +1400,28 @@ mod tests {
         let messages = vec![Message::new("user", "Hi")];
         let result = router.id_only(messages).await;
         assert!(result.is_err(), "id_only uses Id stub which errors on chat");
+    }
+
+    #[tokio::test]
+    async fn test_ego_available_for_agentic_false_without_ego() {
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::EgoPrimary);
+        assert!(
+            !router.ego_available_for_agentic(),
+            "No Ego configured — agentic should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ego_available_for_agentic_true_with_ego() {
+        let router = IdEgoRouter::with_provider(
+            None,
+            Some("openai"),
+            Some("test-key".to_string()),
+            RoutingMode::EgoPrimary,
+        );
+        assert!(
+            router.ego_available_for_agentic(),
+            "Ego configured — agentic should be allowed"
+        );
     }
 }

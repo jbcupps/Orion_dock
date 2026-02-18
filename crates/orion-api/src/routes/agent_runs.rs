@@ -192,6 +192,7 @@ pub(crate) async fn api_agentic_stream(
                         AgenticEvent::MentorNeeded { .. } => "mentor_needed",
                         AgenticEvent::ConfirmationNeeded { .. } => "confirmation_needed",
                         AgenticEvent::Done { .. } => "done",
+                        AgenticEvent::Warning { .. } => "warning",
                         AgenticEvent::Error { .. } => "error",
                     };
                     yield Ok(Event::default().event(event_name).data(json));

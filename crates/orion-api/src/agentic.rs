@@ -4,6 +4,7 @@
 //! autonomously researches/plans/executes/observes/iterates, and only
 //! consults the mentor at genuine decision points via `ask_mentor`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -105,6 +106,10 @@ pub enum AgenticEvent {
         status: String,
         turns_used: u32,
         tool_calls: u32,
+    },
+    Warning {
+        turn: u32,
+        message: String,
     },
     Error {
         message: String,
@@ -274,6 +279,31 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     // but we need an initial router for the pre-flight heartbeat check.
     let mut router = build_router_from_keyring(&cfg).await;
 
+    // Pre-flight: Ego (cloud) is required for agentic tool-calling.
+    // Id is heartbeat-class only and must never run autonomous loops.
+    if !router.ego_available_for_agentic() {
+        let err_msg = "Agentic task rejected: Ego/cloud provider required for tool calling. \
+            Local Id is heartbeat-only. Configure OPENAI_API_KEY (or equivalent) in .env"
+            .to_string();
+        tracing::error!("{}", err_msg);
+        let _ = cfg.event_tx.send(AgenticEvent::Error {
+            message: err_msg.clone(),
+        });
+        update_status(&cfg.task_handle, AgenticTaskStatus::Failed, 0).await;
+        persist_run_summary(
+            &cfg.agent_dir,
+            &cfg.task_id,
+            &cfg.goal,
+            &cfg.run_source,
+            &err_msg,
+            "failed",
+            0,
+            0,
+            cfg.started_at,
+        );
+        return;
+    }
+
     // Pre-flight: verify at least one LLM is reachable before entering the loop.
     if let Err(e) = router.heartbeat().await {
         let err_msg = format!("LLM health check failed before starting task: {}", e);
@@ -299,6 +329,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
     let mut turn: u32 = 0;
     let mut total_tool_calls: u32 = 0;
     let mut tools_changed = false;
+
+    // Circuit breaker state: kill death-spirals where the LLM cannot execute tools.
+    let mut no_tool_streak: u32 = 0;
+    let mut seen_states: HashSet<u64> = HashSet::new();
 
     loop {
         // Re-resolve credentials from disk every turn so newly stored API keys
@@ -442,6 +476,45 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             .iter()
             .map(BirthToolRequest::from)
             .collect();
+
+        // Circuit breaker: detect duplicate state (LLM producing identical responses).
+        let state_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            response.content.hash(&mut hasher);
+            hasher.finish()
+        };
+        if !seen_states.insert(state_hash) {
+            let abort_msg = format!(
+                "Agentic loop aborted: duplicate LLM response detected on turn {} \
+                 (loop/death-spiral). Id is heartbeat-only — verify Ego is routing correctly.",
+                turn
+            );
+            tracing::warn!("{}", abort_msg);
+            let _ = cfg.event_tx.send(AgenticEvent::Warning {
+                turn,
+                message: abort_msg.clone(),
+            });
+            let _ = cfg.event_tx.send(AgenticEvent::Done {
+                summary: abort_msg.clone(),
+                status: "failed".to_string(),
+                turns_used: turn,
+                tool_calls: total_tool_calls,
+            });
+            update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
+            persist_run_summary(
+                &cfg.agent_dir,
+                &cfg.task_id,
+                &cfg.goal,
+                &cfg.run_source,
+                &abort_msg,
+                "failed",
+                turn,
+                total_tool_calls,
+                cfg.started_at,
+            );
+            break;
+        }
 
         // Emit thinking event
         if !clean_content.trim().is_empty() {
@@ -758,14 +831,53 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             ));
         }
 
-        // No tool calls and no synthetic tools — nudge the LLM
+        // No tool calls and no synthetic tools — nudge or circuit-break.
         if tool_requests.is_empty() {
+            no_tool_streak += 1;
+            if no_tool_streak >= 3 {
+                let abort_msg = format!(
+                    "Agentic loop aborted: LLM failed to execute tools for {} consecutive turns. \
+                     Id is heartbeat-only — configure a cloud Ego provider (OPENAI_API_KEY or equivalent).",
+                    no_tool_streak
+                );
+                tracing::warn!("{}", abort_msg);
+                let _ = cfg.event_tx.send(AgenticEvent::Warning {
+                    turn,
+                    message: abort_msg.clone(),
+                });
+                let _ = cfg.event_tx.send(AgenticEvent::Done {
+                    summary: abort_msg.clone(),
+                    status: "failed".to_string(),
+                    turns_used: turn,
+                    tool_calls: total_tool_calls,
+                });
+                update_status(&cfg.task_handle, AgenticTaskStatus::Failed, turn).await;
+                persist_run_summary(
+                    &cfg.agent_dir,
+                    &cfg.task_id,
+                    &cfg.goal,
+                    &cfg.run_source,
+                    &abort_msg,
+                    "failed",
+                    turn,
+                    total_tool_calls,
+                    cfg.started_at,
+                );
+                break;
+            }
             messages.push(Message::new(
                 "user",
-                "You didn't use any tools. Either use a tool to make progress on the goal, or use `task_complete` if you're done.",
+                format!(
+                    "You didn't use any tools ({}/{} no-tool turns before abort). \
+                     Either use a tool to make progress on the goal, or use `task_complete` if you're done.",
+                    no_tool_streak, 3
+                ),
             ));
             continue;
         }
+
+        // Tools were used — reset the no-tool streak.
+        no_tool_streak = 0;
 
         // Execute real tool calls
         let mut tool_results: Vec<String> = Vec::new();
@@ -2073,5 +2185,51 @@ mod tests {
     fn test_find_skill_for_tool_returns_none_on_empty_registry() {
         let registry = SkillRegistry::new();
         assert!(find_skill_for_tool(&registry, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_state_hash_detects_duplicates() {
+        use std::hash::{Hash, Hasher};
+        let mut seen: HashSet<u64> = HashSet::new();
+        let compute = |s: &str| -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+
+        // First insert succeeds
+        assert!(seen.insert(compute("I'll try the email tool")));
+        // Duplicate is caught
+        assert!(!seen.insert(compute("I'll try the email tool")));
+        // Different content is fine
+        assert!(seen.insert(compute("Different response")));
+    }
+
+    #[test]
+    fn test_no_tool_streak_threshold() {
+        // Verify the circuit breaker fires at exactly 3
+        let threshold: u32 = 3;
+        let mut streak: u32 = 0;
+        for i in 1..=4 {
+            streak += 1;
+            if i < 3 {
+                assert!(streak < threshold, "should not fire at streak {}", i);
+            }
+            if i == 3 {
+                assert!(streak >= threshold, "should fire at streak {}", i);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_warning_event_serialization() {
+        let event = AgenticEvent::Warning {
+            turn: 5,
+            message: "test warning".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"Warning\""));
+        assert!(json.contains("test warning"));
     }
 }
