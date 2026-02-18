@@ -192,6 +192,19 @@ sequenceDiagram
     API-->>Mentor: SSE Event (Done)
 ```
 
+### 3.4 Id vs Ego Responsibility Matrix (Non-Negotiable)
+
+| Responsibility                       | Id (local, heartbeat) | Ego (cloud tiers)      |
+|--------------------------------------|-----------------------|------------------------|
+| Birth process                        | Yes                   | No                     |
+| Heartbeat / cron lightweight checks  | Yes                   | No                     |
+| Privacy-sensitive / local-only       | Yes                   | No                     |
+| Operational chat (mentor)            | No                    | Yes                    |
+| Agentic / tool-calling loops         | No                    | Yes (min Standard)     |
+| Orchestration spawn_agentic          | No                    | Yes                    |
+
+Id is a heartbeat-class model. It must never be used for tool-calling, autonomous loops, or any task requiring function-calling reliability.
+
 ---
 
 ## 4. Data Architecture

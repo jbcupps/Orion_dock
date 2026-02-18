@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Agent**: The software system and implementation (APIs, crates, orchestration runtime, skills framework).
 - **Mentor**: The human operator guiding the entity.
 - **Base identity**: `soul.md` is the entity's foundational identity document. `ethics.md` and `instincts.md` constrain and shape behavior, while `growth.md` captures development over time.
+- **Id**: The local LLM layer (Ollama / LM Studio). Id handles birth, heartbeat cron checks, and privacy-sensitive flows only. **Id must never be used for tool-calling or autonomous loops.**
+- **Ego**: The cloud LLM layer (OpenAI, Anthropic, etc.). Ego handles all mentor-facing chat, agentic runs, and any task requiring tool use. Minimum tier for agentic work is Standard.
 
 ## Interactive Session Commands
 
@@ -132,6 +134,19 @@ Key invariants:
 - **Orchestration** — In `orion-api` (MVP module): evaluates job significance, applies escalation policy, and controls scheduled/background execution.
 - **Ego** — Cloud LLM (OpenAI, Anthropic, etc.). Primary path for mentor-facing operational chat and deep reasoning, with Id fallback. Model selection is tier-aware (Fast/Standard/Pro).
 - **Superego** — Safety pre-check support exists in router; dedicated ethical oversight model remains planned.
+
+### Id vs Ego Responsibility Matrix (Non-Negotiable)
+
+| Responsibility                       | Id (local, heartbeat) | Ego (cloud tiers)      |
+|--------------------------------------|-----------------------|------------------------|
+| Birth process                        | Yes                   | No                     |
+| Heartbeat / cron lightweight checks  | Yes                   | No                     |
+| Privacy-sensitive / local-only       | Yes                   | No                     |
+| Operational chat (mentor)            | No                    | Yes                    |
+| Agentic / tool-calling loops         | No                    | Yes (min Standard)     |
+| Orchestration spawn_agentic          | No                    | Yes                    |
+
+Id is a heartbeat-class model. It must never be used for tool-calling, autonomous loops, or any task requiring function-calling reliability.
 
 ### Tier Model System (Fast / Standard / Pro)
 

@@ -103,6 +103,19 @@ For full-stack UAT (with postgres, orion-api, frontend up): run the container wi
 
 Birth runs **local-first** (pinned birth model); once a cloud API key is set, routing uses cloud first with local fallback. Ego model selection follows the **tier system**: Fast (lightweight), Standard (balanced), or Pro (highest capability with native council debate/synthesis). See `documents/HOW_TO_RUN_LOCALLY.md` for full stack and birth runtime steps.
 
+### Id vs Ego Responsibility Matrix (Non-Negotiable)
+
+| Responsibility                       | Id (local, heartbeat) | Ego (cloud tiers)      |
+|--------------------------------------|-----------------------|------------------------|
+| Birth process                        | Yes                   | No                     |
+| Heartbeat / cron lightweight checks  | Yes                   | No                     |
+| Privacy-sensitive / local-only       | Yes                   | No                     |
+| Operational chat (mentor)            | No                    | Yes                    |
+| Agentic / tool-calling loops         | No                    | Yes (min Standard)     |
+| Orchestration spawn_agentic          | No                    | Yes                    |
+
+Id is a heartbeat-class model. It must never be used for tool-calling, autonomous loops, or any task requiring function-calling reliability.
+
 ## Repository Layout
 
 - `crates/` - core Rust crates (including `orion-api`)
