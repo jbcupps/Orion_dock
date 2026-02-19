@@ -20,6 +20,30 @@ Desktop installer and npm-based deployment paths have been retired in favor of c
 - Full stack Compose profile: postgres, ollama, orion-api, frontend
 - GitHub Actions CI (when enabled): Docker-only fast suite (lint, build, test, frontend typecheck/build in container) and full-stack UAT job. CI and Dependabot may be disabled; run `scripts/local-verify` (or `run-uat.ps1` / `dev-stack.ps1`) locally before pushing.
 
+## Ecosystem Role & Alignment
+
+This repository is one piece of a deliberate three-part identity ecosystem (see [sao-ecosystem-article.md](https://github.com/jbcupps/SAO/blob/main/sao-ecosystem-article.md) and diagrams below).
+
+- **Abigail** – personal local agent with full free will (owner-controlled keys).
+- **Orion Dock** – enterprise container agents (same soul + skills model, SAO-provisioned).
+- **SAO** – central management, cryptographic vault, agent registry, enterprise IDP bridge.
+
+### Agent Soul Contract
+
+Every running agent instance carries the same archetype:
+- `soul.md` + `ethics.md` + `org-map.md`
+- Merged at birth into the runtime system prompt.
+- Skills always split: **tool** (code/env) + **how-to-use.md** (ego guidance).
+
+### Visual References
+
+- Modular Crate Architecture (Orion)
+- Birth Lifecycle
+- Bicameral Mind / IdEgo Router
+- Zero Trust Security Model
+- Autonomous Execution Loop
+- SAO Trust Chain & Ecosystem Overview
+
 ## Quick Start
 
 ### Prerequisites

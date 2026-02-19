@@ -88,6 +88,25 @@ export default function AgenticPanel({
     [goal, maxTurns, autoApprove, routerMode, stream],
   );
 
+  useEffect(() => {
+    if (!externalTask?.taskId) return;
+    if (taskId === externalTask.taskId && status !== 'idle') return;
+    setGoal(externalTask.goal || '');
+    setSteps([]);
+    setTurn(0);
+    stepIdRef.current = 0;
+    setTaskId(externalTask.taskId);
+    setStatus('running');
+    attachToTaskStream(externalTask.taskId);
+    onExternalTaskConsumed?.();
+  }, [
+    attachToTaskStream,
+    externalTask,
+    onExternalTaskConsumed,
+    status,
+    taskId,
+  ]);
+
   const handleMentorRespond = useCallback(async () => {
     await stream.respondToMentor(mentorInput);
     setMentorInput('');

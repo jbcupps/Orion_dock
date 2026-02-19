@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   archiveChat,
+  fetchAgenticTaskStatus,
   fetchChatArchive,
   fetchChatArchives,
   fetchChatHistory,
@@ -92,6 +93,7 @@ export default function OperationalChat({
   const liveToolLogRef = useRef<ActivityLogItem[]>([]);
   // Captures SSE launch info mid-stream so it can be attached to the assistant message in onDone.
   const pendingLaunchRef = useRef<{ task_id: string; goal: string } | null>(null);
+  const reportedTaskResultsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -111,6 +113,55 @@ export default function OperationalChat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!agenticLaunchInfo) {
+      setAgenticTaskProgress(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: number | null = null;
+    const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
+    const poll = async () => {
+      try {
+        const status = await fetchAgenticTaskStatus(agentId, agenticLaunchInfo.task_id);
+        if (cancelled) return;
+        const summaryStep = [...status.steps]
+          .reverse()
+          .find((step) => step.step_type === 'done' || step.step_type === 'error');
+        const summary = summaryStep?.content?.trim();
+        setAgenticTaskProgress({
+          status: status.status,
+          turn: status.turn,
+          summary: summary || undefined,
+        });
+        if (terminalStatuses.has(status.status)) {
+          if (!reportedTaskResultsRef.current.has(status.task_id)) {
+            reportedTaskResultsRef.current.add(status.task_id);
+            const finalMessage = summary
+              ? `Agentic task ${status.status}: ${summary}`
+              : `Agentic task ${status.status}. Open the Agent timeline for details.`;
+            setMessages((prev) => [...prev, { role: 'assistant', content: finalMessage }]);
+          }
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+      if (!cancelled) {
+        timer = window.setTimeout(() => {
+          void poll();
+        }, 5000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [agentId, agenticLaunchInfo]);
 
   // Propagate busy state to parent for provider activity indicators
   useEffect(() => {
@@ -252,7 +303,7 @@ export default function OperationalChat({
       setLiveToolLog([]);
       liveToolLogRef.current = [];
       pendingLaunchRef.current = null;
-      const userMessage: ChatMessageItem = {
+      const userMessage: BirthChatMessageItem = {
         role: 'user',
         content: renderUserMessage(text, attachments),
       };
@@ -433,6 +484,35 @@ export default function OperationalChat({
           >
             dismiss
           </button>
+        </div>
+      )}
+      {agenticLaunchInfo && (
+        <div className="operational-chat-agentic-launch">
+          <div className="operational-chat-agentic-launch-main">
+            <span>
+              Agentic task started: <strong>{agenticLaunchInfo.goal}</strong>
+            </span>
+            {agenticTaskProgress && (
+              <span className="operational-chat-agentic-progress">
+                Status: {agenticTaskProgress.status.replace(/_/g, ' ')} • Turn {agenticTaskProgress.turn}
+                {agenticTaskProgress.summary ? ` • ${agenticTaskProgress.summary}` : ''}
+              </span>
+            )}
+          </div>
+          {onAgenticTaskLaunched && (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => {
+                onAgenticTaskLaunched({
+                  taskId: agenticLaunchInfo.task_id,
+                  goal: agenticLaunchInfo.goal,
+                });
+              }}
+            >
+              View full timeline
+            </button>
+          )}
         </div>
       )}
       <div className="operational-chat-toolbar">
