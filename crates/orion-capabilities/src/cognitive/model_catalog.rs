@@ -430,7 +430,7 @@ async fn fetch_google_models(api_key: &str) -> (Vec<String>, String, Vec<String>
         .unwrap_or_default();
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1/models?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models?key={}",
         api_key
     );
 

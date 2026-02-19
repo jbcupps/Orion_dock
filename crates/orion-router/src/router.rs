@@ -44,18 +44,13 @@ pub enum SuperegoResult {
 }
 
 /// Superego L2 mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuperegoL2Mode {
+    #[default]
     Off,
     Advisory,
     Enforce,
-}
-
-impl Default for SuperegoL2Mode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 /// Which cloud provider is backing the Ego slot.
@@ -252,13 +247,38 @@ impl IdEgoRouter {
         }
     }
 
-    /// Perform a heartbeat check to verify the local LLM is reachable.
-    /// If using HTTP provider, sends a minimal request; if using stub, always succeeds.
+    /// Perform a heartbeat check to verify at least one LLM is reachable.
+    ///
+    /// Tries the local Id provider first. If that fails (e.g. Ollama is cold)
+    /// but Ego (cloud) is configured, pings Ego. Only returns an error when
+    /// *both* Id and Ego are unreachable.
     pub async fn heartbeat(&self) -> anyhow::Result<()> {
-        match &self.local_http {
+        let id_result = match &self.local_http {
             Some(provider) => provider.heartbeat().await,
             None => stub_heartbeat().await,
+        };
+
+        if id_result.is_ok() {
+            return Ok(());
         }
+
+        // Id failed — try Ego if configured.
+        if let Some(ego) = &self.ego {
+            let ego_result = ego
+                .complete(&CompletionRequest::simple(vec![Message::new(
+                    "user",
+                    "heartbeat",
+                )]))
+                .await;
+            if ego_result.is_ok() {
+                tracing::info!("heartbeat: Id unreachable but Ego responded — proceeding");
+                return Ok(());
+            }
+            tracing::warn!("heartbeat: both Id and Ego failed");
+        }
+
+        // Both failed (or no Ego configured) — propagate the original Id error.
+        id_result
     }
 
     /// Check if using a local HTTP provider (vs in-process stub).
@@ -268,6 +288,13 @@ impl IdEgoRouter {
 
     /// Check if Ego (cloud) is configured.
     pub fn has_ego(&self) -> bool {
+        self.ego.is_some()
+    }
+
+    /// Returns true when a cloud Ego provider is available for agentic
+    /// (tool-calling) work.  Id (local) must never be used for autonomous
+    /// loops — it is heartbeat-class only.
+    pub fn ego_available_for_agentic(&self) -> bool {
         self.ego.is_some()
     }
 
@@ -1373,5 +1400,28 @@ mod tests {
         let messages = vec![Message::new("user", "Hi")];
         let result = router.id_only(messages).await;
         assert!(result.is_err(), "id_only uses Id stub which errors on chat");
+    }
+
+    #[tokio::test]
+    async fn test_ego_available_for_agentic_false_without_ego() {
+        let router = IdEgoRouter::new(None, None, None, RoutingMode::EgoPrimary);
+        assert!(
+            !router.ego_available_for_agentic(),
+            "No Ego configured — agentic should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ego_available_for_agentic_true_with_ego() {
+        let router = IdEgoRouter::with_provider(
+            None,
+            Some("openai"),
+            Some("test-key".to_string()),
+            RoutingMode::EgoPrimary,
+        );
+        assert!(
+            router.ego_available_for_agentic(),
+            "Ego configured — agentic should be allowed"
+        );
     }
 }

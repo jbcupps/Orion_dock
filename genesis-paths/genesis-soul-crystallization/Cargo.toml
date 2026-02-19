@@ -1,0 +1,18 @@
+[package]
+name = "genesis-soul-crystallization"
+version.workspace = true
+edition.workspace = true
+description = "Soul Crystallization genesis path: depth-based psychometric profiling"
+
+[dependencies]
+genesis-core = { path = "../../crates/genesis-core" }
+orion-core = { path = "../../crates/orion-core" }
+orion-soul-crystallization = { path = "../../crates/orion-soul-crystallization" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

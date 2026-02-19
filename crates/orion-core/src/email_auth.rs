@@ -3,14 +3,14 @@
 //! **Security:** Access tokens, refresh tokens, and passwords must never be logged or
 //! included in error messages. Use redaction or opaque error types when surfacing failures.
 //!
-//! Tokens are stored in SecretsVault under per-account keys. Key scheme:
+//! Tokens are stored in SkillKeychain under per-account keys. Key scheme:
 //! - `email:{account_id}:refresh_token` — OAuth2 refresh token
 //! - `email:{account_id}:access_token` — OAuth2 access token (short-lived)
 //! - `email:{account_id}:access_expires_at` — ISO 8601 expiry
 //! - `email:{account_id}:password` — app password or SMTP token (opaque)
 
 use crate::config::{EmailAccountConfig, EmailAccountStatus, EmailAuthType};
-use crate::secrets::SecretsVault;
+use crate::skill_keychain::SkillKeychain;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -47,24 +47,24 @@ pub struct OAuth2Tokens {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Persist OAuth2 tokens for an account. Caller must call vault.save() after.
+/// Persist OAuth2 tokens for an account. Caller must call keychain.save() after.
 pub fn store_oauth_tokens(
-    vault: &mut SecretsVault,
+    keychain: &mut SkillKeychain,
     account_id: &str,
     access_token: &str,
     refresh_token: &str,
     expires_at: DateTime<Utc>,
 ) {
-    vault.set_secret(&key_access(account_id), access_token);
-    vault.set_secret(&key_refresh(account_id), refresh_token);
-    vault.set_secret(&key_access_expires(account_id), &expires_at.to_rfc3339());
+    keychain.set_secret(&key_access(account_id), access_token);
+    keychain.set_secret(&key_refresh(account_id), refresh_token);
+    keychain.set_secret(&key_access_expires(account_id), &expires_at.to_rfc3339());
 }
 
 /// Load OAuth2 tokens for an account. Returns None if any required key is missing.
-pub fn get_oauth_tokens(vault: &SecretsVault, account_id: &str) -> Option<OAuth2Tokens> {
-    let access = vault.get_secret(&key_access(account_id))?;
-    let refresh = vault.get_secret(&key_refresh(account_id))?;
-    let expires_str = vault.get_secret(&key_access_expires(account_id))?;
+pub fn get_oauth_tokens(keychain: &SkillKeychain, account_id: &str) -> Option<OAuth2Tokens> {
+    let access = keychain.get_secret(&key_access(account_id))?;
+    let refresh = keychain.get_secret(&key_refresh(account_id))?;
+    let expires_str = keychain.get_secret(&key_access_expires(account_id))?;
     let expires_at = DateTime::parse_from_rfc3339(expires_str)
         .ok()?
         .with_timezone(&Utc);
@@ -75,29 +75,29 @@ pub fn get_oauth_tokens(vault: &SecretsVault, account_id: &str) -> Option<OAuth2
     })
 }
 
-/// Store app password or SMTP token. Caller must call vault.save() after.
-pub fn store_password(vault: &mut SecretsVault, account_id: &str, password: &str) {
-    vault.set_secret(&key_password(account_id), password);
+/// Store app password or SMTP token. Caller must call keychain.save() after.
+pub fn store_password(keychain: &mut SkillKeychain, account_id: &str, password: &str) {
+    keychain.set_secret(&key_password(account_id), password);
 }
 
 /// Get app password or SMTP token.
-pub fn get_password(vault: &SecretsVault, account_id: &str) -> Option<String> {
-    vault
+pub fn get_password(keychain: &SkillKeychain, account_id: &str) -> Option<String> {
+    keychain
         .get_secret(&key_password(account_id))
         .map(String::from)
 }
 
-/// Remove all stored tokens/password for an account. Caller must call vault.save() after.
-pub fn revoke_account(vault: &mut SecretsVault, account_id: &str) {
-    vault.remove_secret(&key_refresh(account_id));
-    vault.remove_secret(&key_access(account_id));
-    vault.remove_secret(&key_access_expires(account_id));
-    vault.remove_secret(&key_password(account_id));
+/// Remove all stored tokens/password for an account. Caller must call keychain.save() after.
+pub fn revoke_account(keychain: &mut SkillKeychain, account_id: &str) {
+    keychain.remove_secret(&key_refresh(account_id));
+    keychain.remove_secret(&key_access(account_id));
+    keychain.remove_secret(&key_access_expires(account_id));
+    keychain.remove_secret(&key_password(account_id));
 }
 
 /// True if access token is still valid (with 60s buffer). Does not check refresh token presence.
-pub fn access_token_valid(vault: &SecretsVault, account_id: &str) -> bool {
-    let Some(expires_str) = vault.get_secret(&key_access_expires(account_id)) else {
+pub fn access_token_valid(keychain: &SkillKeychain, account_id: &str) -> bool {
+    let Some(expires_str) = keychain.get_secret(&key_access_expires(account_id)) else {
         return false;
     };
     let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_str) else {
@@ -108,24 +108,24 @@ pub fn access_token_valid(vault: &SecretsVault, account_id: &str) -> bool {
 }
 
 /// True if we have a refresh token (so we can try to refresh without user).
-pub fn has_refresh_token(vault: &SecretsVault, account_id: &str) -> bool {
-    vault.get_secret(&key_refresh(account_id)).is_some()
+pub fn has_refresh_token(keychain: &SkillKeychain, account_id: &str) -> bool {
+    keychain.get_secret(&key_refresh(account_id)).is_some()
 }
 
 /// Whether this account needs interactive reauth (no refresh token or auth type is app-password and password missing).
-pub fn needs_reauth(account: &EmailAccountConfig, vault: &SecretsVault) -> bool {
+pub fn needs_reauth(account: &EmailAccountConfig, keychain: &SkillKeychain) -> bool {
     if account.status != EmailAccountStatus::Active {
         return true;
     }
     match account.auth_type {
         EmailAuthType::OAuth2 => {
-            if !has_refresh_token(vault, &account.id) {
+            if !has_refresh_token(keychain, &account.id) {
                 return true;
             }
-            !access_token_valid(vault, &account.id)
+            !access_token_valid(keychain, &account.id)
         }
         EmailAuthType::SmtpToken | EmailAuthType::AppPassword => {
-            get_password(vault, &account.id).is_none()
+            get_password(keychain, &account.id).is_none()
         }
     }
 }
@@ -148,20 +148,20 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_email_auth_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let mut vault = SecretsVault::new(tmp.clone());
+        let mut vault = SkillKeychain::new(tmp.clone());
         let expires = Utc::now() + chrono::Duration::hours(1);
         store_oauth_tokens(&mut vault, "gmail1", "access_abc", "refresh_xyz", expires);
         vault.save().unwrap();
-        let loaded = SecretsVault::load(tmp.clone()).unwrap();
+        let loaded = SkillKeychain::load(tmp.clone()).unwrap();
         let tokens = get_oauth_tokens(&loaded, "gmail1").unwrap();
         assert_eq!(tokens.access_token, "access_abc");
         assert_eq!(tokens.refresh_token, "refresh_xyz");
         assert!(access_token_valid(&loaded, "gmail1"));
         assert!(has_refresh_token(&loaded, "gmail1"));
-        let mut vault2 = SecretsVault::load(tmp.clone()).unwrap();
+        let mut vault2 = SkillKeychain::load(tmp.clone()).unwrap();
         revoke_account(&mut vault2, "gmail1");
         vault2.save().unwrap();
-        let after = SecretsVault::load(tmp.clone()).unwrap();
+        let after = SkillKeychain::load(tmp.clone()).unwrap();
         assert!(get_oauth_tokens(&after, "gmail1").is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -171,7 +171,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_email_reauth_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let vault = SecretsVault::new(tmp.clone());
+        let vault = SkillKeychain::new(tmp.clone());
         let account = EmailAccountConfig {
             id: "acc1".to_string(),
             provider: EmailProvider::Gmail,
@@ -197,7 +197,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("orion_email_apppw_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let vault = SecretsVault::new(tmp.clone());
+        let vault = SkillKeychain::new(tmp.clone());
         let account = EmailAccountConfig {
             id: "acc1".to_string(),
             provider: EmailProvider::ImapFallback,
@@ -224,13 +224,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let tmp_path = tmp.clone();
-        let mut vault = SecretsVault::new(tmp);
+        let mut vault = SkillKeychain::new(tmp);
         store_password(&mut vault, "rev_acc", "secret123");
         vault.save().unwrap();
         assert!(get_password(&vault, "rev_acc").is_some());
         revoke_account(&mut vault, "rev_acc");
         vault.save().unwrap();
-        let v2 = SecretsVault::load(tmp_path.clone()).unwrap();
+        let v2 = SkillKeychain::load(tmp_path.clone()).unwrap();
         assert!(get_password(&v2, "rev_acc").is_none());
         let _ = std::fs::remove_dir_all(&tmp_path);
     }

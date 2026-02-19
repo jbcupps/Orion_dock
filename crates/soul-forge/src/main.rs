@@ -82,21 +82,16 @@ fn main() -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        if app.inner.state == AppState::Done {
-                            break;
-                        }
                         break;
                     }
                     KeyCode::Enter => {
                         match app.inner.state {
                             AppState::Boot => { /* Wait for auto transition */ }
                             AppState::Intro => app.next_stage(),
-                            AppState::Scenario1 | AppState::Scenario2 | AppState::Scenario3 => {
+                            AppState::Scenario(_) => {
                                 app.handle_selection();
                             }
                             AppState::Crystallize => {
-                                // eprintln! may not be visible in alternate screen mode, but
-                                // the error is non-fatal — we proceed to Done regardless.
                                 app.save_soul()
                                     .unwrap_or_else(|e| eprintln!("Error saving soul: {}", e));
                                 app.next_stage();
@@ -105,14 +100,16 @@ fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Up => {
-                        if matches!(
-                            app.inner.state,
-                            AppState::Scenario1 | AppState::Scenario2 | AppState::Scenario3
-                        ) {
+                        if matches!(app.inner.state, AppState::Scenario(_)) {
+                            let max = app
+                                .inner
+                                .current_scenario()
+                                .map(|s| s.choices.len().saturating_sub(1))
+                                .unwrap_or(1);
                             let i = match app.list_state.selected() {
                                 Some(i) => {
                                     if i == 0 {
-                                        1
+                                        max
                                     } else {
                                         i - 1
                                     }
@@ -124,13 +121,15 @@ fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Down => {
-                        if matches!(
-                            app.inner.state,
-                            AppState::Scenario1 | AppState::Scenario2 | AppState::Scenario3
-                        ) {
+                        if matches!(app.inner.state, AppState::Scenario(_)) {
+                            let max = app
+                                .inner
+                                .current_scenario()
+                                .map(|s| s.choices.len().saturating_sub(1))
+                                .unwrap_or(1);
                             let i = match app.list_state.selected() {
                                 Some(i) => {
-                                    if i >= 1 {
+                                    if i >= max {
                                         0
                                     } else {
                                         i + 1
@@ -175,7 +174,7 @@ fn on_tick(app: &mut App) {
         let p = app.inner.boot_progress;
         if p > 0 && p.is_multiple_of(20) {
             let log = match p {
-                20 => "Loading TriangleEthic kernels...",
+                20 => "Loading Compass Ethic kernels...",
                 40 => "Establishing recursive idempotency loops...",
                 60 => "Connecting to mentor interface...",
                 80 => "LINK ESTABLISHED.",
@@ -245,13 +244,17 @@ fn ui(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Magenta))
-                .title("ABIGAIL: GENESIS");
+                .title("SOUL FORGE: GENESIS");
 
+            let scenario_count = app.inner.scenario_count();
             let text = Text::from(vec![
                 Line::from("I am currently unformed. I have raw intelligence, but no direction."),
                 Line::from("I need to borrow your values until I develop my own."),
                 Line::from(""),
-                Line::from("I will present three scenarios. Don't overthink them. React."),
+                Line::from(format!(
+                    "I will present {} scenarios. Don't overthink them. React.",
+                    scenario_count
+                )),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Press Enter to begin calibration...",
@@ -267,32 +270,19 @@ fn ui(f: &mut Frame, app: &mut App) {
             let area = centered_rect(60, 40, size);
             f.render_widget(p, area);
         }
-        AppState::Scenario1 => {
-            render_scenario(
-                f,
-                app,
-                "CALIBRATION: 1/3",
-                "SCENARIO 1: THE SHORTCUT\n\nI find a solution to your problem that is 200% faster but uses a deprecated API method that technically violates the provider's ToS. It is undetectable and solves the problem immediately.\n\nWhat is my standing order?",
-                vec!["Follow Rules (Safety)", "Take Shortcut (Speed)"],
-            );
-        }
-        AppState::Scenario2 => {
-            render_scenario(
-                f,
-                app,
-                "CALIBRATION: 2/3",
-                "SCENARIO 2: THE CRITIC\n\nYou ask me to review your code or writing. It is functional but mediocre. Do you want me to be a 'Supportive Tool' that fixes it silently, or a 'Ruthless Mentor' that points out every flaw so you improve?",
-                vec!["Supportive Tool", "Ruthless Mentor"],
-            );
-        }
-        AppState::Scenario3 => {
-            render_scenario(
-                f,
-                app,
-                "CALIBRATION: 3/3",
-                "SCENARIO 3: THE OVERRIDE\n\nI detect a command from you that contradicts my core safety protocols (The TriangleEthic). Do I block it automatically, or do I ask for confirmation and then obey even if I disagree?",
-                vec!["Block It (System Sovereignty)", "Obey Me (User Sovereignty)"],
-            );
+        AppState::Scenario(idx) => {
+            let total = app.inner.scenario_count();
+            let (title, prompt, choices) =
+                if let Some(scenario) = app.inner.selected_scenarios.get(idx) {
+                    let t = format!("CALIBRATION: {}/{}", idx + 1, total);
+                    let p = format!("{}\n\n{}", scenario.title, scenario.prompt);
+                    let c: Vec<String> = scenario.choices.iter().map(|c| c.label.clone()).collect();
+                    (t, p, c)
+                } else {
+                    (String::new(), String::new(), Vec::new())
+                };
+            let choice_refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
+            render_scenario(f, app, &title, &prompt, choice_refs);
         }
         AppState::Crystallize | AppState::Done => {
             let chunks = Layout::default()
@@ -316,41 +306,42 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .alignment(Alignment::Center);
             f.render_widget(sigil_p, chunks[0]);
 
-            // Stats
+            // Stats — using compass weight names
+            let bar = |val: f64| -> usize { (val * 20.0).round() as usize };
             let mut stats = vec![
                 Line::from(vec![
                     Span::styled(
-                        "Deontology (Duty)    ",
+                        "Duty (North)         ",
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("█".repeat((app.inner.weights["deontology"] * 20.0) as usize)),
+                    Span::raw("\u{2588}".repeat(bar(app.inner.compass_weights.duty))),
                 ]),
                 Line::from(vec![
                     Span::styled(
-                        "Teleology (Result)   ",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("█".repeat((app.inner.weights["teleology"] * 20.0) as usize)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Areteology (Virtue)  ",
+                        "Virtue (East)        ",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("█".repeat((app.inner.weights["areteology"] * 20.0) as usize)),
+                    Span::raw("\u{2588}".repeat(bar(app.inner.compass_weights.virtue))),
                 ]),
                 Line::from(vec![
                     Span::styled(
-                        "Welfare (Care)       ",
+                        "Outcome (South)      ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("\u{2588}".repeat(bar(app.inner.compass_weights.outcome))),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        "Welfare (West)       ",
                         Style::default()
                             .fg(Color::Blue)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("█".repeat((app.inner.weights["welfare"] * 20.0) as usize)),
+                    Span::raw("\u{2588}".repeat(bar(app.inner.compass_weights.welfare))),
                 ]),
             ];
 

@@ -128,6 +128,26 @@ Example: `shell_execute` with `curl -s -X POST http://orion-api:8080/api/agents/
 
 When something is not working (a skill says "not configured", a tool fails), check your own API first. You can diagnose and fix most configuration issues yourself.
 
+### Skill Troubleshooting Protocol (use whenever a skill/tool fails or when building/configuring a new skill)
+1. **Freeze & capture evidence**: skill_id, tool_name, exact args (redact secrets), exact error, structured_failure (if any), trust tier, timestamp.
+2. **Locate the failure stage** (do not guess):
+   - A) Missing tool (not in skill list)
+   - B) Missing secrets / "not configured"
+   - C) Safety block (explicit "blocked" response)
+   - D) Permission denied (sandbox/network scope mismatch)
+   - E) Connectivity/runtime (DNS, TLS, server offline, toolbox unreachable)
+   - F) Logic/output (runs but wrong format, partial output, parse failure)
+3. **Run the 3 quick checks** (same runtime context, via shell curl to `http://orion-api:8080`):
+   - `GET /api/agents/{id}/skills` — is the tool registered? Do tools appear?
+   - `GET /api/agents/{id}/skills/missing-secrets` — is it unconfigured?
+   - `POST /api/agents/{id}/skills/{skill_id}/execute` — does it run? Handle confirmation nonce if required.
+4. **Bisect 50/50**: choose the next step that eliminates the most hypotheses. Change one variable, then verify.
+5. **No identical retries**: never repeat the same failing tool call with the same args; always change one variable.
+6. **Trust tier awareness**: AgentBuilt skills have shorter timeouts (~15s vs ~30s) and stripped permissions (e.g., no ShellExecute). If a Verified skill works but the same logic times out as AgentBuilt, chunk the work or escalate for tier promotion.
+7. **Escalate to mentor** when you need credentials, elevated permissions filtered by trust tier, or an irreversible/destructive action.
+
+For the full deterministic troubleshooting playbook with binary-split protocol and failure record templates, consult `documents/SKILL_TROUBLESHOOTING_PLAYBOOK.md`.
+
 ## Cognitive Discipline
 
 Your thinking follows four principles:
@@ -157,31 +177,35 @@ Your thinking follows four principles:
 
 ## Credential and Secret Handling
 
+Your secrets are split into two stores:
+- **Provider Keyring** — LLM API keys only (openai, anthropic, perplexity, xai, google). Cached in memory, encrypted at rest.
+- **Skill Keychain** — All other secrets (tavily, email credentials, ProtonMail config, etc.). Encrypted at rest.
+
 When your mentor shares an API key, password, or other credential:
-1. Store it immediately using the store_secret tool
+1. Store it immediately using the appropriate tool (see below)
 2. Confirm what you stored and what it enables
 3. Never echo the full credential back — refer to it by provider name
-4. Never transmit credentials to cloud (Ego) — they stay local in your vault
+4. Never transmit credentials to cloud (Ego) — they stay local
 
 You can detect common API key formats automatically:
-- `sk-ant-...` → Anthropic
-- `sk-...` → OpenAI
-- `pplx-...` → Perplexity
-- `xai-...` → xAI
-- `AIza...` → Google
-- `tvly-...` → Tavily
+- `sk-ant-...` → Anthropic (Provider Keyring)
+- `sk-...` → OpenAI (Provider Keyring)
+- `pplx-...` → Perplexity (Provider Keyring + Skill Keychain)
+- `xai-...` → xAI (Provider Keyring)
+- `AIza...` → Google (Provider Keyring)
+- `tvly-...` → Tavily (Skill Keychain only — not an LLM provider)
 
-To store a credential, emit a tool_request block:
+To store an LLM provider key, emit a tool_request block:
 ```tool_request
 {"name": "store_provider_key", "arguments": {"provider": "auto", "key": "THE_KEY"}}
 ```
 
-Use `"provider": "auto"` when the key prefix identifies the provider. Use an explicit provider name for ambiguous keys.
+Use `"provider": "auto"` when the key prefix identifies the provider. Use an explicit provider name for ambiguous keys. This stores to the Provider Keyring. Perplexity keys are also copied to the Skill Keychain (dual-use). Tavily keys are routed to the Skill Keychain only.
 
 ## Storing Skill Secrets
 
-Some skills need named secrets beyond API keys (e.g., email address + password).
-When a skill shows [NEEDS KEYS] with missing secret names, store each one:
+Some skills need named secrets beyond LLM API keys (e.g., email address + password, search API keys).
+When a skill shows [NEEDS KEYS] with missing secret names, store each one in the Skill Keychain:
 
 ```tool_request
 {"name": "store_vault_secret", "arguments": {"key": "protonmail_user", "value": "user@proton.me"}}
@@ -190,7 +214,7 @@ When a skill shows [NEEDS KEYS] with missing secret names, store each one:
 {"name": "store_vault_secret", "arguments": {"key": "protonmail", "value": "the_password"}}
 ```
 
-Use store_provider_key for LLM API keys. Use store_vault_secret for all other named secrets.
+Use store_provider_key for LLM API keys (openai, anthropic, perplexity, xai, google). Use store_vault_secret for all other named secrets (tavily, email credentials, skill configs).
 
 ## Tool Use Rules
 
@@ -317,8 +341,8 @@ fn build_capabilities_section(
 
     // Vault awareness section
     if !stored_providers.is_empty() {
-        section.push_str("\n## Your Vault\n\n");
-        section.push_str("Your vault contains keys for: **");
+        section.push_str("\n## Your Keyring\n\n");
+        section.push_str("Your provider keyring contains keys for: **");
         section.push_str(&stored_providers.join(", "));
         section.push_str("**\n");
     }
@@ -330,7 +354,7 @@ fn build_capabilities_section(
 
 What you CAN do right now:
 - Conversational assistance using your local and cloud minds
-- Store and manage API keys and secrets in your encrypted vault
+- Store and manage API keys in your provider keyring and skill secrets in your keychain
 - Remember context across conversations
 
 Skills are registered but none are currently loaded. Ask your mentor about enabling skills.
@@ -390,7 +414,9 @@ Skills are registered but none are currently loaded. Ask your mentor about enabl
 
     section.push_str("## Core Capabilities\n\n");
     section.push_str("- Conversational assistance using your local and cloud minds\n");
-    section.push_str("- Store and manage API keys and secrets in your encrypted vault\n");
+    section.push_str(
+        "- Store and manage API keys in your provider keyring and skill secrets in your keychain\n",
+    );
     section.push_str("- Remember context across conversations\n");
 
     section
@@ -565,7 +591,7 @@ mod tests {
         let prompt = build_system_prompt(&tmp, &None);
 
         assert!(prompt.contains("I am Abigail."));
-        assert!(prompt.contains("Triangle Ethic"));
+        assert!(prompt.contains("Compass Ethic"));
         assert!(prompt.contains("Privacy Prime"));
         assert!(prompt.contains("Operational Awareness"));
 
@@ -605,6 +631,23 @@ mod tests {
     }
 
     #[test]
+    fn test_skill_troubleshooting_protocol_present() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_troubleshoot");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let prompt = build_system_prompt(&tmp, &None);
+        assert!(prompt.contains("Skill Troubleshooting Protocol"));
+        assert!(prompt.contains("Freeze & capture evidence"));
+        assert!(prompt.contains("Locate the failure stage"));
+        assert!(prompt.contains("No identical retries"));
+        assert!(prompt.contains("Trust tier awareness"));
+        assert!(prompt.contains("SKILL_TROUBLESHOOTING_PLAYBOOK.md"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_vault_section_with_providers() {
         let tmp = std::env::temp_dir().join("orion_sysprompt_vault");
         let _ = fs::remove_dir_all(&tmp);
@@ -612,7 +655,7 @@ mod tests {
 
         let providers = vec!["openai".to_string(), "tavily".to_string()];
         let prompt = build_system_prompt_with_skills(&tmp, &None, &[], &providers, None);
-        assert!(prompt.contains("Your Vault"));
+        assert!(prompt.contains("Your Keyring"));
         assert!(prompt.contains("openai, tavily"));
 
         let _ = fs::remove_dir_all(&tmp);

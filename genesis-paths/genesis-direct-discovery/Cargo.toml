@@ -1,0 +1,17 @@
+[package]
+name = "genesis-direct-discovery"
+version.workspace = true
+edition.workspace = true
+description = "Direct Discovery genesis path: LLM conversation to discover agent identity"
+
+[dependencies]
+genesis-core = { path = "../../crates/genesis-core" }
+orion-core = { path = "../../crates/orion-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

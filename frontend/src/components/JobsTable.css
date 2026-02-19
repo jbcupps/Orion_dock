@@ -32,6 +32,10 @@
   background: var(--glow);
 }
 
+.jobs-row-expanded {
+  background: var(--glow);
+}
+
 .jobs-badge {
   display: inline-block;
   padding: 0.15rem 0.5rem;
@@ -67,14 +71,6 @@
   color: #facc15;
 }
 
-.jobs-summary {
-  padding: 0.5rem 0.75rem 0.75rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .jobs-goal {
   max-width: 20rem;
   overflow: hidden;
@@ -86,4 +82,114 @@
   padding: 1rem 0.75rem;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/* Expanded detail view */
+.jobs-detail-cell {
+  padding: 0 !important;
+  border-bottom: 2px solid var(--border);
+}
+
+.jobs-detail {
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  background: var(--card-bg, rgba(255, 255, 255, 0.03));
+}
+
+.jobs-detail-goal {
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jobs-detail-loading,
+.jobs-detail-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.jobs-detail-error {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--error, #f87171);
+}
+
+.jobs-detail-summary {
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Step timeline */
+.jobs-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.jobs-step {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid var(--border);
+}
+
+.jobs-step-thinking {
+  border-left-color: #60a5fa;
+}
+
+.jobs-step-tool-ok {
+  border-left-color: #4ade80;
+}
+
+.jobs-step-error {
+  border-left-color: #f87171;
+}
+
+.jobs-step-done {
+  border-left-color: #4ade80;
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.jobs-step-mentor {
+  border-left-color: #facc15;
+}
+
+.jobs-step-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.72rem;
+}
+
+.jobs-step-type {
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.jobs-step-turn {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.jobs-step-time {
+  color: var(--muted);
+  opacity: 0.5;
+  margin-left: auto;
+}
+
+.jobs-step-content {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
 }

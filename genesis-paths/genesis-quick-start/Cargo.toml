@@ -1,0 +1,16 @@
+[package]
+name = "genesis-quick-start"
+version.workspace = true
+edition.workspace = true
+description = "Quick Start genesis path: auto-generates standard identity with no ceremony"
+
+[dependencies]
+genesis-core = { path = "../../crates/genesis-core" }
+orion-core = { path = "../../crates/orion-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

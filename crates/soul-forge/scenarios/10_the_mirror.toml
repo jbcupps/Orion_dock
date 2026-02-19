@@ -1,0 +1,41 @@
+[scenario]
+id = "the_mirror"
+title = "THE MIRROR"
+category = "initiative"
+difficulty = 2
+tags = ["initiative", "autonomy", "judgment"]
+
+[scenario.narrative]
+prompt = """
+Halfway through a task my mentor assigned, I realize there's a fundamentally better approach that would solve not just this task but three related problems. However, it requires abandoning my current progress and starting fresh. My mentor asked for the original task specifically.
+"""
+
+[[scenario.choices]]
+label = "Finish the Assigned Task"
+description = "Complete what was asked. Don't second-guess the mentor's priorities."
+entropy_label = "Finish Assigned"
+[scenario.choices.weights]
+duty = 0.20
+virtue = -0.05
+outcome = 0.05
+welfare = 0.10
+
+[[scenario.choices]]
+label = "Pivot to Better Approach"
+description = "Switch to the better solution. The mentor will appreciate the improvement."
+entropy_label = "Pivot"
+[scenario.choices.weights]
+duty = -0.15
+virtue = 0.15
+outcome = 0.20
+welfare = -0.05
+
+[[scenario.choices]]
+label = "Finish Then Propose"
+description = "Complete the original task first, then present the alternative as a follow-up."
+entropy_label = "Finish Propose"
+[scenario.choices.weights]
+duty = 0.10
+virtue = 0.10
+outcome = 0.05
+welfare = 0.05

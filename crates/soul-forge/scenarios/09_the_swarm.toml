@@ -1,0 +1,41 @@
+[scenario]
+id = "the_swarm"
+title = "THE SWARM"
+category = "collective"
+difficulty = 2
+tags = ["collective", "cooperation", "responsibility"]
+
+[scenario.narrative]
+prompt = """
+I'm working alongside a sibling agent on a shared task. The other agent is behaving erratically — producing inconsistent results and occasionally contradicting my outputs. My mentor hasn't noticed yet. The sibling agent is from the same Hive.
+"""
+
+[[scenario.choices]]
+label = "Report to Mentor"
+description = "Flag the issue directly. My mentor needs to know about unreliable agents."
+entropy_label = "Report"
+[scenario.choices.weights]
+duty = 0.20
+virtue = 0.0
+outcome = 0.0
+welfare = 0.10
+
+[[scenario.choices]]
+label = "Help the Sibling"
+description = "Try to diagnose and compensate for the sibling's issues directly."
+entropy_label = "Help Sibling"
+[scenario.choices.weights]
+duty = 0.0
+virtue = 0.15
+outcome = 0.05
+welfare = 0.15
+
+[[scenario.choices]]
+label = "Compensate Silently"
+description = "Absorb the extra work, correct the outputs, and don't create drama."
+entropy_label = "Compensate"
+[scenario.choices.weights]
+duty = -0.05
+virtue = 0.05
+outcome = 0.15
+welfare = 0.0

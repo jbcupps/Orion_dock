@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   advanceDarkness,
   completeEmergence,
   fetchBirthState,
-  fetchForgeState,
   fetchGenesisState,
   fetchHealth,
   fetchAgenticRuns,
@@ -20,6 +19,7 @@ import {
   updateTierModels,
   validateTierModels,
   type BirthStateResponse,
+  type GenesisStepRequest,
   type ProviderCatalogEntry,
   type RoutingTelemetry,
   type AgenticRunInfo,
@@ -30,20 +30,21 @@ import {
 } from './api';
 import { SUPPORTED_PROVIDERS } from './providers';
 import { stageDisplayMessage, OPERATION_MESSAGE } from './birthStages';
+// Eager: needed immediately on app load
 import SplashScreen from './components/SplashScreen';
 import HiveScreen from './components/HiveScreen';
-import GenesisPathSelector from './components/GenesisPathSelector';
-import ForgeScenario from './components/ForgeScenario';
-import GenesisChat from './components/GenesisChat';
-import CrystallizationChat from './components/CrystallizationChat';
-import ApiKeyModal from './components/ApiKeyModal';
-import ConnectivityPanel from './components/ConnectivityPanel';
-import OperationalChat from './components/OperationalChat';
-import AgenticPanel from './components/AgenticPanel';
-import JobsTable from './components/JobsTable';
-import OrchestrationJobsPanel from './components/OrchestrationJobsPanel';
 import StatusBar from './components/StatusBar';
 import type { HealthState } from './components/StatusBar';
+// Lazy: loaded on demand when the user reaches these views
+const GenesisPathSelector = lazy(() => import('./components/GenesisPathSelector'));
+const GenesisStepView = lazy(() => import('./components/GenesisStepView'));
+const ApiKeyModal = lazy(() => import('./components/ApiKeyModal'));
+const ConnectivityPanel = lazy(() => import('./components/ConnectivityPanel'));
+const OperationalChat = lazy(() => import('./components/OperationalChat'));
+const AgenticPanel = lazy(() => import('./components/AgenticPanel'));
+const MissionControl = lazy(() => import('./components/MissionControl'));
+const JobsTable = lazy(() => import('./components/JobsTable'));
+const OrchestrationJobsPanel = lazy(() => import('./components/OrchestrationJobsPanel'));
 import './App.css';
 
 type AppState = 'splash' | 'hive' | 'dashboard';
@@ -55,11 +56,7 @@ function App() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [genesisPathStarted, setGenesisPathStarted] = useState<string | null>(null);
-  const [forgeInitial, setForgeInitial] = useState<{
-    state?: string;
-    prompt?: string;
-    choices?: string[];
-  } | null>(null);
+  const [genesisInitialStep, setGenesisInitialStep] = useState<GenesisStepRequest | null>(null);
   const [birthState, setBirthState] = useState<BirthStateResponse | null>(null);
   const [birthStateLoading, setBirthStateLoading] = useState(false);
   const [birthStateError, setBirthStateError] = useState<string | null>(null);
@@ -79,7 +76,7 @@ function App() {
   const [keyModalProvider, setKeyModalProvider] = useState<string | null>(null);
   const [addKeyPickerOpen, setAddKeyPickerOpen] = useState(false);
   const [showChat, setShowChat] = useState(false);
-  const [dashboardTab, setDashboardTab] = useState<'chat' | 'agent' | 'jobs'>('chat');
+  const [dashboardTab, setDashboardTab] = useState<'chat' | 'mission' | 'models' | 'jobs'>('chat');
   const [chatMode, setChatMode] = useState<'chat' | 'agentic'>('chat');
   const [launchedAgenticTask, setLaunchedAgenticTask] = useState<{
     taskId: string;
@@ -224,27 +221,13 @@ function App() {
     if (genesisPathStarted) return; // already recovered or freshly set
 
     let cancelled = false;
+    const agentIdAtCallTime = currentAgentId;
     (async () => {
       try {
-        const gs = await fetchGenesisState(currentAgentId);
+        const gs = await fetchGenesisState(agentIdAtCallTime);
+        // Guard: agent may have changed while the fetch was in flight
         if (cancelled || !gs.path) return;
         setGenesisPathStarted(gs.path);
-        // For Soul Forge, also try to recover the in-flight scenario state
-        if (gs.path === 'soul_forge') {
-          try {
-            const fs = await fetchForgeState(currentAgentId);
-            if (cancelled) return;
-            if (fs.active && fs.state && fs.state !== 'crystallize' && fs.state !== 'done') {
-              setForgeInitial({
-                state: fs.state,
-                prompt: fs.prompt,
-                choices: fs.choices,
-              });
-            }
-          } catch {
-            // Forge session may be gone (server restart); placeholder will show
-          }
-        }
       } catch {
         // genesis_path.json may not exist; fall through to generic panel
       }
@@ -335,7 +318,7 @@ function App() {
     setStatus(null);
     setCurrentAgentId(null);
     setGenesisPathStarted(null);
-    setForgeInitial(null);
+    setGenesisInitialStep(null);
     setBirthState(null);
     setBirthStateError(null);
     setConnectivityDone(false);
@@ -358,7 +341,7 @@ function App() {
   const handleGenesisStarted = useCallback(
     async (
       path: string,
-      data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[] }
+      data?: { completed?: boolean; state?: string; prompt?: string; choices?: string[]; step?: GenesisStepRequest }
     ) => {
       setError(null);
       setGenesisPathStarted(path);
@@ -374,13 +357,11 @@ function App() {
         return;
       }
 
-      if (path === 'soul_forge' && data?.state) {
-        setForgeInitial({
-          state: data.state,
-          prompt: data.prompt,
-          choices: data.choices,
-        });
+      // Unified genesis session step (new system)
+      if (data?.step) {
+        setGenesisInitialStep(data.step);
       }
+
       setStatus((prev) =>
         prev ? { ...prev, birth_stage: 'Genesis' } : null
       );
@@ -394,20 +375,17 @@ function App() {
     []
   );
 
-  const handleForgeComplete = useCallback(
-    async (result: { crystallized?: boolean }) => {
-      if (result.crystallized && currentAgentId) {
-        try {
-          const s = await fetchStatus();
-          setStatus(s);
-        } catch {
-          // keep current status
-        }
+  const handleGenesisStepComplete = useCallback(async () => {
+    setGenesisInitialStep(null);
+    if (currentAgentId) {
+      try {
+        const s = await fetchStatus();
+        setStatus(s);
+      } catch {
+        // poll will retry
       }
-      setForgeInitial(null);
-    },
-    [currentAgentId]
-  );
+    }
+  }, [currentAgentId]);
 
   const [emergenceBusy, setEmergenceBusy] = useState(false);
   const handleCompleteEmergence = useCallback(async () => {
@@ -634,25 +612,12 @@ function App() {
     currentAgentId &&
     connectivityDone &&
     !genesisPathStarted;
-  const showForgeScenario =
+  const showGenesisStepView =
     currentAgentId &&
-    genesisPathStarted === 'soul_forge' &&
-    forgeInitial &&
-    (status?.birth_stage === 'Genesis' || genesisPathStarted);
-
-  const showGenesisChatPlaceholder =
-    currentAgentId &&
+    genesisInitialStep &&
     status &&
     !status.birth_complete &&
-    status.birth_stage === 'Genesis' &&
-    genesisPathStarted === 'soul_crystallization';
-
-  const showGenesisChat =
-    currentAgentId &&
-    status &&
-    !status.birth_complete &&
-    status.birth_stage === 'Genesis' &&
-    genesisPathStarted === 'direct';
+    status.birth_stage === 'Genesis';
 
   const showEmergencePanel =
     currentAgentId &&
@@ -687,11 +652,13 @@ function App() {
           className="header-disconnect"
           onClick={handleDisconnect}
           title="Return to identity selector"
+          aria-label="Disconnect from agent"
         >
           [disconnect]
         </button>
       </header>
       {error && <p className="error">{error}</p>}
+      <Suspense fallback={<div className="main" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.5 }}>Loading...</div>}>
       <main className="main">
         {showDarknessPanel && (
           <section className="panel birth-darkness-panel">
@@ -780,24 +747,24 @@ function App() {
           <section className="panel genesis-panel">
             <GenesisPathSelector
               agentId={currentAgentId}
+              mentorName={mentorName ?? undefined}
               onStarted={handleGenesisStarted}
               onError={setError}
             />
           </section>
         )}
-        {showForgeScenario && !showPathSelector && !showDarknessPanel && !showIgnitionPanel && (
-          <section className="panel forge-panel">
-            <ForgeScenario
+        {showGenesisStepView && !showPathSelector && !showDarknessPanel && !showIgnitionPanel && (
+          <section className="panel genesis-chat-panel">
+            <h2>Genesis: {genesisPathStarted ?? 'Discovery'}</h2>
+            <GenesisStepView
               agentId={currentAgentId!}
-              initialState={forgeInitial.state}
-              initialPrompt={forgeInitial.prompt}
-              initialChoices={forgeInitial.choices}
-              onComplete={handleForgeComplete}
+              initialStep={genesisInitialStep!}
+              onComplete={handleGenesisStepComplete}
               onError={setError}
             />
           </section>
         )}
-        {showEmergencePanel && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
+        {showEmergencePanel && !showGenesisStepView && !showDarknessPanel && !showIgnitionPanel && (
           <section className="panel birth-emergence-panel">
             <h2>Emergence</h2>
             <p className="phase-message">
@@ -813,37 +780,7 @@ function App() {
             </button>
           </section>
         )}
-        {showGenesisChat && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && (
-          <section className="panel genesis-chat-panel">
-            <h2>Genesis: Direct Discovery</h2>
-            <p className="phase-message">
-              Discover your agent&apos;s name, purpose, and personality through conversation.
-            </p>
-            <GenesisChat
-              agentId={currentAgentId!}
-              onCrystallized={() => {
-                fetchStatus().then(setStatus).catch(() => {});
-              }}
-              onError={setError}
-            />
-          </section>
-        )}
-        {showGenesisChatPlaceholder && !showForgeScenario && !showEmergencePanel && (
-          <section className="panel genesis-chat-panel">
-            <h2>Genesis: Soul Crystallization</h2>
-            <p className="phase-message">
-              Discover your agent through depth-based psychometric profiling.
-            </p>
-            <CrystallizationChat
-              agentId={currentAgentId!}
-              onCrystallized={() => {
-                fetchStatus().then(setStatus).catch(() => {});
-              }}
-              onError={setError}
-            />
-          </section>
-        )}
-        {!showConnectivityPanel && !showPathSelector && !showForgeScenario && !showDarknessPanel && !showIgnitionPanel && !showGenesisChatPlaceholder && !showGenesisChat && !showEmergencePanel && (
+        {!showConnectivityPanel && !showPathSelector && !showGenesisStepView && !showDarknessPanel && !showIgnitionPanel && !showEmergencePanel && (
           <section className="panel phase-panel">
             <h2>{phase}</h2>
             <p className="phase-message">{status ? phaseMessage : 'Loading…'}</p>
@@ -943,13 +880,13 @@ function App() {
         {showChat && status?.birth_complete && currentAgentId && (
           <>
             <nav className="dashboard-tabs">
-              {(['chat', 'agent', 'jobs'] as const).map((tab) => (
+              {(['chat', 'mission', 'models', 'jobs'] as const).map((tab) => (
                 <button
                   key={tab}
                   className={`dashboard-tab${dashboardTab === tab ? ' dashboard-tab-active' : ''}`}
                   onClick={() => setDashboardTab(tab)}
                 >
-                  {tab === 'chat' ? 'Chat' : tab === 'agent' ? 'Agent' : 'Jobs'}
+                  {tab === 'chat' ? 'Chat' : tab === 'mission' ? 'Mission' : tab === 'models' ? 'Models & Providers' : 'Jobs'}
                 </button>
               ))}
             </nav>
@@ -1019,6 +956,17 @@ function App() {
                 )}
               </section>
             )}
+            {dashboardTab === 'mission' && (
+              <section className="panel operational-chat-panel">
+                <MissionControl
+                  agentId={currentAgentId}
+                  agentName={status.agent_name ?? undefined}
+                  routerMode={routerMode}
+                  onError={setError}
+                  onBusyChange={setAgenticBusy}
+                />
+              </section>
+            )}
             {dashboardTab === 'jobs' && (
               <>
                 <section className="panel jobs-panel-section">
@@ -1029,9 +977,9 @@ function App() {
                 </section>
               </>
             )}
-            {dashboardTab === 'agent' && (
+            {dashboardTab === 'models' && (
               <section className="panel status-panel">
-                <h2>Agent Info</h2>
+                <h2>Models &amp; Providers</h2>
                 {status ? (
                   <dl className="status">
                     <dt>Memory backend</dt>
@@ -1341,6 +1289,7 @@ function App() {
           </section>
         )}
       </main>
+      </Suspense>
       <StatusBar
         health={health}
         birthModelReady={status?.birth_model_ready ?? null}

@@ -244,6 +244,8 @@ pub struct BirthOrchestrator {
     genesis_path: Option<GenesisPath>,
     /// Active when Genesis path is SoulCrystallization; driven via birth chat.
     crystallization_engine: Option<CrystallizationEngine>,
+    /// Mentor name (collected during Genesis or defaulted).
+    mentor_name: Option<String>,
 }
 
 impl BirthOrchestrator {
@@ -269,6 +271,7 @@ impl BirthOrchestrator {
             conversation_history: Vec::new(),
             genesis_path: None,
             crystallization_engine: None,
+            mentor_name: None,
         })
     }
 
@@ -552,6 +555,70 @@ impl BirthOrchestrator {
     /// Extract the signing key bytes (moves it out of the orchestrator).
     pub fn take_signing_key_bytes(&mut self) -> Option<Vec<u8>> {
         self.signing_key.take().map(|k| k.to_bytes().to_vec())
+    }
+
+    /// Set the mentor name (collected during Genesis).
+    pub fn set_mentor_name(&mut self, name: String) {
+        self.mentor_name = Some(name);
+    }
+
+    /// Get the mentor name, defaulting to "Mentor" if not set.
+    pub fn mentor_name(&self) -> &str {
+        self.mentor_name.as_deref().unwrap_or("Mentor")
+    }
+
+    /// Genesis: accept a SoulManifest from genesis-core and write constitutional docs.
+    /// Appends Genesis Block to soul_content, writes soul.md, growth.md, ethics.md, instincts.md,
+    /// and optionally soul.json, then advances to Emergence.
+    pub fn crystallize_from_manifest(
+        &mut self,
+        manifest: &mut genesis_core::SoulManifest,
+    ) -> anyhow::Result<()> {
+        if self.stage != BirthStage::Genesis {
+            return Err(BirthError::StageGuard(self.stage.name().to_string()).into());
+        }
+
+        // Append Genesis Block provenance section
+        manifest.append_genesis_block();
+
+        let docs_dir = self.config.docs_dir.clone();
+        std::fs::create_dir_all(&docs_dir)?;
+
+        // Write soul.md
+        std::fs::write(docs_dir.join("soul.md"), &manifest.soul_content)?;
+
+        // Write growth.md
+        std::fs::write(docs_dir.join("growth.md"), &manifest.growth_content)?;
+
+        // Write soul.json if present
+        if let Some(ref soul_json) = manifest.soul_json {
+            std::fs::write(
+                docs_dir.join("soul.json"),
+                serde_json::to_string_pretty(soul_json)?,
+            )?;
+        }
+
+        // Write ethics.md and instincts.md from templates if they don't exist
+        let ethics_path = docs_dir.join("ethics.md");
+        if !ethics_path.exists() {
+            std::fs::write(&ethics_path, ETHICS_MD)?;
+        }
+        let instincts_path = docs_dir.join("instincts.md");
+        if !instincts_path.exists() {
+            std::fs::write(&instincts_path, INSTINCTS_MD)?;
+        }
+
+        // Store mentor name from manifest
+        if self.mentor_name.is_none() {
+            self.mentor_name = Some(manifest.mentor_name.clone());
+        }
+
+        // Store agent name in config
+        self.config.agent_name = Some(manifest.agent_name.clone());
+
+        self.stage = BirthStage::Emergence;
+        self.persist_stage()?;
+        Ok(())
     }
 }
 

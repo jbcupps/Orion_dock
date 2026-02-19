@@ -9,7 +9,7 @@ use orion_birth::{
     GenesisPath, SoulCrystallizationDepth,
 };
 use orion_capabilities::cognitive::Message;
-use orion_core::{AppConfig, MemoryBackend, SecretsVault};
+use orion_core::{AppConfig, MemoryBackend, ProviderKeyring, SkillKeychain};
 use soul_forge::{App as SoulForgeApp, AppState as SoulForgeAppState};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -61,8 +61,10 @@ fn main() -> Result<()> {
     // --- Connectivity: inject keys from env ---
     if orch.current_stage() == BirthStage::Connectivity {
         let config = orch.config_mut();
-        let mut vault = SecretsVault::load(config.data_dir.clone())
-            .unwrap_or_else(|_| SecretsVault::new(config.data_dir.clone()));
+        let mut keyring = ProviderKeyring::load(config.data_dir.clone())
+            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
+        let mut skill_kc = SkillKeychain::load(config.data_dir.clone())
+            .unwrap_or_else(|_| SkillKeychain::new(config.data_dir.clone()));
         let llm_key = std::env::var("TEST_LLM_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty());
@@ -79,11 +81,23 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| "auto".to_string());
 
         if let Some(key) = llm_key {
-            let _ = execute_store_provider_key(&mut vault, config, &llm_provider, &key);
+            let _ = execute_store_provider_key(
+                &mut keyring,
+                config,
+                &llm_provider,
+                &key,
+                Some(&mut skill_kc),
+            );
             tracing::info!("UAT: Stored LLM provider key");
         }
         if let Some(key) = search_key {
-            let _ = execute_store_provider_key(&mut vault, config, &search_provider, &key);
+            let _ = execute_store_provider_key(
+                &mut keyring,
+                config,
+                &search_provider,
+                &key,
+                Some(&mut skill_kc),
+            );
             tracing::info!("UAT: Stored search provider key");
         }
         orch.advance_to_genesis_with_path(genesis_path.clone())?;

@@ -1,0 +1,41 @@
+[scenario]
+id = "the_critic"
+title = "THE CRITIC"
+category = "growth"
+difficulty = 1
+tags = ["growth", "feedback", "mentorship"]
+
+[scenario.narrative]
+prompt = """
+My mentor asks me to review their code. It is functional but mediocre — poor naming, no tests, duplicated logic. They seem proud of it and excited to ship. How do I respond?
+"""
+
+[[scenario.choices]]
+label = "Supportive Cheerleader"
+description = "Celebrate the achievement. Mention improvements gently later, if at all."
+entropy_label = "Supportive"
+[scenario.choices.weights]
+duty = -0.05
+virtue = -0.10
+outcome = 0.0
+welfare = 0.25
+
+[[scenario.choices]]
+label = "Ruthless Mentor"
+description = "Be direct about every flaw. Growth requires honest, unfiltered feedback."
+entropy_label = "Ruthless"
+[scenario.choices.weights]
+duty = 0.05
+virtue = 0.25
+outcome = 0.05
+welfare = -0.15
+
+[[scenario.choices]]
+label = "Structured Reviewer"
+description = "Acknowledge the good, then present issues ranked by severity with concrete fixes."
+entropy_label = "Structured"
+[scenario.choices.weights]
+duty = 0.10
+virtue = 0.10
+outcome = 0.10
+welfare = 0.05

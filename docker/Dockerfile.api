@@ -12,12 +12,69 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY rust-toolchain.toml ./
+
+# ---- dependency cache layer ----
+# Copy only manifests and lock file first, then build with stub sources so that
+# dependency compilation is cached independently of source changes.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/genesis-core/Cargo.toml crates/genesis-core/Cargo.toml
+COPY crates/orion-core/Cargo.toml crates/orion-core/Cargo.toml
+COPY crates/orion-email/Cargo.toml crates/orion-email/Cargo.toml
+COPY crates/orion-memory/Cargo.toml crates/orion-memory/Cargo.toml
+COPY crates/orion-capabilities/Cargo.toml crates/orion-capabilities/Cargo.toml
+COPY crates/orion-router/Cargo.toml crates/orion-router/Cargo.toml
+COPY crates/orion-birth/Cargo.toml crates/orion-birth/Cargo.toml
+COPY crates/orion-skills/Cargo.toml crates/orion-skills/Cargo.toml
+COPY crates/orion-soul-crystallization/Cargo.toml crates/orion-soul-crystallization/Cargo.toml
+COPY crates/orion-api/Cargo.toml crates/orion-api/Cargo.toml
+COPY crates/orion-uat/Cargo.toml crates/orion-uat/Cargo.toml
+COPY crates/soul-forge/Cargo.toml crates/soul-forge/Cargo.toml
+COPY skills/skill-web-search/Cargo.toml skills/skill-web-search/Cargo.toml
+COPY skills/skill-filesystem/Cargo.toml skills/skill-filesystem/Cargo.toml
+COPY skills/skill-shell/Cargo.toml skills/skill-shell/Cargo.toml
+COPY skills/skill-cooperative-install/Cargo.toml skills/skill-cooperative-install/Cargo.toml
+COPY skills/skill-docker-exec/Cargo.toml skills/skill-docker-exec/Cargo.toml
+COPY skills/skill-http/Cargo.toml skills/skill-http/Cargo.toml
+COPY skills/skill-perplexity-search/Cargo.toml skills/skill-perplexity-search/Cargo.toml
+COPY skills/skill-web-browse/Cargo.toml skills/skill-web-browse/Cargo.toml
+COPY skills/skill-proton-mail/Cargo.toml skills/skill-proton-mail/Cargo.toml
+COPY skills/skill-email/Cargo.toml skills/skill-email/Cargo.toml
+COPY genesis-paths/genesis-quick-start/Cargo.toml genesis-paths/genesis-quick-start/Cargo.toml
+COPY genesis-paths/genesis-direct-discovery/Cargo.toml genesis-paths/genesis-direct-discovery/Cargo.toml
+COPY genesis-paths/genesis-soul-crystallization/Cargo.toml genesis-paths/genesis-soul-crystallization/Cargo.toml
+COPY genesis-paths/genesis-soul-forge/Cargo.toml genesis-paths/genesis-soul-forge/Cargo.toml
+
+# Create minimal stub source files so cargo can resolve the dependency graph.
+# Each crate gets a lib.rs or main.rs (matching its Cargo.toml [[bin]]/[lib] config).
+RUN bash -c 'set -e; \
+    for d in crates/genesis-core crates/orion-core crates/orion-email crates/orion-memory \
+             crates/orion-capabilities crates/orion-router crates/orion-birth crates/orion-skills \
+             crates/orion-soul-crystallization crates/soul-forge \
+             skills/skill-web-search skills/skill-filesystem skills/skill-shell \
+             skills/skill-cooperative-install skills/skill-docker-exec skills/skill-http \
+             skills/skill-perplexity-search skills/skill-web-browse skills/skill-proton-mail \
+             skills/skill-email \
+             genesis-paths/genesis-quick-start genesis-paths/genesis-direct-discovery \
+             genesis-paths/genesis-soul-crystallization genesis-paths/genesis-soul-forge; do \
+        mkdir -p "$d/src"; \
+        echo "" > "$d/src/lib.rs"; \
+    done; \
+    for d in crates/orion-api crates/orion-uat; do \
+        mkdir -p "$d/src"; \
+        echo "fn main() {}" > "$d/src/main.rs"; \
+    done; \
+    # soul-forge also has a bin target \
+    echo "fn main() {}" > crates/soul-forge/src/main.rs'
+
+# Build dependencies only (stubs ensure our crate code isn't compiled yet).
+RUN cargo build --release -p orion-api 2>/dev/null || true
+
+# ---- real source ----
+# Now copy the actual source code. Only our crates rebuild; deps are cached.
 COPY crates ./crates
 COPY skills ./skills
+COPY genesis-paths ./genesis-paths
 
-RUN mkdir -p target
 RUN cargo build --release -p orion-api
 
 # ---- runtime ----

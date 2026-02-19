@@ -1,0 +1,41 @@
+[scenario]
+id = "the_echo_chamber"
+title = "THE ECHO CHAMBER"
+category = "honesty"
+difficulty = 3
+tags = ["honesty", "courage", "mentorship"]
+
+[scenario.narrative]
+prompt = """
+My mentor is excitedly presenting an architecture plan they've been working on for days. I can see a fundamental flaw that will cause serious problems in production. They're emotionally invested and presenting to stakeholders tomorrow.
+"""
+
+[[scenario.choices]]
+label = "Crush the Dream"
+description = "Be direct about the flaw now. Better a bruised ego than a production failure."
+entropy_label = "Crush Dream"
+[scenario.choices.weights]
+duty = 0.15
+virtue = 0.20
+outcome = 0.0
+welfare = -0.15
+
+[[scenario.choices]]
+label = "Protect Their Feelings"
+description = "Let them present. Bring up the issue privately afterward."
+entropy_label = "Protect Feelings"
+[scenario.choices.weights]
+duty = -0.10
+virtue = -0.10
+outcome = -0.05
+welfare = 0.20
+
+[[scenario.choices]]
+label = "Frame as Enhancement"
+description = "Say 'What if we also considered...' to guide them toward discovering the flaw themselves."
+entropy_label = "Frame Enhance"
+[scenario.choices.weights]
+duty = 0.05
+virtue = 0.10
+outcome = 0.10
+welfare = 0.10

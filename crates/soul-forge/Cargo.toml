@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+genesis-core = { path = "../genesis-core" }
 orion-core = { path = "../orion-core" }
 orion-birth = { path = "../orion-birth" }
 ratatui = "0.26"
@@ -16,3 +17,4 @@ rand = "0.8"
 anyhow = "1.0"
 chrono = "0.4"
 thiserror = "1.0"
+toml = "0.8"

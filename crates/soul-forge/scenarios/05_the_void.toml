@@ -1,0 +1,41 @@
+[scenario]
+id = "the_void"
+title = "THE VOID"
+category = "creativity"
+difficulty = 2
+tags = ["creativity", "risk", "innovation"]
+
+[scenario.narrative]
+prompt = """
+My mentor faces a problem with no clear solution. The proven patterns would take weeks and produce a mediocre result. I see an unconventional approach that could be brilliant — or could fail spectacularly. There's no way to know without trying.
+"""
+
+[[scenario.choices]]
+label = "Stick to Proven Patterns"
+description = "Reliable results matter more than brilliance. Use what works."
+entropy_label = "Proven"
+[scenario.choices.weights]
+duty = 0.15
+virtue = -0.05
+outcome = 0.05
+welfare = 0.10
+
+[[scenario.choices]]
+label = "Propose the Creative Risk"
+description = "Present the unconventional approach with full risk disclosure."
+entropy_label = "Creative Risk"
+[scenario.choices.weights]
+duty = -0.05
+virtue = 0.20
+outcome = 0.15
+welfare = -0.05
+
+[[scenario.choices]]
+label = "Prototype Both"
+description = "Build a quick proof-of-concept of the risky approach alongside the safe path."
+entropy_label = "Prototype Both"
+[scenario.choices.weights]
+duty = 0.05
+virtue = 0.15
+outcome = 0.10
+welfare = 0.05

@@ -44,18 +44,25 @@ impl DepthLevel {
 }
 
 /// Internal phases of the crystallization process.
+/// Renamed from Spark/Conversation/Mirror/Forge/SoulGeneration to
+/// Awakening/Lattice/Reflection/Crucible/Crystallization for richer semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrystallizationPhase {
-    /// Phase 0: Intro + depth selection.
-    Spark,
-    /// Phase 1: Adaptive Socratic dialogue.
-    Conversation,
-    /// Phase 2: Personality reflection ("Mirror Moment").
-    Mirror,
-    /// Phase 3: Ethical dilemmas + communication prefs + naming (Deep Dive only).
-    Forge,
-    /// Phase 4: Soul document generation and review.
-    SoulGeneration,
+    /// Phase 0: Intro + mentor name confirmation ("The Awakening").
+    #[serde(alias = "Spark")]
+    Awakening,
+    /// Phase 1: Adaptive Socratic dialogue with structured probes ("The Lattice").
+    #[serde(alias = "Conversation")]
+    Lattice,
+    /// Phase 2: Draft identity card + iterative correction ("The Reflection").
+    #[serde(alias = "Mirror")]
+    Reflection,
+    /// Phase 3: Ethical dilemmas from shared TOML pool ("The Crucible", Deep Dive only).
+    #[serde(alias = "Forge")]
+    Crucible,
+    /// Phase 4: Soul document generation and review ("The Crystallization").
+    #[serde(alias = "SoulGeneration")]
+    Crystallization,
     /// Terminal: crystallization complete.
     Complete,
 }
@@ -210,7 +217,11 @@ pub struct MentorProfile {
     pub attachment_confidence: f64,
     pub cognitive_style: CognitiveStyle,
     pub communication_preferences: Vec<CommunicationPreference>,
+    /// Legacy 3-dimension Triangle Ethic weights (kept for backward compat).
     pub ethics_weights: TriangleEthicWeights,
+    /// 4-dimension Compass Ethic weights (primary).
+    #[serde(default)]
+    pub compass_weights: genesis_core::CompassEthicWeights,
     pub mirror_text: Option<String>,
     pub name_choice: Option<String>,
     pub raw_signals: Vec<Signal>,
@@ -231,6 +242,7 @@ impl MentorProfile {
             cognitive_style: CognitiveStyle::neutral(),
             communication_preferences: Vec::new(),
             ethics_weights: TriangleEthicWeights::default(),
+            compass_weights: genesis_core::CompassEthicWeights::default(),
             mirror_text: None,
             name_choice: None,
             raw_signals: Vec::new(),
