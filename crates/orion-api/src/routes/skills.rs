@@ -530,7 +530,7 @@ pub(crate) async fn api_register_email_account(
     let outcome =
         register_email_account_internal(&id, &state.skill_keychain, &state.email_accounts, body)
             .await
-            .map_err(|e| ApiError::BadRequest(e))?;
+            .map_err(ApiError::BadRequest)?;
     tracing::info!(
         agent = %id,
         account_id = %outcome.account_id,

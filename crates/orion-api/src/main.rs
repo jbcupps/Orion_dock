@@ -895,7 +895,7 @@ async fn api_create_agent(
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Quick-start task join: {}", e)))?
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     }
 
     Ok(Json(CreateAgentResponse { id: uuid }))
@@ -1033,7 +1033,7 @@ async fn api_birth_state(
     )
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     let (response, key_bytes) = result;
 
@@ -1079,7 +1079,7 @@ async fn api_birth_advance_darkness(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     Ok(Json(HealthResponse { status: "ok" }))
 }
@@ -1120,7 +1120,7 @@ async fn api_birth_ignition(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     Ok(Json(HealthResponse { status: "ok" }))
 }
@@ -1257,7 +1257,7 @@ async fn api_genesis_start(
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
 
         // Clean up persisted signing key
         if let Some(dir) = agent_dir(&id) {
@@ -1294,7 +1294,7 @@ async fn api_genesis_start(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     let mut genesis_response = serde_json::json!({ "ok": true, "path": path.id() });
 
@@ -1411,7 +1411,7 @@ async fn api_genesis_step(
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
 
         // Clean up session
         sessions.remove(&id);
@@ -1528,7 +1528,7 @@ async fn api_birth_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::BadRequest(e))?;
+    .map_err(ApiError::BadRequest)?;
 
     // Async: build messages, router, run chat turn.
     let config = tokio::task::spawn_blocking(move || AppConfig::load(&config_path_clone))
@@ -1636,7 +1636,7 @@ async fn api_birth_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     Ok(Json(BirthChatResponseBody {
         assistant_content: response.assistant_content,
@@ -2006,7 +2006,7 @@ async fn api_connectivity_store_key(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     Ok(Json(StoreKeyResponse {
         ok: true,
@@ -2039,7 +2039,7 @@ async fn api_connectivity_remove_key(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::NotFound(e))?;
+    .map_err(ApiError::NotFound)?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -2117,7 +2117,7 @@ async fn api_connectivity_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::BadRequest(e))?;
+    .map_err(ApiError::BadRequest)?;
 
     // Async: build messages with stored providers context, router, run chat turn.
     let config = tokio::task::spawn_blocking({
@@ -2296,7 +2296,7 @@ async fn api_connectivity_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     // Redact assistant content in the response too
     let redacted_assistant_content = redact_api_keys(&response.assistant_content);
@@ -2361,7 +2361,7 @@ async fn api_birth_complete_emergence(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     // Delete the persisted signing key — it's no longer needed after Emergence
     if let Some(dir) = agent_dir(&id_for_cleanup) {
@@ -3266,10 +3266,10 @@ async fn api_operational_chat(
                         )
                     }
                     (true, PendingOperationalAction::CreateOrchestrationJob { request }) => {
-                        let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+                        let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
                         let job = create_job(&mut jobs, request, chrono::Utc::now())
-                            .map_err(|e| ApiError::BadRequest(e))?;
-                        save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+                            .map_err(ApiError::BadRequest)?;
+                        save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
                         format!(
                             "Confirmed. Scheduled job \"{}\" is now active.\n\n- mode: {:?}\n- cron (UTC): {}\n- next run: {}",
                             job.name,
@@ -3319,7 +3319,7 @@ async fn api_operational_chat(
     let attachment_context_entries = if attachment_ids.is_empty() {
         Vec::new()
     } else {
-        load_attachment_context(&dir, &attachment_ids).map_err(|e| ApiError::BadRequest(e))?
+        load_attachment_context(&dir, &attachment_ids).map_err(ApiError::BadRequest)?
     };
     let has_attachment_context = !attachment_context_entries.is_empty();
     let attachment_context_block = if has_attachment_context {
@@ -3369,7 +3369,7 @@ async fn api_operational_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::BadRequest(e))?;
+    .map_err(ApiError::BadRequest)?;
 
     // Build system prompt from constitutional docs with dynamic skill tools
     let skill_tool_entries = filter_operational_tools_for_mode(
@@ -4369,7 +4369,7 @@ async fn api_operational_chat(
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(ApiError::Internal)?;
 
     // Redact any credentials in the clean content sent back to the frontend.
     // Keep tool output out of chat bubbles and expose it via structured tool_log.
@@ -5193,7 +5193,7 @@ async fn api_orchestration_jobs(
     Path(id): Path<String>,
 ) -> Result<Json<OrchestrationJobsResponse>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
     jobs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(OrchestrationJobsResponse { jobs }))
 }
@@ -5204,10 +5204,9 @@ async fn api_orchestration_job_create(
     Json(body): Json<CreateOrchestrationJobRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
-    let job =
-        create_job(&mut jobs, body, chrono::Utc::now()).map_err(|e| ApiError::BadRequest(e))?;
-    save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
+    let job = create_job(&mut jobs, body, chrono::Utc::now()).map_err(ApiError::BadRequest)?;
+    save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
     Ok(Json(job))
 }
 
@@ -5217,7 +5216,7 @@ async fn api_orchestration_job_update(
     Json(body): Json<UpdateOrchestrationJobRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
     let updated = update_job(&mut jobs, &job_id, body, chrono::Utc::now()).map_err(|e| {
         if e.contains("not found") {
             ApiError::NotFound(e)
@@ -5225,7 +5224,7 @@ async fn api_orchestration_job_update(
             ApiError::BadRequest(e)
         }
     })?;
-    save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+    save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
     Ok(Json(updated))
 }
 
@@ -5235,7 +5234,7 @@ async fn api_orchestration_job_enable(
     Json(body): Json<SetOrchestrationJobEnabledRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
     let updated =
         set_job_enabled(&mut jobs, &job_id, body.enabled, chrono::Utc::now()).map_err(|e| {
             if e.contains("not found") {
@@ -5244,7 +5243,7 @@ async fn api_orchestration_job_enable(
                 ApiError::BadRequest(e)
             }
         })?;
-    save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+    save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
     Ok(Json(updated))
 }
 
@@ -5253,11 +5252,11 @@ async fn api_orchestration_job_delete(
     Path((id, job_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
     if !delete_job(&mut jobs, &job_id) {
         return Err(ApiError::NotFound("Job not found".to_string()));
     }
-    save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+    save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -5267,7 +5266,7 @@ async fn api_orchestration_job_run_now(
     Path((id, job_id)): Path<(String, String)>,
 ) -> Result<Json<JobRunNowResponse>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
-    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let mut jobs = list_jobs(&dir).map_err(ApiError::Internal)?;
     let idx = jobs
         .iter()
         .position(|j| j.job_id == job_id)
@@ -5276,9 +5275,9 @@ async fn api_orchestration_job_run_now(
     let mut job = jobs.remove(idx);
     let run_result = run_orchestration_job_once(&state, &id, &dir, &mut job, "manual")
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     jobs.insert(idx, job);
-    save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
+    save_jobs(&dir, &jobs).map_err(ApiError::Internal)?;
     Ok(Json(run_result))
 }
 
@@ -5289,7 +5288,7 @@ async fn api_orchestration_logs(
 ) -> Result<Json<OrchestrationLogsResponse>, ApiError> {
     let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let limit = query.limit.or(Some(50));
-    let logs = load_logs(&dir, limit).map_err(|e| ApiError::Internal(e))?;
+    let logs = load_logs(&dir, limit).map_err(ApiError::Internal)?;
     Ok(Json(OrchestrationLogsResponse { logs }))
 }
 
