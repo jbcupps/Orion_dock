@@ -142,7 +142,7 @@ fn parse_pem_public_key(pem: &str) -> Result<VerifyingKey> {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+    use rand::Rng;
     use std::fs;
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
 
-        let signing = SigningKey::generate(&mut OsRng);
+        let signing = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey = signing.verifying_key();
         let pubkey_path = temp.join("pubkey.bin");
         fs::write(&pubkey_path, pubkey.to_bytes()).unwrap();
@@ -172,7 +172,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
 
-        let signing = SigningKey::generate(&mut OsRng);
+        let signing = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey = signing.verifying_key();
         let pubkey_path = temp.join("pubkey.b64");
         fs::write(&pubkey_path, BASE64.encode(pubkey.to_bytes())).unwrap();

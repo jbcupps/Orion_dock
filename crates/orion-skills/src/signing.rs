@@ -94,11 +94,11 @@ mod hex {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+    use rand::Rng;
 
     #[test]
     fn test_sign_and_verify() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey = key.verifying_key();
 
         let manifest_content = r#"[skill]
@@ -117,8 +117,8 @@ description = "Test skill"
 
     #[test]
     fn test_wrong_key_rejects() {
-        let key1 = SigningKey::generate(&mut OsRng);
-        let key2 = SigningKey::generate(&mut OsRng);
+        let key1 = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
+        let key2 = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey2 = key2.verifying_key();
 
         let hash = hash_manifest("test content");
@@ -129,7 +129,7 @@ description = "Test skill"
 
     #[test]
     fn test_tampered_hash_rejects() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey = key.verifying_key();
 
         let hash = hash_manifest("original content");
@@ -141,7 +141,7 @@ description = "Test skill"
 
     #[test]
     fn test_save_and_load_signature() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let hash = hash_manifest("test");
         let sig = sign_skill(&key, "com.test.roundtrip", &hash, SignerKind::Agent);
 

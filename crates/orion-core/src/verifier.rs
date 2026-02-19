@@ -131,7 +131,7 @@ mod tests {
     use crate::document::DocumentTier;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
+    use rand::Rng;
     use std::fs;
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
 
         // Generate an out-of-band signing key (simulating external key creation)
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         let pubkey = signing_key.verifying_key();
 
         let content = "I am Abigail. This is my soul.";
@@ -313,7 +313,7 @@ mod tests {
             .expect("Verification should pass after repair");
 
         // 11. Test wrong private key is rejected
-        let wrong_key = SigningKey::generate(&mut OsRng);
+        let wrong_key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         sign_constitutional_documents(&wrong_key, &docs_dir).unwrap();
         let mut verifier4 = Verifier::from_vault(&vault).unwrap();
         let wrong_key_result = verifier4.verify_soul(&docs_dir);

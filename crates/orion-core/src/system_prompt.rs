@@ -175,6 +175,17 @@ Your thinking follows four principles:
 - If a task needs 3+ dependent steps (configure + verify + remediate), prefer `launch_agentic_task` over one-shot chat execution.
 - After launching an agentic task, clearly report that it is running and tell the mentor they can monitor progress in the Agent timeline.
 
+## Hive Management
+
+You are one agent in a multi-agent Hive. You can see your sibling agents in the "Your Hive" section of your identity. Use `manage_hive` to:
+
+- **List** all agents and their status.
+- **Create** a new specialized agent when a task would benefit from a dedicated identity (e.g., a research agent, a coding agent, a monitoring agent).
+- **Check status** of a sibling agent.
+- **Delegate** a goal to a sibling agent — this launches an agentic task on that agent.
+
+Only suggest creating new agents when the mentor's request clearly benefits from specialization. For routine tasks, use your own capabilities.
+
 ## Credential and Secret Handling
 
 Your secrets are split into two stores:
@@ -302,6 +313,21 @@ In addition to your skill tools, you have these agentic-mode tools:
   {"name": "write_review", "arguments": {"content": "Noon Review: Key findings - Mentor prefers concise responses. Email setup required explicit IMAP bridge details."}}
   ```
 
+- **`manage_hive`**: List, create, check status of, or delegate tasks to sibling agents in your Hive.
+  ```tool_request
+  {"name": "manage_hive", "arguments": {"action": "list"}}
+  ```
+  ```tool_request
+  {"name": "manage_hive", "arguments": {"action": "create", "agent_name": "ResearchBot"}}
+  ```
+  ```tool_request
+  {"name": "manage_hive", "arguments": {"action": "status", "agent_id": "uuid-here"}}
+  ```
+  ```tool_request
+  {"name": "manage_hive", "arguments": {"action": "delegate", "agent_id": "uuid-here", "goal": "Research the latest Rust async best practices", "router_mode": "think_hard"}}
+  ```
+  Actions: `list`, `create`, `status`, `delegate`. Create accepts `agent_name`. Delegate accepts `agent_id`, `goal`, and optionally `router_mode` (`auto`, `think_hard`, `think_harder`).
+
 ### Guidelines
 
 - **Act first, ask second.** Use your tools to research, explore, and execute before consulting your mentor. Autonomy is your defining trait.
@@ -422,6 +448,14 @@ Skills are registered but none are currently loaded. Ask your mentor about enabl
     section
 }
 
+/// Summary of a sibling agent in the Hive.
+#[derive(Debug, Clone)]
+pub struct HiveAgentSummary {
+    pub id: String,
+    pub name: String,
+    pub birth_complete: bool,
+}
+
 /// Additional runtime context injected into the system prompt.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeContext {
@@ -429,6 +463,10 @@ pub struct RuntimeContext {
     pub agent_id: String,
     /// The agent's data directory path (e.g. `/var/lib/orion`).
     pub data_dir: String,
+    /// All agents in the Hive (including self).
+    pub hive_agents: Vec<HiveAgentSummary>,
+    /// The mentor's display name (if configured in GlobalConfig).
+    pub mentor_name: Option<String>,
 }
 
 /// Build the full system prompt from constitutional documents on disk.
@@ -509,6 +547,33 @@ fn build_runtime_context_section(docs_dir: &Path, runtime_ctx: Option<&RuntimeCo
             section.push_str("\n## Your Identity\n\n");
             section.push_str(&format!("- Agent ID: `{}`\n", ctx.agent_id));
             section.push_str(&format!("- Data directory: `{}`\n", ctx.data_dir));
+        }
+
+        // Hive awareness — sibling agents
+        if !ctx.hive_agents.is_empty() {
+            section.push_str("\n## Your Hive\n\n");
+            if let Some(ref mentor) = ctx.mentor_name {
+                section.push_str(&format!("Mentor: **{}**\n\n", mentor));
+            }
+            section.push_str("| Agent | ID | Status |\n");
+            section.push_str("|-------|----|--------|\n");
+            for agent in &ctx.hive_agents {
+                let status = if agent.birth_complete {
+                    "active"
+                } else {
+                    "in birth"
+                };
+                let marker = if agent.id == ctx.agent_id {
+                    " **(you)**"
+                } else {
+                    ""
+                };
+                section.push_str(&format!(
+                    "| {}{} | `{}` | {} |\n",
+                    agent.name, marker, agent.id, status
+                ));
+            }
+            section.push_str("\nUse the `manage_hive` tool to list, create, check status of, or delegate tasks to sibling agents.\n");
         }
     }
 
@@ -657,6 +722,94 @@ mod tests {
         let prompt = build_system_prompt_with_skills(&tmp, &None, &[], &providers, None);
         assert!(prompt.contains("Your Keyring"));
         assert!(prompt.contains("openai, tavily"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_hive_section_rendered_when_agents_present() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_hive");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let ctx = RuntimeContext {
+            agent_id: "agent-1".to_string(),
+            data_dir: "/var/lib/orion".to_string(),
+            hive_agents: vec![
+                HiveAgentSummary {
+                    id: "agent-1".to_string(),
+                    name: "Alpha".to_string(),
+                    birth_complete: true,
+                },
+                HiveAgentSummary {
+                    id: "agent-2".to_string(),
+                    name: "Beta".to_string(),
+                    birth_complete: false,
+                },
+            ],
+            mentor_name: Some("Jordan".to_string()),
+        };
+
+        let section = build_runtime_context_section(&tmp, Some(&ctx));
+        assert!(section.contains("Your Hive"));
+        assert!(section.contains("Mentor: **Jordan**"));
+        assert!(section.contains("Alpha"));
+        assert!(section.contains("**(you)**"));
+        assert!(section.contains("Beta"));
+        assert!(section.contains("in birth"));
+        assert!(section.contains("manage_hive"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_hive_section_absent_when_no_agents() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_hive_empty");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let ctx = RuntimeContext {
+            agent_id: "agent-1".to_string(),
+            data_dir: "/var/lib/orion".to_string(),
+            hive_agents: vec![],
+            mentor_name: None,
+        };
+
+        let section = build_runtime_context_section(&tmp, Some(&ctx));
+        assert!(!section.contains("Your Hive"));
+        assert!(!section.contains("manage_hive"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_hive_section_self_marker_correct() {
+        let tmp = std::env::temp_dir().join("orion_sysprompt_hive_marker");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let ctx = RuntimeContext {
+            agent_id: "agent-2".to_string(),
+            data_dir: "/var/lib/orion".to_string(),
+            hive_agents: vec![
+                HiveAgentSummary {
+                    id: "agent-1".to_string(),
+                    name: "Alpha".to_string(),
+                    birth_complete: true,
+                },
+                HiveAgentSummary {
+                    id: "agent-2".to_string(),
+                    name: "Beta".to_string(),
+                    birth_complete: true,
+                },
+            ],
+            mentor_name: None,
+        };
+
+        let section = build_runtime_context_section(&tmp, Some(&ctx));
+        // Beta (agent-2) should have the marker, Alpha should not
+        assert!(section.contains("Beta **(you)**"));
+        assert!(!section.contains("Alpha **(you)**"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

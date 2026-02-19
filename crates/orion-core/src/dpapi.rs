@@ -114,7 +114,7 @@ mod platform_crypto {
             .map_err(|e| CoreError::Crypto(format!("cipher init: {}", e)))?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
+        rand::Fill::fill(&mut nonce_bytes, &mut rand::rng());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher

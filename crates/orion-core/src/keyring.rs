@@ -3,7 +3,7 @@ use crate::dpapi::{dpapi_decrypt, dpapi_encrypt};
 use crate::error::{CoreError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier as DalekVerifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -31,7 +31,7 @@ pub struct Keyring {
 impl Keyring {
     /// Generate a fresh Ed25519 mentor keypair for a new installation.
     pub fn generate(storage_path: PathBuf) -> Result<Self> {
-        let mentor_keypair = SigningKey::generate(&mut OsRng);
+        let mentor_keypair = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
         Ok(Self {
             mentor_keypair,
             storage_path,
@@ -119,7 +119,7 @@ pub struct MasterKeyResult {
 /// The master key signs per-agent public keys so agents can prove membership
 /// in the same Hive installation.
 pub fn generate_master_key(data_dir: &Path) -> Result<MasterKeyResult> {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
     std::fs::create_dir_all(data_dir)?;
     let master_key_path = data_dir.join("master.key");
     let stored = MasterKeyStored {
@@ -270,7 +270,7 @@ pub struct SignatureMetadata {
 /// Persists the public key to `external_pubkey.bin` and returns the private key
 /// as base64 so the user can save it. The private key is never stored on disk.
 pub fn generate_external_keypair(data_dir: &Path) -> Result<ExternalKeypairResult> {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::from_bytes(&rand::rng().random::<[u8; 32]>());
     let verifying_key = signing_key.verifying_key();
     std::fs::create_dir_all(data_dir)?;
     let pubkey_path = data_dir.join("external_pubkey.bin");

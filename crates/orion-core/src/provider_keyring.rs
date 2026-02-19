@@ -26,6 +26,7 @@ pub fn is_known_llm_provider(name: &str) -> bool {
 /// Values use `SecretString` for zeroize-on-drop and redacted `Debug` output.
 /// The keyring is designed to be cached in memory (behind an `RwLock`) so
 /// read-heavy operations (every chat turn) avoid disk I/O.
+#[derive(Clone)]
 pub struct ProviderKeyring {
     storage_path: PathBuf,
     keys: HashMap<String, SecretString>,

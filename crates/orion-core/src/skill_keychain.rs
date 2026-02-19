@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// DPAPI-encrypted storage for skill secrets (everything except LLM provider API keys).
+#[derive(Clone)]
 pub struct SkillKeychain {
     storage_path: PathBuf,
     secrets: HashMap<String, String>,

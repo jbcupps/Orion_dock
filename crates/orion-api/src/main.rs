@@ -103,6 +103,19 @@ pub(crate) struct AppState {
     pub(crate) genesis_registry: Arc<GenesisRegistry>,
     /// Active genesis sessions per agent — unified step protocol.
     pub(crate) genesis_sessions: Arc<TokioMutex<HashMap<String, Box<dyn GenesisStrategy>>>>,
+    /// Pre-resolved Ego credentials cached from the in-memory ProviderKeyring.
+    /// Read-heavy path: chat + agentic turns use this instead of disk loads.
+    pub(crate) resolved_ego: Arc<RwLock<ResolvedEgoCredentials>>,
+}
+
+/// Pre-resolved Ego credentials cached from the in-memory ProviderKeyring.
+/// Chat and agentic turns read from this cache instead of loading the keyring
+/// from disk on every request. Refreshed after every keyring mutation.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedEgoCredentials {
+    pub provider_name: Option<String>,
+    pub api_key: Option<String>,
+    pub all_provider_names: Vec<String>,
 }
 
 pub(crate) fn data_root() -> Option<PathBuf> {
@@ -150,6 +163,38 @@ pub(crate) fn agent_config_path(id: &str) -> Option<PathBuf> {
 
 pub(crate) fn agent_dir(id: &str) -> Option<PathBuf> {
     data_root().map(|root| root.join("identities").join(id))
+}
+
+/// Build Hive agent summaries for the system prompt RuntimeContext.
+pub(crate) fn build_hive_agent_summaries() -> (
+    Vec<orion_core::system_prompt::HiveAgentSummary>,
+    Option<String>,
+) {
+    use orion_core::system_prompt::HiveAgentSummary;
+    let root = match data_root() {
+        Some(r) => r,
+        None => return (Vec::new(), None),
+    };
+    let gc = match GlobalConfig::load(&root) {
+        Ok(gc) => gc,
+        Err(_) => return (Vec::new(), None),
+    };
+    let summaries: Vec<HiveAgentSummary> = gc
+        .agents
+        .iter()
+        .map(|entry| {
+            let config_path = root.join("identities").join(&entry.id).join("config.json");
+            let birth_complete = AppConfig::load(&config_path)
+                .map(|c| c.birth_complete)
+                .unwrap_or(false);
+            HiveAgentSummary {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                birth_complete,
+            }
+        })
+        .collect();
+    (summaries, gc.mentor_name.clone())
 }
 
 pub(crate) fn resolve_birth_timestamp(
@@ -478,6 +523,23 @@ fn resolve_superego_credentials_with_preference(
     (ego_name.map(str::to_string), ego_key.map(str::to_string))
 }
 
+/// Refresh the cached [`ResolvedEgoCredentials`] from the in-memory keyring.
+///
+/// Reads from `state.provider_keyring` (not disk) and writes the result into
+/// `state.resolved_ego`. Must be called after every keyring mutation.
+pub(crate) fn refresh_resolved_ego(state: &AppState, preference: Option<&str>) {
+    let keyring = state.provider_keyring.read().unwrap();
+    let (provider_name, api_key) = resolve_ego_credentials_with_preference(&keyring, preference);
+    let all_provider_names = provider_names_from_keyring(&keyring);
+    drop(keyring);
+    let mut resolved = state.resolved_ego.write().unwrap();
+    *resolved = ResolvedEgoCredentials {
+        provider_name,
+        api_key,
+        all_provider_names,
+    };
+}
+
 fn parse_superego_l2_mode() -> orion_router::SuperegoL2Mode {
     match std::env::var("SUPEREGO_L2_MODE")
         .unwrap_or_else(|_| "off".to_string())
@@ -742,27 +804,20 @@ async fn api_set_mentor_name(
     }))
 }
 
-async fn api_create_agent(
-    Json(body): Json<CreateAgentRequest>,
-) -> Result<Json<CreateAgentResponse>, ApiError> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::BadRequest("Agent name is required".to_string()));
-    }
-
-    let root = data_root()
-        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
+/// Core agent creation logic: directory setup, config init, GlobalConfig registration.
+/// Returns `(uuid, agent_dir, docs_dir)` on success.
+pub(crate) fn create_agent_internal(name: &str) -> Result<(String, PathBuf, PathBuf), String> {
+    let root = data_root().ok_or_else(|| "ORION_DATA_DIR not set".to_string())?;
 
     std::fs::create_dir_all(root.join("identities"))
-        .map_err(|e| ApiError::Internal(format!("Failed to create identities dir: {}", e)))?;
+        .map_err(|e| format!("Failed to create identities dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
     let agent_dir = root.join("identities").join(&uuid);
     std::fs::create_dir_all(&agent_dir)
-        .map_err(|e| ApiError::Internal(format!("Failed to create agent dir: {}", e)))?;
+        .map_err(|e| format!("Failed to create agent dir: {}", e))?;
     let docs_dir = agent_dir.join("docs");
-    std::fs::create_dir_all(&docs_dir)
-        .map_err(|e| ApiError::Internal(format!("Failed to create docs dir: {}", e)))?;
+    std::fs::create_dir_all(&docs_dir).map_err(|e| format!("Failed to create docs dir: {}", e))?;
 
     let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
     let memory_backend = std::env::var("MEMORY_BACKEND")
@@ -808,15 +863,13 @@ async fn api_create_agent(
     let config_path = agent_dir.join("config.json");
     config
         .save(&config_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to save config: {}", e)))?;
+        .map_err(|e| format!("Failed to save config: {}", e))?;
 
     let gc_path = GlobalConfig::config_path(&root);
     let mut gc = if gc_path.exists() {
-        GlobalConfig::load(&root)
-            .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
+        GlobalConfig::load(&root).map_err(|e| format!("Failed to load global config: {}", e))?
     } else {
         let mut new_gc = GlobalConfig::new(&root);
-        // Auto-generate Hive master key on first initialization.
         if !new_gc.master_key_path.exists() {
             match orion_core::generate_master_key(&root) {
                 Ok(result) => {
@@ -836,16 +889,28 @@ async fn api_create_agent(
         name: name.to_string(),
         directory: PathBuf::from(format!("identities/{}", uuid)),
     })
-    .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    .map_err(|e| e.to_string())?;
     gc.save(&root)
-        .map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
+        .map_err(|e| format!("Failed to save global config: {}", e))?;
 
     tracing::info!("Created new agent: {} ({})", name, uuid);
+    Ok((uuid, agent_dir, docs_dir))
+}
+
+async fn api_create_agent(
+    Json(body): Json<CreateAgentRequest>,
+) -> Result<Json<CreateAgentResponse>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("Agent name is required".to_string()));
+    }
+
+    let (uuid, agent_dir, docs_dir) = create_agent_internal(name).map_err(ApiError::Internal)?;
 
     // Quick-start: auto-generate identity, constitutional docs, and complete birth.
     if body.quick_start {
         let qs_name = name.to_string();
-        let qs_config_path = config_path.clone();
+        let qs_config_path = agent_dir.join("config.json");
         let qs_docs_dir = docs_dir.clone();
         let _qs_agent_dir = agent_dir.clone();
 
@@ -1651,37 +1716,45 @@ async fn api_birth_chat(
 
 /// GET /api/agents/{id}/connectivity/providers — list currently stored provider names.
 async fn api_connectivity_providers(
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProvidersResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let keyring = ProviderKeyring::load(dir)
-        .unwrap_or_else(|_| ProviderKeyring::new(agent_dir(&id).unwrap_or_default()));
-    let providers: Vec<String> = provider_names_from_keyring(&keyring);
+    let providers: Vec<String> = state
+        .resolved_ego
+        .read()
+        .unwrap()
+        .all_provider_names
+        .clone();
     Ok(Json(ProvidersResponse { providers }))
 }
 
 /// GET /api/agents/{id}/tier-models — effective tier-model mapping for configured LLM providers.
 async fn api_agent_tier_models(
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<TierModelsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let config_path = agent_config_path(&id)
         .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
     let config = AppConfig::load(&config_path)
         .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
 
-    let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
-    let (active_provider, _) = resolve_ego_credentials_with_preference(
-        &keyring,
-        config.active_provider_preference.as_deref(),
-    );
+    let (active_provider, all_providers) = {
+        let keyring = state.provider_keyring.read().unwrap();
+        let (ap, _) = resolve_ego_credentials_with_preference(
+            &keyring,
+            config.active_provider_preference.as_deref(),
+        );
+        (ap, provider_names_from_keyring(&keyring))
+    };
     let active_provider = active_provider
         .map(|p| AppConfig::normalize_provider_name(&p))
         .filter(|p| provider_supports_tier_models(p));
 
     let mut providers: Vec<String> = Vec::new();
-    for p in provider_names_from_keyring(&keyring) {
+    for p in all_providers {
         let normalized = AppConfig::normalize_provider_name(&p);
         if provider_supports_tier_models(&normalized) && !providers.contains(&normalized) {
             providers.push(normalized);
@@ -1777,30 +1850,38 @@ async fn api_agent_tier_models_update(
 
 /// POST /api/agents/{id}/tier-models/refresh — refresh provider model catalogs from upstream APIs.
 async fn api_agent_tier_models_refresh(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<RefreshCatalogRequest>,
 ) -> Result<Json<RefreshCatalogResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let config_path = agent_config_path(&id)
         .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
     let mut config = AppConfig::load(&config_path)
         .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
-    let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
 
-    // Determine which providers to refresh.
-    let targets: Vec<String> = if let Some(ref p) = body.provider {
-        vec![AppConfig::normalize_provider_name(p)]
-    } else {
-        provider_names_from_keyring(&keyring)
-            .into_iter()
-            .map(|p| AppConfig::normalize_provider_name(&p))
-            .filter(|p| provider_supports_tier_models(p))
-            .collect()
+    // Read provider keys from cached keyring, then drop the guard before async calls.
+    let (targets, provider_keys): (Vec<String>, HashMap<String, String>) = {
+        let keyring = state.provider_keyring.read().unwrap();
+        let tgt: Vec<String> = if let Some(ref p) = body.provider {
+            vec![AppConfig::normalize_provider_name(p)]
+        } else {
+            provider_names_from_keyring(&keyring)
+                .into_iter()
+                .map(|p| AppConfig::normalize_provider_name(&p))
+                .filter(|p| provider_supports_tier_models(p))
+                .collect()
+        };
+        let keys: HashMap<String, String> = tgt
+            .iter()
+            .filter_map(|p| keyring.get_key_str(p).map(|k| (p.clone(), k.to_string())))
+            .collect();
+        (tgt, keys)
     };
 
     let mut refreshed: Vec<String> = Vec::new();
     for provider in &targets {
-        if let Some(key) = keyring.get_key_str(provider) {
+        if let Some(key) = provider_keys.get(provider) {
             let entry =
                 orion_capabilities::cognitive::model_catalog::refresh_catalog(provider, key).await;
             config.provider_catalog.insert(provider.clone(), entry);
@@ -1820,33 +1901,39 @@ async fn api_agent_tier_models_refresh(
 
 /// POST /api/agents/{id}/tier-models/validate — validate selected tier models against provider APIs.
 async fn api_agent_tier_models_validate(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ValidateModelsRequest>,
 ) -> Result<Json<ValidateModelsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let config_path = agent_config_path(&id)
         .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
     let config = AppConfig::load(&config_path)
         .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
-    let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
 
-    let targets: Vec<String> = if let Some(ref p) = body.provider {
-        vec![AppConfig::normalize_provider_name(p)]
-    } else {
-        provider_names_from_keyring(&keyring)
-            .into_iter()
-            .map(|p| AppConfig::normalize_provider_name(&p))
-            .filter(|p| provider_supports_tier_models(p))
-            .collect()
+    // Read targets and keys from cached keyring, then drop guard before async validation.
+    let (targets, provider_keys): (Vec<String>, HashMap<String, String>) = {
+        let keyring = state.provider_keyring.read().unwrap();
+        let tgt: Vec<String> = if let Some(ref p) = body.provider {
+            vec![AppConfig::normalize_provider_name(p)]
+        } else {
+            provider_names_from_keyring(&keyring)
+                .into_iter()
+                .map(|p| AppConfig::normalize_provider_name(&p))
+                .filter(|p| provider_supports_tier_models(p))
+                .collect()
+        };
+        let keys: HashMap<String, String> = tgt
+            .iter()
+            .filter_map(|p| keyring.get_key_str(p).map(|k| (p.clone(), k.to_string())))
+            .collect();
+        (tgt, keys)
     };
 
     let mut results: HashMap<String, ProviderModelValidation> = HashMap::new();
     for provider in &targets {
         let tiers = config.effective_tier_models(provider);
-        let key = keyring
-            .get_key_str(provider)
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let key = provider_keys.get(provider).cloned().unwrap_or_default();
 
         let validate = |model: &str| {
             let p = provider.clone();
@@ -1937,6 +2024,7 @@ async fn api_agent_set_active_provider(
 
 /// POST /api/agents/{id}/connectivity/keys — store an API key directly (button channel, no LLM).
 async fn api_connectivity_store_key(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<StoreKeyRequest>,
 ) -> Result<Json<StoreKeyResponse>, ApiError> {
@@ -1985,15 +2073,21 @@ async fn api_connectivity_store_key(
         false
     };
 
-    // Store key
+    // Store key — mutate the shared keyring and persist.
     let provider_clone = provider.clone();
+    let shared_keyring = Arc::clone(&state.provider_keyring);
+    let shared_skill_kc = Arc::clone(&state.skill_keychain);
+    let preference = {
+        let cp = config_path.clone();
+        AppConfig::load(&cp)
+            .ok()
+            .and_then(|c| c.active_provider_preference.clone())
+    };
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut config =
             AppConfig::load(&config_path).map_err(|e| format!("Load config: {}", e))?;
-        let mut keyring = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        let mut skill_kc = SkillKeychain::load(config.data_dir.clone())
-            .unwrap_or_else(|_| SkillKeychain::new(config.data_dir.clone()));
+        let mut keyring = shared_keyring.write().unwrap();
+        let mut skill_kc = shared_skill_kc.lock().unwrap();
         execute_store_provider_key(
             &mut keyring,
             &mut config,
@@ -2008,6 +2102,9 @@ async fn api_connectivity_store_key(
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
     .map_err(ApiError::Internal)?;
 
+    // Refresh cached Ego credentials after keyring mutation.
+    refresh_resolved_ego(&state, preference.as_deref());
+
     Ok(Json(StoreKeyResponse {
         ok: true,
         provider,
@@ -2017,9 +2114,10 @@ async fn api_connectivity_store_key(
 
 /// DELETE /api/agents/{id}/connectivity/keys/{provider} — remove a stored provider key.
 async fn api_connectivity_remove_key(
+    State(state): State<AppState>,
     Path((id, provider)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let provider = provider.trim().to_lowercase();
     if provider.is_empty() {
@@ -2028,9 +2126,9 @@ async fn api_connectivity_remove_key(
         ));
     }
 
+    let shared_keyring = Arc::clone(&state.provider_keyring);
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut keyring =
-            ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
+        let mut keyring = shared_keyring.write().unwrap();
         if !keyring.remove_key(&provider) {
             return Err(format!("No key stored for provider: {}", provider));
         }
@@ -2040,6 +2138,12 @@ async fn api_connectivity_remove_key(
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
     .map_err(ApiError::NotFound)?;
+
+    // Refresh cached Ego credentials after keyring mutation.
+    let preference = agent_config_path(&id)
+        .and_then(|p| AppConfig::load(&p).ok())
+        .and_then(|c| c.active_provider_preference);
+    refresh_resolved_ego(&state, preference.as_deref());
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -2061,6 +2165,7 @@ async fn api_connectivity_chat_history(
 
 /// POST /api/agents/{id}/connectivity/chat — one turn of Connectivity stage chat.
 async fn api_connectivity_chat(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ConnectivityChatRequest>,
 ) -> Result<Json<ConnectivityChatResponseBody>, ApiError> {
@@ -2083,6 +2188,7 @@ async fn api_connectivity_chat(
     let (conversation, stored_providers) = tokio::task::spawn_blocking({
         let connectivity_chat_path = connectivity_chat_path.clone();
         let redacted = redacted_user_message.clone();
+        let shared_keyring = Arc::clone(&state.provider_keyring);
         #[allow(clippy::type_complexity)]
         move || -> Result<(Vec<(String, String)>, Vec<String>), String> {
             let config =
@@ -2103,8 +2209,7 @@ async fn api_connectivity_chat(
             }
             orch.add_message("user", &redacted);
 
-            let keyring = ProviderKeyring::load(config.data_dir.clone())
-                .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
+            let keyring = shared_keyring.read().unwrap();
             let stored: Vec<String> = provider_names_from_keyring(&keyring);
 
             let conversation: Vec<(String, String)> = orch
@@ -2183,6 +2288,8 @@ async fn api_connectivity_chat(
         let redacted = redacted_user_message.clone();
         let assistant = assistant_content.clone();
         let tools = tool_requests.clone();
+        let shared_keyring = Arc::clone(&state.provider_keyring);
+        let shared_skill_kc = Arc::clone(&state.skill_keychain);
         move || -> Result<(Vec<String>, Option<KeyStoredInfo>), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;
@@ -2204,10 +2311,8 @@ async fn api_connectivity_chat(
             orch.add_message("assistant", &redacted_assistant);
 
             // Execute store_provider_key tool calls
-            let mut keyring = ProviderKeyring::load(config.data_dir.clone())
-                .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-            let mut skill_kc = SkillKeychain::load(config.data_dir.clone())
-                .unwrap_or_else(|_| SkillKeychain::new(config.data_dir.clone()));
+            let mut keyring = shared_keyring.write().unwrap();
+            let mut skill_kc = shared_skill_kc.lock().unwrap();
             let mut key_stored_info: Option<KeyStoredInfo> = None;
 
             for tr in &tools {
@@ -2297,6 +2402,14 @@ async fn api_connectivity_chat(
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
     .map_err(ApiError::Internal)?;
+
+    // Refresh cached Ego credentials if a key was stored during this turn.
+    if key_stored.is_some() {
+        let preference = agent_config_path(&id)
+            .and_then(|p| AppConfig::load(&p).ok())
+            .and_then(|c| c.active_provider_preference);
+        refresh_resolved_ego(&state, preference.as_deref());
+    }
 
     // Redact assistant content in the response too
     let redacted_assistant_content = redact_api_keys(&response.assistant_content);
@@ -3377,20 +3490,24 @@ async fn api_operational_chat(
         requested_router_mode,
     );
 
-    // Load provider names for system prompt awareness
-    let vault_providers: Vec<String> = {
-        let keyring = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        provider_names_from_keyring(&keyring)
-    };
+    // Load provider names for system prompt awareness (from cached credentials)
+    let vault_providers: Vec<String> = state
+        .resolved_ego
+        .read()
+        .unwrap()
+        .all_provider_names
+        .clone();
 
     // Sync email accounts from agent config into the shared email skill accounts list.
     routes::skills::sync_email_accounts(&config, &state.email_accounts, &state.skill_keychain)
         .await;
 
+    let (hive_agents, mentor_name) = build_hive_agent_summaries();
     let runtime_ctx = RuntimeContext {
         agent_id: id.clone(),
         data_dir: config.data_dir.to_string_lossy().to_string(),
+        hive_agents,
+        mentor_name,
     };
 
     let system_prompt = if skill_tool_entries.is_empty() {
@@ -3444,14 +3561,10 @@ async fn api_operational_chat(
         ));
     }
 
-    // Build operational router from config + ProviderKeyring
+    // Build operational router from cached Ego credentials
     let (ego_name, ego_key) = {
-        let keyring = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        resolve_ego_credentials_with_preference(
-            &keyring,
-            config.active_provider_preference.as_deref(),
-        )
+        let resolved = state.resolved_ego.read().unwrap();
+        (resolved.provider_name.clone(), resolved.api_key.clone())
     };
     let tier = match requested_router_mode {
         agentic::AgenticRouterMode::Auto => ThinkingModelTier::Fast,
@@ -3482,6 +3595,7 @@ async fn api_operational_chat(
 
     let ego_name_for_sup = ego_name.clone();
     let ego_key_for_sup = ego_key.clone();
+    let ego_key_for_gov = ego_key.clone();
     let mut router = orion_router::IdEgoRouter::with_provider_auto_detect(
         config.local_llm_base_url.clone(),
         ego_name.as_deref(),
@@ -3491,14 +3605,14 @@ async fn api_operational_chat(
     )
     .await;
     if state.superego_l2_mode != orion_router::SuperegoL2Mode::Off {
-        let keyring = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
+        let keyring = state.provider_keyring.read().unwrap();
         let (sup_name, sup_key) = resolve_superego_credentials_with_preference(
             &config,
             &keyring,
             ego_name_for_sup.as_deref(),
             ego_key_for_sup.as_deref(),
         );
+        drop(keyring);
         if let Some(key) = sup_key {
             let (provider, _) =
                 orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
@@ -3588,16 +3702,7 @@ async fn api_operational_chat(
         let governor = governed_chat::build_governor(
             &config,
             ego_name.as_deref().unwrap_or("openai"),
-            &{
-                let keyring = ProviderKeyring::load(config.data_dir.clone())
-                    .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-                resolve_ego_credentials_with_preference(
-                    &keyring,
-                    config.active_provider_preference.as_deref(),
-                )
-                .1
-                .unwrap_or_default()
-            },
+            &ego_key_for_gov.clone().unwrap_or_default(),
             state.skill_registry.clone(),
             state.skill_executor.clone(),
         );
@@ -3697,12 +3802,13 @@ async fn api_operational_chat(
     // Pro-mode council path: for Pro tier with 2+ providers, run MoA DAG in Rust.
     // Council does not support structured tool-calling; falls back to tool-aware route on failure.
     let response = if tier == ThinkingModelTier::Pro {
-        let keyring_for_pro = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        let council_providers = resolve_council_providers(
-            &keyring_for_pro,
-            config.active_provider_preference.as_deref(),
-        );
+        let council_providers = {
+            let keyring_for_pro = state.provider_keyring.read().unwrap();
+            resolve_council_providers(
+                &keyring_for_pro,
+                config.active_provider_preference.as_deref(),
+            )
+        };
         if council_providers.len() >= 2 {
             let provider_configs: Vec<orion_router::council::ProviderConfig> = council_providers
                 .into_iter()
@@ -3859,6 +3965,7 @@ async fn api_operational_chat(
             || tr.name == "store_vault_secret"
             || tr.name == "register_email_account"
             || tr.name == "launch_agentic_task"
+            || tr.name == "manage_hive"
         {
             continue; // handled in dedicated synthetic-tool blocks below
         }
@@ -4152,6 +4259,75 @@ async fn api_operational_chat(
                 }
             }
         }
+
+        if tr.name == "manage_hive" {
+            let result_msg = agentic::handle_manage_hive(&id, &tr.arguments);
+            // Check for DELEGATE marker — needs async launch
+            if result_msg.starts_with("DELEGATE:") {
+                let parts: Vec<&str> = result_msg.splitn(3, ':').collect();
+                if parts.len() == 3 {
+                    let target_id = parts[1];
+                    let delegate_goal = parts[2];
+                    match launch_agentic_task_internal(
+                        &state,
+                        target_id,
+                        AgenticRunRequest {
+                            goal: delegate_goal.to_string(),
+                            max_turns: 24,
+                            auto_approve_safe_tools: false,
+                            router_mode: requested_router_mode,
+                        },
+                        format!("delegated_by:{}", id),
+                    )
+                    .await
+                    {
+                        Ok(task) => {
+                            let output = format!(
+                                "Delegated task to agent {}. Task started (task_id: {}).",
+                                target_id, task.task_id
+                            );
+                            skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                            skill_tool_log.push(OperationalToolLogEntry {
+                                tool_name: tr.name.clone(),
+                                skill_name: None,
+                                success: true,
+                                output,
+                            });
+                        }
+                        Err(e) => {
+                            let output = format!("manage_hive delegate failed: {}", e);
+                            skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                            skill_tool_log.push(OperationalToolLogEntry {
+                                tool_name: tr.name.clone(),
+                                skill_name: None,
+                                success: false,
+                                output,
+                            });
+                        }
+                    }
+                } else {
+                    let output =
+                        "manage_hive internal error: malformed DELEGATE marker".to_string();
+                    skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                    skill_tool_log.push(OperationalToolLogEntry {
+                        tool_name: tr.name.clone(),
+                        skill_name: None,
+                        success: false,
+                        output,
+                    });
+                }
+            } else {
+                let success = !result_msg.starts_with("manage_hive failed");
+                let output = result_msg;
+                skill_tool_outputs.push(format!("[{}] {}", tr.name, output));
+                skill_tool_log.push(OperationalToolLogEntry {
+                    tool_name: tr.name.clone(),
+                    skill_name: None,
+                    success,
+                    output,
+                });
+            }
+        }
     }
     let skill_tool_result = skill_tool_results.into_iter().last();
     let skill_tool_output_text = if skill_tool_outputs.is_empty() {
@@ -4224,20 +4400,21 @@ async fn api_operational_chat(
     }
     let clean_content_clone = final_content_for_storage.clone();
 
-    let (tool_result, final_providers) = tokio::task::spawn_blocking({
+    let (tool_result, final_providers, keyring_was_mutated) = tokio::task::spawn_blocking({
         let chat_path = chat_path.clone();
         let redacted_user = redacted_user_message.clone();
         let redacted_assistant = redact_api_keys(&final_content_for_storage);
         let tools = tool_requests.clone();
         let skill_output_text = skill_tool_output_text.clone();
         let allow_tool_execution = true; // credential tools are always allowed
-        move || -> Result<(Option<OperationalToolResult>, Vec<String>), String> {
+        let shared_keyring = Arc::clone(&state.provider_keyring);
+        let shared_skill_kc = Arc::clone(&state.skill_keychain);
+        move || -> Result<(Option<OperationalToolResult>, Vec<String>, bool), String> {
             let mut config =
                 AppConfig::load(&config_path_2).map_err(|e| format!("Load config: {}", e))?;
-            let mut keyring = ProviderKeyring::load(config.data_dir.clone())
-                .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-            let mut skill_kc = SkillKeychain::load(config.data_dir.clone())
-                .unwrap_or_else(|_| SkillKeychain::new(config.data_dir.clone()));
+            let mut keyring = shared_keyring.read().unwrap().clone();
+            let mut skill_kc = shared_skill_kc.lock().unwrap().clone();
+            let mut kr_mutated = false;
             let mut tool_executed: Option<OperationalToolResult> = None;
 
             // Execute store_secret / store_provider_key / store_vault_secret tool calls from LLM
@@ -4262,6 +4439,7 @@ async fn api_operational_chat(
                             Some(&mut skill_kc),
                         ) {
                             Ok(resolved) => {
+                                kr_mutated = true;
                                 tracing::info!(
                                     provider = %resolved,
                                     "operational_chat: stored secret via tool call"
@@ -4320,6 +4498,7 @@ async fn api_operational_chat(
                         Some(&mut skill_kc),
                     ) {
                         Ok(resolved) => {
+                            kr_mutated = true;
                             tracing::info!(
                                 provider = %resolved,
                                 "operational_chat: auto-detected and stored API key"
@@ -4338,6 +4517,18 @@ async fn api_operational_chat(
                         }
                     }
                 }
+            }
+
+            // Write mutated keyring back to shared state.
+            if kr_mutated {
+                let mut shared_kr = shared_keyring.write().unwrap();
+                *shared_kr = keyring.clone();
+                if let Err(e) = shared_kr.save() {
+                    tracing::error!("Failed to save keyring after operational mutation: {}", e);
+                }
+                // Also sync skill keychain.
+                let mut shared_skc = shared_skill_kc.lock().unwrap();
+                *shared_skc = skill_kc;
             }
 
             let providers: Vec<String> = provider_names_from_keyring(&keyring);
@@ -4364,12 +4555,17 @@ async fn api_operational_chat(
             });
             std::fs::write(&chat_path, serde_json::to_string_pretty(&updated).unwrap())
                 .map_err(|e| format!("Write operational_chat: {}", e))?;
-            Ok((tool_executed, providers))
+            Ok((tool_executed, providers, kr_mutated))
         }
     })
     .await
     .map_err(|e| ApiError::Internal(format!("Task join: {}", e)))?
     .map_err(ApiError::Internal)?;
+
+    // Refresh resolved Ego credentials cache if keyring was mutated.
+    if keyring_was_mutated {
+        refresh_resolved_ego(&state, config.active_provider_preference.as_deref());
+    }
 
     // Redact any credentials in the clean content sent back to the frontend.
     // Keep tool output out of chat bubbles and expose it via structured tool_log.
@@ -4745,11 +4941,12 @@ pub(crate) async fn launch_agentic_task_internal(
     }
 
     let skill_tool_entries = build_skill_tool_entries(&state.skill_registry);
-    let stored_providers: Vec<String> = {
-        let keyring = ProviderKeyring::load(config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        provider_names_from_keyring(&keyring)
-    };
+    let stored_providers: Vec<String> = state
+        .resolved_ego
+        .read()
+        .unwrap()
+        .all_provider_names
+        .clone();
 
     let loop_config = AgenticLoopConfig {
         task_id: task_id.clone(),
@@ -4774,9 +4971,10 @@ pub(crate) async fn launch_agentic_task_internal(
         run_source,
         superego_l2_mode: state.superego_l2_mode,
         use_council: body.router_mode == agentic::AgenticRouterMode::ThinkHarder,
+        app_state: Arc::new(state.clone()),
     };
 
-    tokio::spawn(agentic::run_agentic_loop(loop_config));
+    agentic::spawn_agentic_loop(loop_config);
     let stream_url = format!("/api/agents/{}/agent/stream?task={}", agent_id, task_id);
     Ok(AgenticRunResponse {
         task_id,
@@ -5184,103 +5382,6 @@ async fn api_proxy_logs(
     }))
 }
 
-/// GET /api/proxy/status — inspect proxy mode and recent logs.
-async fn api_proxy_status() -> Result<Json<ProxyStatusResponse>, (axum::http::StatusCode, String)> {
-    let allowlist_path = proxy_allowlist_path();
-    let log_dir = proxy_log_dir();
-    let internal_log_path = log_dir.join("internal").join("access.log");
-    let external_log_path = log_dir.join("external").join("access.log");
-    Ok(Json(ProxyStatusResponse {
-        mode: std::env::var("PROXY_MODE").unwrap_or_else(|_| "allow_all".to_string()),
-        allow_host_docker_internal: parse_bool_env("PROXY_ALLOW_HOST_DOCKER_INTERNAL", true),
-        allowlist_path: allowlist_path.display().to_string(),
-        internal_log_path: internal_log_path.display().to_string(),
-        external_log_path: external_log_path.display().to_string(),
-        internal_log_exists: internal_log_path.exists(),
-        external_log_exists: external_log_path.exists(),
-        internal_log_tail: read_log_tail(&internal_log_path, 40),
-        external_log_tail: read_log_tail(&external_log_path, 40),
-    }))
-}
-
-/// GET /api/proxy/allowlist — read the external proxy domain allowlist.
-async fn api_proxy_allowlist_get(
-) -> Result<Json<ProxyAllowlistResponse>, (axum::http::StatusCode, String)> {
-    let path = proxy_allowlist_path();
-    Ok(Json(ProxyAllowlistResponse {
-        path: path.display().to_string(),
-        content: read_file_or_empty(&path),
-    }))
-}
-
-/// PUT /api/proxy/allowlist — update the external proxy domain allowlist.
-async fn api_proxy_allowlist_put(
-    Json(body): Json<ProxyAllowlistUpdateRequest>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    if !body.mentor_approved {
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "mentor_approved=true is required for proxy allowlist updates".to_string(),
-        ));
-    }
-    let path = proxy_allowlist_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Create allowlist directory failed: {}", e),
-            )
-        })?;
-    }
-    std::fs::write(&path, body.content.as_bytes()).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Write allowlist failed: {}", e),
-        )
-    })?;
-
-    // Best-effort live reload for local/docker dev setups.
-    let reload_result = std::process::Command::new("sh")
-        .arg("-lc")
-        .arg("docker compose -f docker/docker-compose.yml exec -T proxy_external squid -k reconfigure")
-        .output()
-        .ok()
-        .map(|out| {
-            if out.status.success() {
-                "proxy_external reconfigured".to_string()
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if stderr.is_empty() {
-                    "allowlist updated; proxy reload command failed".to_string()
-                } else {
-                    format!("allowlist updated; proxy reload command failed: {}", stderr)
-                }
-            }
-        })
-        .unwrap_or_else(|| "allowlist updated; proxy reload command unavailable".to_string());
-
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "path": path.display().to_string(),
-        "reload": reload_result
-    })))
-}
-
-/// GET /api/proxy/logs?lines=N — read recent internal/external proxy logs.
-async fn api_proxy_logs(
-    Query(query): Query<ProxyLogsQuery>,
-) -> Result<Json<ProxyLogsResponse>, (axum::http::StatusCode, String)> {
-    let lines = query.lines.unwrap_or(80).clamp(1, 500);
-    let log_dir = proxy_log_dir();
-    let internal_log = log_dir.join("internal").join("access.log");
-    let external_log = log_dir.join("external").join("access.log");
-    Ok(Json(ProxyLogsResponse {
-        lines,
-        internal: read_log_tail(&internal_log, lines),
-        external: read_log_tail(&external_log, lines),
-    }))
-}
-
 // ============================================================================
 // Orchestration Jobs Endpoints
 // ============================================================================
@@ -5554,6 +5655,23 @@ async fn main() -> std::io::Result<()> {
             .unwrap_or_else(|_| SkillKeychain::new(keyring_dir)),
     ));
 
+    // Resolve initial Ego credentials from the in-memory keyring.
+    let initial_preference = resolve_config_path()
+        .and_then(|p| AppConfig::load(&p).ok())
+        .and_then(|c| c.active_provider_preference.clone());
+    let initial_resolved = {
+        let kr = provider_keyring.read().unwrap();
+        let (prov, key) =
+            resolve_ego_credentials_with_preference(&kr, initial_preference.as_deref());
+        let all = provider_names_from_keyring(&kr);
+        ResolvedEgoCredentials {
+            provider_name: prov,
+            api_key: key,
+            all_provider_names: all,
+        }
+    };
+    let resolved_ego = Arc::new(RwLock::new(initial_resolved));
+
     // Shared email accounts list — synced from agent config per request
     let email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -5582,6 +5700,7 @@ async fn main() -> std::io::Result<()> {
         superego_l2_mode: parse_superego_l2_mode(),
         genesis_registry: Arc::new(build_genesis_registry()),
         genesis_sessions: Arc::new(TokioMutex::new(HashMap::new())),
+        resolved_ego,
     };
 
     // Start orchestration scheduler for periodic jobs (UTC cron semantics).

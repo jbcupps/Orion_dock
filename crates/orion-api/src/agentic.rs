@@ -248,13 +248,27 @@ pub struct AgenticLoopConfig {
     /// into a standard tool-capable model for execution.  Requires 2+
     /// connected providers; degrades to standard routing otherwise.
     pub use_council: bool,
+    /// Shared AppState for operations that require it (e.g. manage_hive delegate).
+    pub app_state: Arc<crate::AppState>,
 }
 
-/// Run the autonomous agentic loop. Call from `tokio::spawn`.
-pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
+/// Spawn the agentic loop on the Tokio runtime.
+///
+/// This wrapper lives in the same module as `run_agentic_loop` so the compiler
+/// can verify the `Send` bound on the opaque future type. Callers in other
+/// modules should use this instead of `tokio::spawn(run_agentic_loop(..))`.
+pub fn spawn_agentic_loop(cfg: AgenticLoopConfig) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_agentic_loop(cfg))
+}
+
+/// Run the autonomous agentic loop.
+async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
+    let (hive_agents, mentor_name) = crate::build_hive_agent_summaries();
     let runtime_ctx = RuntimeContext {
         agent_id: cfg.agent_id.clone(),
         data_dir: cfg.agent_dir.to_string_lossy().to_string(),
+        hive_agents,
+        mentor_name,
     };
     let system_prompt = build_agentic_system_prompt(
         &cfg.config.docs_dir,
@@ -832,6 +846,97 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             ));
         }
 
+        // Check for manage_hive synthetic tool
+        if let Some(mh) = tool_requests.iter().find(|t| t.name == "manage_hive") {
+            let result_msg = handle_manage_hive(&cfg.agent_id, &mh.arguments);
+            // Check for DELEGATE marker — needs async launch
+            if result_msg.starts_with("DELEGATE:") {
+                let parts: Vec<&str> = result_msg.splitn(3, ':').collect();
+                if parts.len() == 3 {
+                    let target_id = parts[1];
+                    let goal = parts[2];
+                    let router_mode_str = mh
+                        .arguments
+                        .get("router_mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("auto");
+                    let router_mode = match router_mode_str {
+                        "think_hard" => AgenticRouterMode::ThinkHard,
+                        "think_harder" => AgenticRouterMode::ThinkHarder,
+                        _ => AgenticRouterMode::Auto,
+                    };
+                    // Spawn delegate as a separate task to isolate the non-Send
+                    // future returned by launch_agentic_task_internal.
+                    let delegate_app_state = Arc::clone(&cfg.app_state);
+                    let delegate_target = target_id.to_string();
+                    let delegate_goal = goal.to_string();
+                    let delegate_source = format!("delegated_by:{}", cfg.agent_id);
+                    let delegate_result = match tokio::spawn(async move {
+                        crate::launch_agentic_task_internal(
+                            &delegate_app_state,
+                            &delegate_target,
+                            crate::AgenticRunRequest {
+                                goal: delegate_goal,
+                                max_turns: 24,
+                                auto_approve_safe_tools: false,
+                                router_mode,
+                            },
+                            delegate_source,
+                        )
+                        .await
+                    })
+                    .await
+                    {
+                        Ok(Ok(task)) => format!(
+                            "Delegated task to agent {}. Task started (task_id: {}).",
+                            target_id, task.task_id
+                        ),
+                        Ok(Err(e)) => format!("manage_hive delegate failed: {}", e),
+                        Err(e) => format!("manage_hive delegate failed: spawn error: {}", e),
+                    };
+                    let success = !delegate_result.starts_with("manage_hive delegate failed");
+                    let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                        turn,
+                        tool_name: "manage_hive".to_string(),
+                        success,
+                        output: delegate_result.clone(),
+                    });
+                    record_step(&cfg.task_handle, turn, "manage_hive", &delegate_result).await;
+                    messages.push(Message::new(
+                        "user",
+                        format!("## Tool Result: manage_hive\n\n{}", delegate_result),
+                    ));
+                } else {
+                    let error_msg =
+                        "manage_hive internal error: malformed DELEGATE marker".to_string();
+                    let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                        turn,
+                        tool_name: "manage_hive".to_string(),
+                        success: false,
+                        output: error_msg.clone(),
+                    });
+                    record_step(&cfg.task_handle, turn, "manage_hive", &error_msg).await;
+                    messages.push(Message::new(
+                        "user",
+                        format!("## Tool Result: manage_hive\n\n{}", error_msg),
+                    ));
+                }
+            } else {
+                let success = !result_msg.starts_with("manage_hive failed");
+                let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
+                    turn,
+                    tool_name: "manage_hive".to_string(),
+                    success,
+                    output: result_msg.clone(),
+                });
+                record_step(&cfg.task_handle, turn, "manage_hive", &result_msg).await;
+                messages.push(Message::new(
+                    "user",
+                    format!("## Tool Result: manage_hive\n\n{}", result_msg),
+                ));
+            }
+        }
+
         // No tool calls and no synthetic tools — nudge or circuit-break.
         if tool_requests.is_empty() {
             no_tool_streak += 1;
@@ -897,10 +1002,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             advisory_code.as_deref(),
         );
         let mut provider_config = cfg.config.clone();
-        let mut provider_keyring = ProviderKeyring::load(provider_config.data_dir.clone())
-            .unwrap_or_else(|_| ProviderKeyring::new(provider_config.data_dir.clone()));
-        let mut skill_kc = SkillKeychain::load(provider_config.data_dir.clone())
-            .unwrap_or_else(|_| SkillKeychain::new(provider_config.data_dir.clone()));
+        // Clone the shared keyring for mutation during tool execution; write back after loop.
+        let mut provider_keyring_local = cfg.provider_keyring.read().unwrap().clone();
+        let mut skill_kc = cfg.skill_keychain.lock().unwrap().clone();
+        let mut keyring_mutated = false;
         for tr in &tool_requests {
             // Skip synthetic tools already handled above
             if tr.name == "task_complete"
@@ -910,6 +1015,7 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                 || tr.name == "manage_job"
                 || tr.name == "manage_proxy"
                 || tr.name == "write_review"
+                || tr.name == "manage_hive"
             {
                 continue;
             }
@@ -933,13 +1039,14 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                     arguments: tr.arguments.clone(),
                 });
                 match execute_store_provider_key(
-                    &mut provider_keyring,
+                    &mut provider_keyring_local,
                     &mut provider_config,
                     provider,
                     key,
                     Some(&mut skill_kc),
                 ) {
                     Ok(resolved) => {
+                        keyring_mutated = true;
                         let output = format!("Stored key for provider '{}'.", resolved);
                         let _ = cfg.event_tx.send(AgenticEvent::ToolResult {
                             turn,
@@ -1194,6 +1301,16 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
                     .await;
                     tool_results.push(format!("**{}** (Error): {}", tr.name, err_str));
                 }
+            }
+        }
+
+        // Write mutated keyring back to shared state so the next turn picks it up.
+        if keyring_mutated {
+            let mut shared_kr = cfg.provider_keyring.write().unwrap();
+            *shared_kr = provider_keyring_local;
+            // Persist to disk so the keyring survives restarts.
+            if let Err(e) = shared_kr.save() {
+                tracing::error!("Failed to save keyring after agentic mutation: {}", e);
             }
         }
 
@@ -2120,6 +2237,146 @@ fn handle_write_review(agent_dir: &Path, args: &serde_json::Value) -> String {
             Err(e) => format!("write_review failed: {}", e),
         },
         Err(e) => format!("write_review failed: {}", e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// manage_hive synthetic tool
+// ---------------------------------------------------------------------------
+
+/// Handle the `manage_hive` synthetic tool: list, create, status, delegate.
+pub(crate) fn handle_manage_hive(agent_id: &str, args: &serde_json::Value) -> String {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match action.as_str() {
+        "list" => {
+            let (summaries, mentor_name) = crate::build_hive_agent_summaries();
+            if summaries.is_empty() {
+                return "No agents registered in the Hive.".to_string();
+            }
+            let mut out = String::new();
+            if let Some(mentor) = mentor_name {
+                out.push_str(&format!("Mentor: {}\n", mentor));
+            }
+            out.push_str(&format!("Hive agents ({}):\n", summaries.len()));
+            for a in &summaries {
+                let status = if a.birth_complete {
+                    "active"
+                } else {
+                    "in birth"
+                };
+                let marker = if a.id == agent_id { " (you)" } else { "" };
+                out.push_str(&format!("- {} [{}] — {}{}\n", a.name, a.id, status, marker));
+            }
+            out
+        }
+
+        "create" => {
+            let agent_name = args
+                .get("agent_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if agent_name.is_empty() {
+                return "manage_hive failed: agent_name is required for create.".to_string();
+            }
+            match crate::create_agent_internal(&agent_name) {
+                Ok((uuid, _, _)) => {
+                    format!(
+                        "Agent '{}' created (id: {}). It needs to complete the birth flow before it can accept tasks.",
+                        agent_name, uuid
+                    )
+                }
+                Err(e) => format!("manage_hive create failed: {}", e),
+            }
+        }
+
+        "status" => {
+            let target_id = args
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if target_id.is_empty() {
+                return "manage_hive failed: agent_id is required for status.".to_string();
+            }
+            let dir = match crate::agent_dir(&target_id) {
+                Some(d) => d,
+                None => return format!("manage_hive failed: agent {} not found.", target_id),
+            };
+            let config_path = dir.join("config.json");
+            match AppConfig::load(&config_path) {
+                Ok(config) => {
+                    let name = config.agent_name.as_deref().unwrap_or("unknown");
+                    let birth = if config.birth_complete {
+                        "complete"
+                    } else {
+                        config.birth_stage.as_deref().unwrap_or("not started")
+                    };
+                    format!(
+                        "Agent '{}' ({}): birth={}, providers={}",
+                        name,
+                        target_id,
+                        birth,
+                        config
+                            .active_provider_preference
+                            .as_deref()
+                            .unwrap_or("none"),
+                    )
+                }
+                Err(e) => format!("manage_hive status failed: {}", e),
+            }
+        }
+
+        "delegate" => {
+            let target_id = args
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let goal = args
+                .get("goal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if target_id.is_empty() || goal.is_empty() {
+                return "manage_hive failed: agent_id and goal are required for delegate."
+                    .to_string();
+            }
+            // Check target agent exists and birth is complete.
+            let dir = match crate::agent_dir(&target_id) {
+                Some(d) => d,
+                None => return format!("manage_hive failed: agent {} not found.", target_id),
+            };
+            let config_path = dir.join("config.json");
+            match AppConfig::load(&config_path) {
+                Ok(config) => {
+                    if !config.birth_complete {
+                        return format!(
+                            "manage_hive delegate failed: agent {} has not completed birth.",
+                            target_id
+                        );
+                    }
+                    // Delegation requires AppState to launch the task, so return a marker
+                    // that the caller (agentic loop / operational chat) should handle.
+                    format!("DELEGATE:{}:{}", target_id, goal)
+                }
+                Err(e) => format!("manage_hive delegate failed: {}", e),
+            }
+        }
+
+        other => format!(
+            "manage_hive failed: unknown action '{}'. Use list, create, status, or delegate.",
+            other
+        ),
     }
 }
 

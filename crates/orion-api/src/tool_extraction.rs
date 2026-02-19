@@ -166,6 +166,27 @@ pub fn build_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<ToolDefinit
     defs
 }
 
+/// Build the `manage_hive` tool definition (shared between operational and agentic modes).
+fn manage_hive_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "manage_hive".to_string(),
+        description:
+            "List, create, check status of, or delegate tasks to sibling agents in the Hive."
+                .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["list", "create", "status", "delegate"], "description": "Action to perform" },
+                "agent_name": { "type": "string", "description": "Name for the new agent (create action)" },
+                "agent_id": { "type": "string", "description": "Target agent UUID (status/delegate actions)" },
+                "goal": { "type": "string", "description": "Goal to delegate (delegate action)" },
+                "router_mode": { "type": "string", "enum": ["auto", "think_hard", "think_harder"], "description": "Router mode for delegated task (default: auto)" }
+            },
+            "required": ["action"]
+        }),
+    }
+}
+
 /// Build tool definitions for operational chat mode: skill tools + lightweight synthetic tools.
 pub fn build_operational_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<ToolDefinition> {
     let mut defs = build_tool_definitions(skill_tools);
@@ -182,6 +203,7 @@ pub fn build_operational_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec
             "required": ["goal"]
         }),
     });
+    defs.push(manage_hive_tool_def());
     defs
 }
 
@@ -246,6 +268,8 @@ pub fn build_agentic_tool_definitions(skill_tools: &[SkillToolEntry]) -> Vec<Too
             "required": ["action"]
         }),
     });
+
+    defs.push(manage_hive_tool_def());
 
     defs
 }
@@ -356,6 +380,15 @@ mod tests {
         assert!(names.contains(&"register_mcp_skill"));
         assert!(names.contains(&"manage_proxy"));
         assert!(names.contains(&"store_provider_key"));
+        assert!(names.contains(&"manage_hive"));
+    }
+
+    #[test]
+    fn test_build_operational_tool_definitions_includes_manage_hive() {
+        let defs = build_operational_tool_definitions(&[]);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"launch_agentic_task"));
+        assert!(names.contains(&"manage_hive"));
     }
 
     #[test]

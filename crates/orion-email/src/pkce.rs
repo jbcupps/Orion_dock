@@ -8,7 +8,7 @@ use sha2::Digest;
 /// Generate a code_verifier (43–128 chars, unreserved).
 pub fn code_verifier() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64_encode_unreserved(&bytes)
 }
 

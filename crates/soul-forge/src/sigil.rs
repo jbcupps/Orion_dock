@@ -73,10 +73,10 @@ pub fn generate_sigil(
         let mut half: Vec<char> = Vec::new();
 
         for _col in 0..half_cols {
-            let ch = if rng.gen_ratio(7, 10) {
-                primary_chars[rng.gen_range(0..primary_chars.len())]
+            let ch = if rng.random_ratio(7, 10) {
+                primary_chars[rng.random_range(0..primary_chars.len())]
             } else {
-                secondary_chars[rng.gen_range(0..secondary_chars.len())]
+                secondary_chars[rng.random_range(0..secondary_chars.len())]
             };
             half.push(ch);
         }
@@ -103,10 +103,10 @@ pub fn generate_sigil(
                 // No horizontal mirror — full width directional
                 let mut full: Vec<char> = half;
                 for _ in half_cols..cols {
-                    let ch = if rng.gen_ratio(7, 10) {
-                        primary_chars[rng.gen_range(0..primary_chars.len())]
+                    let ch = if rng.random_ratio(7, 10) {
+                        primary_chars[rng.random_range(0..primary_chars.len())]
                     } else {
-                        secondary_chars[rng.gen_range(0..secondary_chars.len())]
+                        secondary_chars[rng.random_range(0..secondary_chars.len())]
                     };
                     full.push(ch);
                 }

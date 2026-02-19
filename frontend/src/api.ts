@@ -1226,40 +1226,6 @@ export async function fetchAgenticTaskStatus(
   return res.json();
 }
 
-export interface AgenticTaskStatusResponse {
-  task_id: string;
-  goal: string;
-  status:
-    | 'running'
-    | 'waiting_for_mentor'
-    | 'waiting_for_confirmation'
-    | 'completed'
-    | 'failed'
-    | 'cancelled';
-  turn: number;
-  steps: Array<{
-    turn: number;
-    step_type: string;
-    content: string;
-    timestamp: string;
-  }>;
-}
-
-export async function fetchAgenticTaskStatus(
-  agentId: string,
-  taskId: string
-): Promise<AgenticTaskStatusResponse> {
-  const base = getBaseUrl();
-  const res = await apiFetch(
-    `${base}/api/agents/${encodeURIComponent(agentId)}/agent/status?task=${encodeURIComponent(taskId)}`
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || `Fetch agentic task status failed: ${res.status}`);
-  }
-  return res.json();
-}
-
 export async function respondToAgent(
   agentId: string,
   taskId: string,
