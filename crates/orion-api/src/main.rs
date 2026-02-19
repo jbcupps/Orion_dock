@@ -5184,6 +5184,103 @@ async fn api_proxy_logs(
     }))
 }
 
+/// GET /api/proxy/status — inspect proxy mode and recent logs.
+async fn api_proxy_status() -> Result<Json<ProxyStatusResponse>, (axum::http::StatusCode, String)> {
+    let allowlist_path = proxy_allowlist_path();
+    let log_dir = proxy_log_dir();
+    let internal_log_path = log_dir.join("internal").join("access.log");
+    let external_log_path = log_dir.join("external").join("access.log");
+    Ok(Json(ProxyStatusResponse {
+        mode: std::env::var("PROXY_MODE").unwrap_or_else(|_| "allow_all".to_string()),
+        allow_host_docker_internal: parse_bool_env("PROXY_ALLOW_HOST_DOCKER_INTERNAL", true),
+        allowlist_path: allowlist_path.display().to_string(),
+        internal_log_path: internal_log_path.display().to_string(),
+        external_log_path: external_log_path.display().to_string(),
+        internal_log_exists: internal_log_path.exists(),
+        external_log_exists: external_log_path.exists(),
+        internal_log_tail: read_log_tail(&internal_log_path, 40),
+        external_log_tail: read_log_tail(&external_log_path, 40),
+    }))
+}
+
+/// GET /api/proxy/allowlist — read the external proxy domain allowlist.
+async fn api_proxy_allowlist_get(
+) -> Result<Json<ProxyAllowlistResponse>, (axum::http::StatusCode, String)> {
+    let path = proxy_allowlist_path();
+    Ok(Json(ProxyAllowlistResponse {
+        path: path.display().to_string(),
+        content: read_file_or_empty(&path),
+    }))
+}
+
+/// PUT /api/proxy/allowlist — update the external proxy domain allowlist.
+async fn api_proxy_allowlist_put(
+    Json(body): Json<ProxyAllowlistUpdateRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if !body.mentor_approved {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "mentor_approved=true is required for proxy allowlist updates".to_string(),
+        ));
+    }
+    let path = proxy_allowlist_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Create allowlist directory failed: {}", e),
+            )
+        })?;
+    }
+    std::fs::write(&path, body.content.as_bytes()).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Write allowlist failed: {}", e),
+        )
+    })?;
+
+    // Best-effort live reload for local/docker dev setups.
+    let reload_result = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("docker compose -f docker/docker-compose.yml exec -T proxy_external squid -k reconfigure")
+        .output()
+        .ok()
+        .map(|out| {
+            if out.status.success() {
+                "proxy_external reconfigured".to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    "allowlist updated; proxy reload command failed".to_string()
+                } else {
+                    format!("allowlist updated; proxy reload command failed: {}", stderr)
+                }
+            }
+        })
+        .unwrap_or_else(|| "allowlist updated; proxy reload command unavailable".to_string());
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "reload": reload_result
+    })))
+}
+
+/// GET /api/proxy/logs?lines=N — read recent internal/external proxy logs.
+async fn api_proxy_logs(
+    Query(query): Query<ProxyLogsQuery>,
+) -> Result<Json<ProxyLogsResponse>, (axum::http::StatusCode, String)> {
+    let lines = query.lines.unwrap_or(80).clamp(1, 500);
+    let log_dir = proxy_log_dir();
+    let internal_log = log_dir.join("internal").join("access.log");
+    let external_log = log_dir.join("external").join("access.log");
+    Ok(Json(ProxyLogsResponse {
+        lines,
+        internal: read_log_tail(&internal_log, lines),
+        external: read_log_tail(&external_log, lines),
+    }))
+}
+
 // ============================================================================
 // Orchestration Jobs Endpoints
 // ============================================================================
