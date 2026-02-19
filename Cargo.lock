@@ -95,9 +95,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.100"
+version = "1.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
 name = "ar_archive_writer"
@@ -1995,6 +1995,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
+name = "hashify"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "149e3ea90eb5a26ad354cfe3cb7f7401b9329032d0235f2687d03a35f30e5d4c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "hashlink"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2798,11 +2809,11 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "mail-parser"
-version = "0.9.4"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93c3b9e5d8b17faf573330bbc43b37d6e918c0a3bf8a88e7d0a220ebc84af9fc"
+checksum = "f82a3d6522697593ba4c683e0a6ee5a40fee93bc1a525e3cc6eeb3da11fd8897"
 dependencies = [
- "encoding_rs",
+ "hashify",
 ]
 
 [[package]]
@@ -3230,7 +3241,7 @@ dependencies = [
  "skill-web-search",
  "tokio",
  "tokio-stream",
- "tower-http 0.5.2",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3250,7 +3261,7 @@ dependencies = [
  "orion-memory",
  "orion-router",
  "orion-soul-crystallization",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3297,7 +3308,7 @@ dependencies = [
  "chrono",
  "directories",
  "ed25519-dalek",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "secrecy",
  "serde",
@@ -3320,7 +3331,7 @@ dependencies = [
  "base64 0.21.7",
  "chrono",
  "orion-core",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -3383,7 +3394,7 @@ dependencies = [
  "mail-parser",
  "notify",
  "orion-core",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -4127,7 +4138,7 @@ dependencies = [
  "sync_wrapper 1.0.2",
  "tokio",
  "tower",
- "tower-http 0.6.8",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -4791,7 +4802,7 @@ dependencies = [
  "genesis-core",
  "orion-birth",
  "orion-core",
- "rand 0.8.5",
+ "rand 0.9.2",
  "ratatui",
  "serde",
  "serde_json",
@@ -5532,22 +5543,6 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
-dependencies = [
- "bitflags 2.10.0",
- "bytes",
- "http 1.4.0",
- "http-body 1.0.1",
- "http-body-util",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "tower-http"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
@@ -5810,11 +5805,11 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.20.0"
+version = "1.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee48d38b119b0cd71fe4141b30f5ba9c7c5d9f4e7a3a8b4a674e4b6ef789976f"
+checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
