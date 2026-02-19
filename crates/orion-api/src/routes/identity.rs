@@ -1,7 +1,4 @@
-use axum::{
-    extract::Path,
-    Json,
-};
+use axum::{extract::Path, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -13,10 +10,7 @@ use orion_core::{
     SigMeta, Verifier, CONFIG_SCHEMA_VERSION,
 };
 
-use crate::{
-    agent_dir, data_root, provider_names_from_keyring, resolve_birth_timestamp,
-    ApiError,
-};
+use crate::{agent_dir, data_root, provider_names_from_keyring, resolve_birth_timestamp, ApiError};
 
 #[derive(Serialize)]
 pub(crate) struct AgentIdentityBundle {
@@ -117,9 +111,7 @@ pub(crate) struct ImportAgentResponse {
 pub(crate) async fn api_agent_identity(
     Path(id): Path<String>,
 ) -> Result<Json<AgentIdentityBundle>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let pubkey_path = dir.join("external_pubkey.bin");
     if !pubkey_path.exists() {
@@ -128,9 +120,8 @@ pub(crate) async fn api_agent_identity(
         ));
     }
 
-    let pubkey_bytes = std::fs::read(&pubkey_path).map_err(|e| {
-        ApiError::Internal(format!("Failed to read public key: {}", e))
-    })?;
+    let pubkey_bytes = std::fs::read(&pubkey_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to read public key: {}", e)))?;
     let pubkey_base64 = BASE64.encode(&pubkey_bytes);
 
     let config_path = dir.join("config.json");
@@ -175,9 +166,7 @@ pub(crate) async fn api_agent_identity(
 pub(crate) async fn api_agent_constitution(
     Path(id): Path<String>,
 ) -> Result<Json<ConstitutionResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let config_path = dir.join("config.json");
     if config_path.exists() {
@@ -191,9 +180,8 @@ pub(crate) async fn api_agent_constitution(
     }
 
     let pubkey_path = dir.join("external_pubkey.bin");
-    let pubkey_bytes = std::fs::read(&pubkey_path).map_err(|e| {
-        ApiError::Internal(format!("Failed to read public key: {}", e))
-    })?;
+    let pubkey_bytes = std::fs::read(&pubkey_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to read public key: {}", e)))?;
     let pubkey_base64 = BASE64.encode(&pubkey_bytes);
 
     let docs_dir = dir.join("docs");
@@ -208,15 +196,12 @@ pub(crate) async fn api_agent_constitution(
             continue;
         }
 
-        let content = std::fs::read_to_string(&doc_path).map_err(|e| {
-            ApiError::Internal(format!("Failed to read {}: {}", doc_name, e))
-        })?;
-        let sig_json = std::fs::read_to_string(&sig_path).map_err(|e| {
-            ApiError::Internal(format!("Failed to read {}.sig: {}", doc_name, e))
-        })?;
-        let meta: SigMeta = serde_json::from_str(&sig_json).map_err(|e| {
-            ApiError::Internal(format!("Invalid {}.sig JSON: {}", doc_name, e))
-        })?;
+        let content = std::fs::read_to_string(&doc_path)
+            .map_err(|e| ApiError::Internal(format!("Failed to read {}: {}", doc_name, e)))?;
+        let sig_json = std::fs::read_to_string(&sig_path)
+            .map_err(|e| ApiError::Internal(format!("Failed to read {}.sig: {}", doc_name, e)))?;
+        let meta: SigMeta = serde_json::from_str(&sig_json)
+            .map_err(|e| ApiError::Internal(format!("Invalid {}.sig JSON: {}", doc_name, e)))?;
 
         documents.push(ConstitutionDocument {
             name: doc_name.to_string(),
@@ -238,9 +223,7 @@ pub(crate) async fn api_agent_constitution(
 pub(crate) async fn api_agent_verify(
     Path(id): Path<String>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let config_path = dir.join("config.json");
     if config_path.exists() {
@@ -255,9 +238,8 @@ pub(crate) async fn api_agent_verify(
 
     let pubkey_path = dir.join("external_pubkey.bin");
     let vault = orion_core::ReadOnlyFileVault::new(&pubkey_path);
-    let verifier = Verifier::from_vault(&vault).map_err(|e| {
-        ApiError::Internal(format!("Failed to load public key: {}", e))
-    })?;
+    let verifier = Verifier::from_vault(&vault)
+        .map_err(|e| ApiError::Internal(format!("Failed to load public key: {}", e)))?;
 
     let docs_dir = dir.join("docs");
     let doc_names = ["soul.md", "ethics.md", "instincts.md", "growth.md"];
@@ -371,18 +353,17 @@ pub(crate) async fn api_import_agent(
 
     let export = body.export;
     if export.export_version != 2 && export.export_version != 3 {
-        return Err(ApiError::BadRequest(
-            format!("Unsupported export_version: {}", export.export_version),
-        ));
+        return Err(ApiError::BadRequest(format!(
+            "Unsupported export_version: {}",
+            export.export_version
+        )));
     }
 
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
     let identities_dir = root.join("identities");
-    std::fs::create_dir_all(&identities_dir).map_err(|e| {
-        ApiError::Internal(format!("Failed to create identities dir: {}", e))
-    })?;
+    std::fs::create_dir_all(&identities_dir)
+        .map_err(|e| ApiError::Internal(format!("Failed to create identities dir: {}", e)))?;
 
     let pubkey_base64 = export
         .identity
@@ -391,24 +372,25 @@ pub(crate) async fn api_import_agent(
         .ok_or_else(|| {
             ApiError::BadRequest("Export identity.pubkey_base64 is required".to_string())
         })?;
-    let pubkey_bytes = BASE64.decode(pubkey_base64).map_err(|e| {
-        ApiError::BadRequest(format!("Invalid identity.pubkey_base64: {}", e))
-    })?;
-    let pubkey_array: [u8; 32] = pubkey_bytes.as_slice().try_into().map_err(|_| {
-        ApiError::BadRequest("Export public key must be 32 bytes".to_string())
-    })?;
-    let private_signing_key = orion_core::parse_private_key(private_key_base64).map_err(|e| {
-        ApiError::Unauthorized(format!("Invalid private key: {}", e))
-    })?;
+    let pubkey_bytes = BASE64
+        .decode(pubkey_base64)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid identity.pubkey_base64: {}", e)))?;
+    let pubkey_array: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("Export public key must be 32 bytes".to_string()))?;
+    let private_signing_key = orion_core::parse_private_key(private_key_base64)
+        .map_err(|e| ApiError::Unauthorized(format!("Invalid private key: {}", e)))?;
     if private_signing_key.verifying_key().to_bytes() != pubkey_array {
         return Err(ApiError::Unauthorized(
             "Private key does not match export identity".to_string(),
         ));
     }
 
-    let constitution_obj = export.constitution.as_object().ok_or_else(|| {
-        ApiError::BadRequest("Export constitution must be an object".to_string())
-    })?;
+    let constitution_obj = export
+        .constitution
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("Export constitution must be an object".to_string()))?;
 
     let imported_name = export
         .agent
@@ -437,17 +419,14 @@ pub(crate) async fn api_import_agent(
 
     let uuid = Uuid::new_v4().to_string();
     let agent_dir = identities_dir.join(&uuid);
-    std::fs::create_dir_all(&agent_dir).map_err(|e| {
-        ApiError::Internal(format!("Failed to create agent dir: {}", e))
-    })?;
+    std::fs::create_dir_all(&agent_dir)
+        .map_err(|e| ApiError::Internal(format!("Failed to create agent dir: {}", e)))?;
     let docs_dir = agent_dir.join("docs");
-    std::fs::create_dir_all(&docs_dir).map_err(|e| {
-        ApiError::Internal(format!("Failed to create docs dir: {}", e))
-    })?;
+    std::fs::create_dir_all(&docs_dir)
+        .map_err(|e| ApiError::Internal(format!("Failed to create docs dir: {}", e)))?;
 
-    std::fs::write(agent_dir.join("external_pubkey.bin"), &pubkey_bytes).map_err(|e| {
-        ApiError::Internal(format!("Failed to write external public key: {}", e))
-    })?;
+    std::fs::write(agent_dir.join("external_pubkey.bin"), &pubkey_bytes)
+        .map_err(|e| ApiError::Internal(format!("Failed to write external public key: {}", e)))?;
     let verifier = {
         let verify_vault =
             orion_core::ReadOnlyFileVault::new(agent_dir.join("external_pubkey.bin"));
@@ -468,16 +447,21 @@ pub(crate) async fn api_import_agent(
             .ok_or_else(|| {
                 ApiError::BadRequest(format!("Invalid constitution content for {}", doc_name))
             })?;
-        let signature_value = doc_export.get("signature").cloned().ok_or_else(|| {
-            ApiError::BadRequest(format!("Missing signature for {}", doc_name))
-        })?;
+        let signature_value = doc_export
+            .get("signature")
+            .cloned()
+            .ok_or_else(|| ApiError::BadRequest(format!("Missing signature for {}", doc_name)))?;
         if signature_value.is_null() {
-            return Err(ApiError::BadRequest(
-                format!("Missing signature for {}", doc_name),
-            ));
+            return Err(ApiError::BadRequest(format!(
+                "Missing signature for {}",
+                doc_name
+            )));
         }
         let meta: SigMeta = serde_json::from_value(signature_value).map_err(|e| {
-            ApiError::BadRequest(format!("Invalid signature metadata for {}: {}", doc_name, e))
+            ApiError::BadRequest(format!(
+                "Invalid signature metadata for {}: {}",
+                doc_name, e
+            ))
         })?;
         let doc = CoreDocument {
             name: format!("{}.md", doc_name),
@@ -532,19 +516,17 @@ pub(crate) async fn api_import_agent(
         active_provider_preference: None,
         provider_catalog: std::collections::HashMap::new(),
     };
-    config.save(&agent_dir.join("config.json")).map_err(|e| {
-        ApiError::Internal(format!("Failed to save config: {}", e))
-    })?;
+    config
+        .save(&agent_dir.join("config.json"))
+        .map_err(|e| ApiError::Internal(format!("Failed to save config: {}", e)))?;
 
-    let write_doc = |key: &str,
-                     file_name: &str,
-                     required: bool|
-     -> Result<(), ApiError> {
+    let write_doc = |key: &str, file_name: &str, required: bool| -> Result<(), ApiError> {
         let Some(doc_value) = constitution_obj.get(key) else {
             if required {
-                return Err(ApiError::BadRequest(
-                    format!("Missing constitution document: {}", key),
-                ));
+                return Err(ApiError::BadRequest(format!(
+                    "Missing constitution document: {}",
+                    key
+                )));
             }
             return Ok(());
         };
@@ -554,15 +536,15 @@ pub(crate) async fn api_import_agent(
         let content = match doc_obj.get("content").and_then(|v| v.as_str()) {
             Some(c) => c,
             None if required => {
-                return Err(ApiError::BadRequest(
-                    format!("Missing constitution content for {}", key),
-                ));
+                return Err(ApiError::BadRequest(format!(
+                    "Missing constitution content for {}",
+                    key
+                )));
             }
             None => return Ok(()),
         };
-        std::fs::write(docs_dir.join(file_name), content).map_err(|e| {
-            ApiError::Internal(format!("Failed to write {}: {}", file_name, e))
-        })?;
+        std::fs::write(docs_dir.join(file_name), content)
+            .map_err(|e| ApiError::Internal(format!("Failed to write {}: {}", file_name, e)))?;
 
         if let Some(signature_value) = doc_obj.get("signature") {
             if !signature_value.is_null() {
@@ -570,11 +552,7 @@ pub(crate) async fn api_import_agent(
                     ApiError::BadRequest(format!("Invalid signature JSON for {}: {}", key, e))
                 })?;
                 std::fs::write(docs_dir.join(format!("{}.sig", file_name)), sig_json).map_err(
-                    |e| {
-                        ApiError::Internal(
-                            format!("Failed to write {}.sig: {}", file_name, e),
-                        )
-                    },
+                    |e| ApiError::Internal(format!("Failed to write {}.sig: {}", file_name, e)),
                 )?;
             }
         }
@@ -588,9 +566,8 @@ pub(crate) async fn api_import_agent(
 
     if let Some(path_value) = export.genesis_path {
         if !path_value.is_null() {
-            let path_json = serde_json::to_string_pretty(&path_value).map_err(|e| {
-                ApiError::BadRequest(format!("Invalid genesis path JSON: {}", e))
-            })?;
+            let path_json = serde_json::to_string_pretty(&path_value)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid genesis path JSON: {}", e)))?;
             std::fs::write(agent_dir.join("genesis_path.json"), path_json).map_err(|e| {
                 ApiError::Internal(format!("Failed to write genesis_path.json: {}", e))
             })?;
@@ -615,21 +592,18 @@ pub(crate) async fn api_import_agent(
             let content = serde_json::to_string_pretty(chat_value).map_err(|e| {
                 ApiError::BadRequest(format!("Invalid chat history JSON for {}: {}", key, e))
             })?;
-            std::fs::write(agent_dir.join(file_name), content).map_err(|e| {
-                ApiError::Internal(format!("Failed to write {}: {}", file_name, e))
-            })?;
+            std::fs::write(agent_dir.join(file_name), content)
+                .map_err(|e| ApiError::Internal(format!("Failed to write {}: {}", file_name, e)))?;
         }
     }
 
     if !export.agentic_runs.is_empty() {
         let runs_dir = agent_dir.join("agentic_runs");
-        std::fs::create_dir_all(&runs_dir).map_err(|e| {
-            ApiError::Internal(format!("Failed to create agentic_runs dir: {}", e))
-        })?;
+        std::fs::create_dir_all(&runs_dir)
+            .map_err(|e| ApiError::Internal(format!("Failed to create agentic_runs dir: {}", e)))?;
         for (idx, run) in export.agentic_runs.iter().enumerate() {
-            let run_json = serde_json::to_string_pretty(run).map_err(|e| {
-                ApiError::BadRequest(format!("Invalid agentic run JSON: {}", e))
-            })?;
+            let run_json = serde_json::to_string_pretty(run)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid agentic run JSON: {}", e)))?;
             let run_path = runs_dir.join(format!("run-{:04}.json", idx + 1));
             std::fs::write(run_path, run_json).map_err(|e| {
                 ApiError::Internal(format!("Failed to write agentic run file: {}", e))
@@ -639,18 +613,14 @@ pub(crate) async fn api_import_agent(
 
     if let Some(orchestration_value) = export.orchestration {
         if !orchestration_value.is_null() {
-            let orchestration_json =
-                serde_json::to_string_pretty(&orchestration_value).map_err(|e| {
-                    ApiError::BadRequest(format!("Invalid orchestration JSON: {}", e))
-                })?;
+            let orchestration_json = serde_json::to_string_pretty(&orchestration_value)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid orchestration JSON: {}", e)))?;
             std::fs::write(
                 agent_dir.join("orchestration_jobs.json"),
                 orchestration_json,
             )
             .map_err(|e| {
-                ApiError::Internal(
-                    format!("Failed to write orchestration_jobs.json: {}", e),
-                )
+                ApiError::Internal(format!("Failed to write orchestration_jobs.json: {}", e))
             })?;
         }
     }
@@ -675,9 +645,8 @@ pub(crate) async fn api_import_agent(
 
     let gc_path = GlobalConfig::config_path(&root);
     let mut gc = if gc_path.exists() {
-        GlobalConfig::load(&root).map_err(|e| {
-            ApiError::Internal(format!("Failed to load global config: {}", e))
-        })?
+        GlobalConfig::load(&root)
+            .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
     } else {
         GlobalConfig::new(&root)
     };
@@ -688,9 +657,8 @@ pub(crate) async fn api_import_agent(
         directory: PathBuf::from(format!("identities/{}", uuid)),
     })
     .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    gc.save(&root).map_err(|e| {
-        ApiError::Internal(format!("Failed to save global config: {}", e))
-    })?;
+    gc.save(&root)
+        .map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
 
     tracing::info!("Imported agent: {} ({})", imported_name, uuid);
     Ok(Json(ImportAgentResponse {
@@ -710,16 +678,13 @@ pub(crate) async fn api_export_agent(
     ),
     ApiError,
 > {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     // ---- Agent metadata from config.json ----
     let config_path = dir.join("config.json");
     let config_val: serde_json::Value = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).map_err(|e| {
-            ApiError::Internal(format!("Failed to read config: {}", e))
-        })?;
+        let raw = std::fs::read_to_string(&config_path)
+            .map_err(|e| ApiError::Internal(format!("Failed to read config: {}", e)))?;
         serde_json::from_str(&raw).unwrap_or_default()
     } else {
         serde_json::Value::Null
@@ -761,9 +726,7 @@ pub(crate) async fn api_export_agent(
     let pubkey_path = dir.join("external_pubkey.bin");
     let pubkey_bytes = std::fs::read(&pubkey_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            ApiError::BadRequest(
-                "Cannot export agent — external public key is missing".to_string(),
-            )
+            ApiError::BadRequest("Cannot export agent — external public key is missing".to_string())
         } else {
             ApiError::Internal(format!("Failed to read public key: {}", e))
         }
@@ -774,9 +737,8 @@ pub(crate) async fn api_export_agent(
         ));
     }
 
-    let private_signing_key = orion_core::parse_private_key(private_key_base64).map_err(|e| {
-        ApiError::Unauthorized(format!("Invalid private key: {}", e))
-    })?;
+    let private_signing_key = orion_core::parse_private_key(private_key_base64)
+        .map_err(|e| ApiError::Unauthorized(format!("Invalid private key: {}", e)))?;
     let derived_pubkey = private_signing_key.verifying_key().to_bytes();
     if derived_pubkey.as_slice() != pubkey_bytes.as_slice() {
         return Err(ApiError::Unauthorized(
@@ -787,9 +749,8 @@ pub(crate) async fn api_export_agent(
     let identity = serde_json::json!({ "pubkey_base64": BASE64.encode(&pubkey_bytes) });
 
     // ---- Keychain (requires private key unlock) ----
-    let keyring = ProviderKeyring::load(dir.clone()).map_err(|e| {
-        ApiError::Internal(format!("Failed to load provider keyring: {}", e))
-    })?;
+    let keyring = ProviderKeyring::load(dir.clone())
+        .map_err(|e| ApiError::Internal(format!("Failed to load provider keyring: {}", e)))?;
     let mut provider_secrets = serde_json::Map::new();
     for provider in provider_names_from_keyring(&keyring) {
         if let Some(secret) = keyring.get_key_str(&provider) {

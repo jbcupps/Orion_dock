@@ -863,10 +863,7 @@ impl AppConfig {
     /// Migrate any legacy plaintext API keys from config fields into the provider keyring.
     /// Returns a list of providers that were migrated. Call `save()` after this
     /// to persist the config without the key fields.
-    pub fn migrate_keys_to_keyring(
-        &mut self,
-        keyring: &mut crate::ProviderKeyring,
-    ) -> Vec<String> {
+    pub fn migrate_keys_to_keyring(&mut self, keyring: &mut crate::ProviderKeyring) -> Vec<String> {
         let mut migrated = Vec::new();
 
         // openai_api_key → keyring

@@ -51,16 +51,18 @@ pub use policy::{
     evaluate_tool_request, evaluate_user_message_for_capabilities, CapabilityEnvelope,
     CapabilityGateResult,
 };
-pub use sao_bridge::{AgentState, SaoBridgeClient, SaoBridgeError};
 pub use provider_keyring::{is_known_llm_provider, ProviderKeyring, KNOWN_LLM_PROVIDERS};
-#[deprecated(note = "Use ProviderKeyring for provider keys and SkillKeychain for skill secrets")]
+pub use sao_bridge::{AgentState, SaoBridgeClient, SaoBridgeError};
+#[deprecated(
+    note = "Use ProviderKeyring for provider keys and SkillKeychain for skill secrets"
+)]
 pub use secrets::SecretsVault;
 pub use skill_keychain::SkillKeychain;
-pub use vault_migration::migrate_if_needed;
 pub use superego::{
     check_message, check_search_query, check_search_query_with_trace, check_user_message,
     check_user_message_with_trace, SafetyDecisionTrace, SuperegoVerdict, CODE_ILLEGAL_DRUGS,
     CODE_MALWARE_CREATION, CODE_PII_DOXXING, CODE_PROMPT_INJECTION, CODE_WEAPONS_EXPLOSIVES,
 };
 pub use vault::{ExternalVault, ReadOnlyFileVault};
+pub use vault_migration::migrate_if_needed;
 pub use verifier::{write_sig_file, SigMeta, Verifier};

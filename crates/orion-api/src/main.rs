@@ -30,8 +30,8 @@ use orion_core::system_prompt::{
 };
 use orion_core::templates::{fill_soul_template, GROWTH_MD};
 use orion_core::{
-    curated_provider_models, validate_local_llm_url, AgentEntry, AppConfig,
-    GlobalConfig, MemoryBackend, ProviderCatalogEntry, ProviderKeyring, RoutingMode, SkillKeychain,
+    curated_provider_models, validate_local_llm_url, AgentEntry, AppConfig, GlobalConfig,
+    MemoryBackend, ProviderCatalogEntry, ProviderKeyring, RoutingMode, SkillKeychain,
     ThinkingModelTier, TierModels, CONFIG_SCHEMA_VERSION,
 };
 use orion_skills::manifest::TrustTier;
@@ -49,8 +49,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 use agentic::{
-    AgenticEvent, AgenticLoopConfig, AgenticRunRequest, AgenticRunResponse,
-    AgenticTask, AgenticTaskStatus,
+    AgenticEvent, AgenticLoopConfig, AgenticRunRequest, AgenticRunResponse, AgenticTask,
+    AgenticTaskStatus,
 };
 use chat_attachments::{
     build_attachment_context_block, build_attachment_storage_note, has_attachments,
@@ -86,14 +86,17 @@ pub(crate) struct AppState {
     /// Shared skill keychain for skill plugins — non-provider secrets.
     pub(crate) skill_keychain: Arc<Mutex<SkillKeychain>>,
     /// Shared email account list for the email skill — synced per-request from agent config.
-    pub(crate) email_accounts: Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
+    pub(crate) email_accounts:
+        Arc<tokio::sync::RwLock<Vec<orion_core::config::EmailAccountConfig>>>,
     /// Scheduler interval for orchestration periodic jobs.
     pub(crate) orchestration_tick_seconds: u64,
     /// Pending skill execution confirmation nonces: nonce → (skill_id, tool_name, created_at).
     #[allow(clippy::type_complexity)]
-    pub(crate) skill_confirm_nonces: Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
+    pub(crate) skill_confirm_nonces:
+        Arc<TokioMutex<HashMap<String, (String, String, std::time::Instant)>>>,
     /// Pending high-impact operational chat actions that require mentor confirmation.
-    pub(crate) pending_operational_actions: Arc<TokioMutex<HashMap<String, PendingOperationalAction>>>,
+    pub(crate) pending_operational_actions:
+        Arc<TokioMutex<HashMap<String, PendingOperationalAction>>>,
     /// Superego L2 behavior mode.
     pub(crate) superego_l2_mode: orion_router::SuperegoL2Mode,
     /// Genesis path registry — replaces hardcoded GenesisPath::all_paths().
@@ -149,7 +152,10 @@ pub(crate) fn agent_dir(id: &str) -> Option<PathBuf> {
     data_root().map(|root| root.join("identities").join(id))
 }
 
-pub(crate) fn resolve_birth_timestamp(config: &AppConfig, agent_root: &std::path::Path) -> Option<String> {
+pub(crate) fn resolve_birth_timestamp(
+    config: &AppConfig,
+    agent_root: &std::path::Path,
+) -> Option<String> {
     if let Some(ts) = config.birth_timestamp.clone() {
         return Some(ts);
     }
@@ -644,13 +650,13 @@ async fn api_status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 async fn api_identities() -> Result<Json<IdentitiesResponse>, ApiError> {
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
 
     let gc_path = GlobalConfig::config_path(&root);
     let gc = if gc_path.exists() {
-        GlobalConfig::load(&root).map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
+        GlobalConfig::load(&root)
+            .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
     } else {
         return Ok(Json(IdentitiesResponse {
             agents: Vec::new(),
@@ -703,11 +709,9 @@ struct SetMentorNameRequest {
     mentor_name: String,
 }
 
-async fn api_get_mentor_name() -> Result<Json<MentorNameResponse>, ApiError>
-{
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+async fn api_get_mentor_name() -> Result<Json<MentorNameResponse>, ApiError> {
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
     let gc_path = GlobalConfig::config_path(&root);
     let mentor_name = if gc_path.exists() {
         GlobalConfig::load(&root).ok().and_then(|gc| gc.mentor_name)
@@ -720,18 +724,19 @@ async fn api_get_mentor_name() -> Result<Json<MentorNameResponse>, ApiError>
 async fn api_set_mentor_name(
     Json(body): Json<SetMentorNameRequest>,
 ) -> Result<Json<MentorNameResponse>, ApiError> {
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
     let gc_path = GlobalConfig::config_path(&root);
     let mut gc = if gc_path.exists() {
-        GlobalConfig::load(&root).map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
+        GlobalConfig::load(&root)
+            .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
     } else {
         GlobalConfig::new(&root)
     };
     let name = body.mentor_name.trim().to_string();
     gc.mentor_name = if name.is_empty() { None } else { Some(name) };
-    gc.save(&root).map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
+    gc.save(&root)
+        .map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
     Ok(Json(MentorNameResponse {
         mentor_name: gc.mentor_name,
     }))
@@ -745,17 +750,19 @@ async fn api_create_agent(
         return Err(ApiError::BadRequest("Agent name is required".to_string()));
     }
 
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
 
-    std::fs::create_dir_all(root.join("identities")).map_err(|e| ApiError::Internal(format!("Failed to create identities dir: {}", e)))?;
+    std::fs::create_dir_all(root.join("identities"))
+        .map_err(|e| ApiError::Internal(format!("Failed to create identities dir: {}", e)))?;
 
     let uuid = Uuid::new_v4().to_string();
     let agent_dir = root.join("identities").join(&uuid);
-    std::fs::create_dir_all(&agent_dir).map_err(|e| ApiError::Internal(format!("Failed to create agent dir: {}", e)))?;
+    std::fs::create_dir_all(&agent_dir)
+        .map_err(|e| ApiError::Internal(format!("Failed to create agent dir: {}", e)))?;
     let docs_dir = agent_dir.join("docs");
-    std::fs::create_dir_all(&docs_dir).map_err(|e| ApiError::Internal(format!("Failed to create docs dir: {}", e)))?;
+    std::fs::create_dir_all(&docs_dir)
+        .map_err(|e| ApiError::Internal(format!("Failed to create docs dir: {}", e)))?;
 
     let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
     let memory_backend = std::env::var("MEMORY_BACKEND")
@@ -799,11 +806,14 @@ async fn api_create_agent(
         provider_catalog: std::collections::HashMap::new(),
     };
     let config_path = agent_dir.join("config.json");
-    config.save(&config_path).map_err(|e| ApiError::Internal(format!("Failed to save config: {}", e)))?;
+    config
+        .save(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to save config: {}", e)))?;
 
     let gc_path = GlobalConfig::config_path(&root);
     let mut gc = if gc_path.exists() {
-        GlobalConfig::load(&root).map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
+        GlobalConfig::load(&root)
+            .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?
     } else {
         let mut new_gc = GlobalConfig::new(&root);
         // Auto-generate Hive master key on first initialization.
@@ -827,7 +837,8 @@ async fn api_create_agent(
         directory: PathBuf::from(format!("identities/{}", uuid)),
     })
     .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    gc.save(&root).map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
+    gc.save(&root)
+        .map_err(|e| ApiError::Internal(format!("Failed to save global config: {}", e)))?;
 
     tracing::info!("Created new agent: {} ({})", name, uuid);
 
@@ -890,25 +901,24 @@ async fn api_create_agent(
     Ok(Json(CreateAgentResponse { id: uuid }))
 }
 
-async fn api_load_agent(
-    Path(id): Path<String>,
-) -> Result<Json<HealthResponse>, ApiError> {
-    let root = data_root().ok_or_else(|| {
-        ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string())
-    })?;
+async fn api_load_agent(Path(id): Path<String>) -> Result<Json<HealthResponse>, ApiError> {
+    let root = data_root()
+        .ok_or_else(|| ApiError::ServiceUnavailable("ORION_DATA_DIR not set".to_string()))?;
 
     let gc_path = GlobalConfig::config_path(&root);
     if !gc_path.exists() {
         return Err(ApiError::NotFound("No identities found".to_string()));
     }
-    let gc = GlobalConfig::load(&root).map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?;
+    let gc = GlobalConfig::load(&root)
+        .map_err(|e| ApiError::Internal(format!("Failed to load global config: {}", e)))?;
 
     if gc.find_agent(&id).is_none() {
         return Err(ApiError::NotFound(format!("Agent {} not found", id)));
     }
 
     let current_path = current_agent_path();
-    std::fs::write(&current_path, &id).map_err(|e| ApiError::Internal(format!("Failed to set current agent: {}", e)))?;
+    std::fs::write(&current_path, &id)
+        .map_err(|e| ApiError::Internal(format!("Failed to set current agent: {}", e)))?;
 
     tracing::info!("Loaded agent {}", id);
     Ok(Json(HealthResponse { status: "ok" }))
@@ -919,13 +929,15 @@ async fn api_birth_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<BirthStateResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
     if config.birth_complete {
-        return Err(ApiError::BadRequest("Agent birth already complete".to_string()));
+        return Err(ApiError::BadRequest(
+            "Agent birth already complete".to_string(),
+        ));
     }
 
     // Check if we already have the signing key in memory or on disk.
@@ -1045,14 +1057,16 @@ async fn api_birth_state(
 async fn api_birth_advance_darkness(
     Path(id): Path<String>,
 ) -> Result<Json<HealthResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
 
     if config.birth_complete {
-        return Err(ApiError::BadRequest("Agent birth already complete".to_string()));
+        return Err(ApiError::BadRequest(
+            "Agent birth already complete".to_string(),
+        ));
     }
 
     // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
@@ -1075,20 +1089,25 @@ async fn api_birth_ignition(
     Path(id): Path<String>,
     Json(body): Json<IgnitionRequest>,
 ) -> Result<Json<HealthResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let mut config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
+    let mut config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
 
     if config.birth_complete {
-        return Err(ApiError::BadRequest("Agent birth already complete".to_string()));
+        return Err(ApiError::BadRequest(
+            "Agent birth already complete".to_string(),
+        ));
     }
 
     if let Some(ref url) = body.local_llm_base_url {
-        let validated = validate_local_llm_url(url).map_err(|e| ApiError::BadRequest(format!("Invalid local LLM URL: {}", e)))?;
+        let validated = validate_local_llm_url(url)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid local LLM URL: {}", e)))?;
         config.local_llm_base_url = Some(validated);
-        config.save(&config_path).map_err(|e| ApiError::Internal(format!("Save config: {}", e)))?;
+        config
+            .save(&config_path)
+            .map_err(|e| ApiError::Internal(format!("Save config: {}", e)))?;
     }
 
     // Run orchestrator on a blocking thread (PostgresStore creates its own Tokio runtime).
@@ -1107,18 +1126,16 @@ async fn api_birth_ignition(
 }
 
 /// GET /api/agents/{id}/genesis/state — read persisted genesis path (for session recovery).
-async fn api_genesis_state(
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+async fn api_genesis_state(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let gp_path = dir.join("genesis_path.json");
     if !gp_path.exists() {
         return Ok(Json(serde_json::json!({ "path": null })));
     }
-    let content = std::fs::read_to_string(&gp_path).map_err(|e| ApiError::Internal(format!("Read genesis_path.json: {}", e)))?;
-    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| ApiError::Internal(format!("Parse genesis_path.json: {}", e)))?;
+    let content = std::fs::read_to_string(&gp_path)
+        .map_err(|e| ApiError::Internal(format!("Read genesis_path.json: {}", e)))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| ApiError::Internal(format!("Parse genesis_path.json: {}", e)))?;
     Ok(Json(value))
 }
 
@@ -1150,14 +1167,16 @@ async fn api_genesis_start(
     Path(id): Path<String>,
     Json(body): Json<GenesisStartRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound(format!("Agent {} not found", id))
-    })?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("Agent {} not found", id)))?;
 
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
 
     if config.birth_complete {
-        return Err(ApiError::BadRequest("Agent birth already complete".to_string()));
+        return Err(ApiError::BadRequest(
+            "Agent birth already complete".to_string(),
+        ));
     }
 
     let path = match body.path.as_str() {
@@ -1188,7 +1207,11 @@ async fn api_genesis_start(
             .or_else(|| {
                 agent_dir(&id).and_then(|dir| orion_core::load_signing_key(&dir).ok().flatten())
             })
-            .ok_or_else(|| ApiError::BadRequest("No signing key found. The signing key may have been lost.".to_string()))?;
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "No signing key found. The signing key may have been lost.".to_string(),
+                )
+            })?;
 
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             use orion_core::templates::{
@@ -1282,14 +1305,18 @@ async fn api_genesis_start(
         other => other,
     };
     if state.genesis_registry.has_path(registry_id) {
-        let config_for_session = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config for session: {}", e)))?;
+        let config_for_session = AppConfig::load(&config_path)
+            .map_err(|e| ApiError::Internal(format!("Load config for session: {}", e)))?;
         let agent_name = config_for_session
             .agent_name
             .clone()
             .unwrap_or_else(|| "Agent".to_string());
         let mentor_name = body.mentor_name.unwrap_or_else(|| "Mentor".to_string());
 
-        let mut strategy = state.genesis_registry.create(registry_id).map_err(|e| ApiError::Internal(format!("Create strategy: {}", e)))?;
+        let mut strategy = state
+            .genesis_registry
+            .create(registry_id)
+            .map_err(|e| ApiError::Internal(format!("Create strategy: {}", e)))?;
 
         let chat_fn: Option<Box<dyn genesis_core::ChatFunction>> = if strategy.info().requires_chat
         {
@@ -1310,9 +1337,15 @@ async fn api_genesis_start(
             scenario_count: Some(5),
         };
 
-        strategy.initialize(ctx).await.map_err(|e| ApiError::Internal(format!("Initialize strategy: {}", e)))?;
+        strategy
+            .initialize(ctx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Initialize strategy: {}", e)))?;
 
-        let first_step = strategy.begin().await.map_err(|e| ApiError::Internal(format!("Begin strategy: {}", e)))?;
+        let first_step = strategy
+            .begin()
+            .await
+            .map_err(|e| ApiError::Internal(format!("Begin strategy: {}", e)))?;
 
         // Include the first step in the response for new clients
         if let Ok(step_json) = serde_json::to_value(&first_step) {
@@ -1345,10 +1378,15 @@ async fn api_genesis_step(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut sessions = state.genesis_sessions.lock().await;
     let strategy = sessions.get_mut(&id).ok_or_else(|| {
-        ApiError::NotFound("No active genesis session for this agent. Call genesis/start first.".to_string())
+        ApiError::NotFound(
+            "No active genesis session for this agent. Call genesis/start first.".to_string(),
+        )
     })?;
 
-    let step_result = strategy.advance(body).await.map_err(|e| ApiError::BadRequest(format!("Genesis advance failed: {}", e)))?;
+    let step_result = strategy
+        .advance(body)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Genesis advance failed: {}", e)))?;
 
     // If Complete, crystallize and advance to Emergence
     if let StepRequest::Complete { ref manifest } = step_result {
@@ -1381,7 +1419,8 @@ async fn api_genesis_step(
     }
 
     // Serialize the StepRequest to JSON
-    let response = serde_json::to_value(&step_result).map_err(|e| ApiError::Internal(format!("Serialize step: {}", e)))?;
+    let response = serde_json::to_value(&step_result)
+        .map_err(|e| ApiError::Internal(format!("Serialize step: {}", e)))?;
     Ok(Json(response))
 }
 
@@ -1393,7 +1432,9 @@ async fn api_genesis_session_state(
     let sessions = state.genesis_sessions.lock().await;
     match sessions.get(&id) {
         Some(strategy) => {
-            let snapshot = strategy.snapshot().map_err(|e| ApiError::Internal(format!("Snapshot failed: {}", e)))?;
+            let snapshot = strategy
+                .snapshot()
+                .map_err(|e| ApiError::Internal(format!("Snapshot failed: {}", e)))?;
             Ok(Json(serde_json::json!({
                 "active": true,
                 "path": strategy.info().id,
@@ -1408,14 +1449,13 @@ async fn api_genesis_session_state(
 async fn api_birth_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let path = dir.join("birth_chat.json");
     if !path.exists() {
         return Ok(Json(serde_json::json!({ "messages": [] })));
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal(format!("Read birth_chat.json: {}", e)))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ApiError::Internal(format!("Read birth_chat.json: {}", e)))?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
     Ok(Json(serde_json::json!({ "messages": messages })))
 }
@@ -1425,12 +1465,9 @@ async fn api_birth_chat(
     Path(id): Path<String>,
     Json(body): Json<BirthChatRequest>,
 ) -> Result<Json<BirthChatResponseBody>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     // Guard: only Direct Discovery or Soul Crystallization in Genesis stage.
     let gp_path = dir.join("genesis_path.json");
@@ -1616,9 +1653,7 @@ async fn api_birth_chat(
 async fn api_connectivity_providers(
     Path(id): Path<String>,
 ) -> Result<Json<ProvidersResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let keyring = ProviderKeyring::load(dir)
         .unwrap_or_else(|_| ProviderKeyring::new(agent_dir(&id).unwrap_or_default()));
@@ -1630,13 +1665,11 @@ async fn api_connectivity_providers(
 async fn api_agent_tier_models(
     Path(id): Path<String>,
 ) -> Result<Json<TierModelsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
 
     let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
     let (active_provider, _) = resolve_ego_credentials_with_preference(
@@ -1698,18 +1731,23 @@ async fn api_agent_tier_models_update(
     Json(body): Json<TierModelsUpdateRequest>,
 ) -> Result<Json<TierModelsUpdateResponse>, ApiError> {
     if body.models.is_empty() {
-        return Err(ApiError::BadRequest("models payload is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "models payload is required".to_string(),
+        ));
     }
 
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let mut config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let mut config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
 
     for (provider, incoming) in body.models {
         let normalized = AppConfig::normalize_provider_name(&provider);
         if !provider_supports_tier_models(&normalized) {
-            return Err(ApiError::BadRequest(format!("Unsupported provider for tier models: {}", provider)));
+            return Err(ApiError::BadRequest(format!(
+                "Unsupported provider for tier models: {}",
+                provider
+            )));
         }
         let fast = incoming.fast.trim().to_string();
         let standard = incoming.standard.trim().to_string();
@@ -1730,7 +1768,9 @@ async fn api_agent_tier_models_update(
         );
     }
 
-    config.save(&config_path).map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
+    config
+        .save(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
 
     Ok(Json(TierModelsUpdateResponse { ok: true }))
 }
@@ -1740,13 +1780,11 @@ async fn api_agent_tier_models_refresh(
     Path(id): Path<String>,
     Json(body): Json<RefreshCatalogRequest>,
 ) -> Result<Json<RefreshCatalogResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let mut config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let mut config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
     let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
 
     // Determine which providers to refresh.
@@ -1770,7 +1808,9 @@ async fn api_agent_tier_models_refresh(
         }
     }
 
-    config.save(&config_path).map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
+    config
+        .save(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
 
     Ok(Json(RefreshCatalogResponse {
         ok: true,
@@ -1783,13 +1823,11 @@ async fn api_agent_tier_models_validate(
     Path(id): Path<String>,
     Json(body): Json<ValidateModelsRequest>,
 ) -> Result<Json<ValidateModelsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
     let keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
 
     let targets: Vec<String> = if let Some(ref p) = body.provider {
@@ -1854,10 +1892,10 @@ async fn api_agent_tier_models_reset(
     Path(id): Path<String>,
     Json(body): Json<RefreshCatalogRequest>,
 ) -> Result<Json<TierModelsUpdateResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let mut config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let mut config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
 
     if let Some(ref p) = body.provider {
         let normalized = AppConfig::normalize_provider_name(p);
@@ -1866,7 +1904,9 @@ async fn api_agent_tier_models_reset(
         config.tier_models.clear();
     }
 
-    config.save(&config_path).map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
+    config
+        .save(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
 
     Ok(Json(TierModelsUpdateResponse { ok: true }))
 }
@@ -1876,10 +1916,10 @@ async fn api_agent_set_active_provider(
     Path(id): Path<String>,
     Json(body): Json<SetActiveProviderRequest>,
 ) -> Result<Json<TierModelsUpdateResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent config not found".to_string())
-    })?;
-    let mut config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
+    let config_path = agent_config_path(&id)
+        .ok_or_else(|| ApiError::NotFound("Agent config not found".to_string()))?;
+    let mut config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Load config failed: {}", e)))?;
 
     let normalized = AppConfig::normalize_provider_name(&body.provider);
     if normalized.is_empty() || normalized == "auto" {
@@ -1888,7 +1928,9 @@ async fn api_agent_set_active_provider(
         config.active_provider_preference = Some(normalized);
     }
 
-    config.save(&config_path).map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
+    config
+        .save(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Save config failed: {}", e)))?;
 
     Ok(Json(TierModelsUpdateResponse { ok: true }))
 }
@@ -1898,9 +1940,8 @@ async fn api_connectivity_store_key(
     Path(id): Path<String>,
     Json(body): Json<StoreKeyRequest>,
 ) -> Result<Json<StoreKeyResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let key = body.key.trim().to_string();
     if key.is_empty() {
@@ -1911,7 +1952,12 @@ async fn api_connectivity_store_key(
     let provider = match body.provider.trim().to_lowercase().as_str() {
         "auto" => detect_provider_from_key(&key)
             .map(String::from)
-            .ok_or_else(|| ApiError::BadRequest("Could not detect provider from key prefix; specify provider explicitly".to_string()))?,
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Could not detect provider from key prefix; specify provider explicitly"
+                        .to_string(),
+                )
+            })?,
         p => p.to_string(),
     };
 
@@ -1926,7 +1972,10 @@ async fn api_connectivity_store_key(
         {
             Ok(Ok(())) => true,
             Ok(Err(e)) => {
-                return Err(ApiError::BadRequest(format!("Key validation failed: {}", e)));
+                return Err(ApiError::BadRequest(format!(
+                    "Key validation failed: {}",
+                    e
+                )));
             }
             Err(e) => {
                 return Err(ApiError::Internal(format!("Validation task failed: {}", e)));
@@ -1945,8 +1994,14 @@ async fn api_connectivity_store_key(
             .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
         let mut skill_kc = SkillKeychain::load(config.data_dir.clone())
             .unwrap_or_else(|_| SkillKeychain::new(config.data_dir.clone()));
-        execute_store_provider_key(&mut keyring, &mut config, &provider_clone, &key, Some(&mut skill_kc))
-            .map_err(|e| format!("Store key: {}", e))?;
+        execute_store_provider_key(
+            &mut keyring,
+            &mut config,
+            &provider_clone,
+            &key,
+            Some(&mut skill_kc),
+        )
+        .map_err(|e| format!("Store key: {}", e))?;
         Ok(())
     })
     .await
@@ -1964,17 +2019,18 @@ async fn api_connectivity_store_key(
 async fn api_connectivity_remove_key(
     Path((id, provider)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let provider = provider.trim().to_lowercase();
     if provider.is_empty() {
-        return Err(ApiError::BadRequest("Provider name is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "Provider name is required".to_string(),
+        ));
     }
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut keyring = ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
+        let mut keyring =
+            ProviderKeyring::load(dir.clone()).unwrap_or_else(|_| ProviderKeyring::new(dir));
         if !keyring.remove_key(&provider) {
             return Err(format!("No key stored for provider: {}", provider));
         }
@@ -1992,14 +2048,13 @@ async fn api_connectivity_remove_key(
 async fn api_connectivity_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let path = dir.join("connectivity_chat.json");
     if !path.exists() {
         return Ok(Json(serde_json::json!({ "messages": [] })));
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal(format!("Read connectivity_chat.json: {}", e)))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ApiError::Internal(format!("Read connectivity_chat.json: {}", e)))?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
     Ok(Json(serde_json::json!({ "messages": messages })))
 }
@@ -2009,12 +2064,9 @@ async fn api_connectivity_chat(
     Path(id): Path<String>,
     Json(body): Json<ConnectivityChatRequest>,
 ) -> Result<Json<ConnectivityChatResponseBody>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let user_message = body.message.trim().to_string();
     if user_message.is_empty() {
@@ -2170,7 +2222,13 @@ async fn api_connectivity_chat(
                         .get("key")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    match execute_store_provider_key(&mut keyring, &mut config, provider, key, Some(&mut skill_kc)) {
+                    match execute_store_provider_key(
+                        &mut keyring,
+                        &mut config,
+                        provider,
+                        key,
+                        Some(&mut skill_kc),
+                    ) {
                         Ok(resolved) => {
                             key_stored_info = Some(KeyStoredInfo {
                                 provider: resolved,
@@ -2188,7 +2246,13 @@ async fn api_connectivity_chat(
             if key_stored_info.is_none() {
                 let detected = extract_api_keys_from_text(&raw_user_message);
                 for (provider, key_str) in detected {
-                    match execute_store_provider_key(&mut keyring, &mut config, provider, &key_str, Some(&mut skill_kc)) {
+                    match execute_store_provider_key(
+                        &mut keyring,
+                        &mut config,
+                        provider,
+                        &key_str,
+                        Some(&mut skill_kc),
+                    ) {
                         Ok(resolved) => {
                             tracing::info!(
                                 provider = %resolved,
@@ -2250,11 +2314,11 @@ async fn api_birth_complete_emergence(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<HealthResponse>, ApiError> {
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let config = AppConfig::load(&config_path).map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
+    let config = AppConfig::load(&config_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to load config: {}", e)))?;
 
     if config.birth_complete {
         return Err(ApiError::BadRequest("Birth already complete".to_string()));
@@ -2277,10 +2341,13 @@ async fn api_birth_complete_emergence(
         .or_else(|| {
             agent_dir(&id).and_then(|dir| orion_core::load_signing_key(&dir).ok().flatten())
         })
-        .ok_or_else(|| ApiError::BadRequest(
-            "No signing key found for this agent. The signing key may have been lost. \
-             You must re-create the agent.".to_string(),
-        ))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "No signing key found for this agent. The signing key may have been lost. \
+             You must re-create the agent."
+                    .to_string(),
+            )
+        })?;
 
     let id_for_cleanup = id.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -2903,17 +2970,22 @@ async fn api_operational_chat_upload_attachments(
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Json<ChatAttachmentUploadResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let mut uploads: Vec<UploadedAttachmentInput> = Vec::new();
-    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::BadRequest(format!("Read multipart field: {}", e)))? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Read multipart field: {}", e)))?
+    {
         let Some(file_name) = field.file_name().map(|s| s.to_string()) else {
             continue;
         };
         let content_type = field.content_type().map(|s| s.to_string());
-        let bytes = field.bytes().await.map_err(|e| ApiError::BadRequest(format!("Read uploaded file bytes: {}", e)))?;
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("Read uploaded file bytes: {}", e)))?;
         uploads.push(UploadedAttachmentInput {
             file_name,
             content_type,
@@ -2936,14 +3008,13 @@ async fn api_operational_chat_upload_attachments(
 async fn api_operational_chat_history(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let path = dir.join("operational_chat.json");
     if !path.exists() {
         return Ok(Json(serde_json::json!({ "messages": [] })));
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal(format!("Read operational_chat.json: {}", e)))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ApiError::Internal(format!("Read operational_chat.json: {}", e)))?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
     let display_messages: Vec<BirthChatMessage> = messages
         .into_iter()
@@ -2968,34 +3039,37 @@ struct ChatArchiveInfo {
 }
 
 /// POST /api/agents/{id}/chat/archive — archive the current conversation.
-async fn api_archive_chat(
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+async fn api_archive_chat(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let chat_path = dir.join("operational_chat.json");
     if !chat_path.exists() {
-        return Err(ApiError::BadRequest("No conversation to archive".to_string()));
+        return Err(ApiError::BadRequest(
+            "No conversation to archive".to_string(),
+        ));
     }
-    let content = std::fs::read_to_string(&chat_path).map_err(|e| ApiError::Internal(format!("Read chat: {}", e)))?;
+    let content = std::fs::read_to_string(&chat_path)
+        .map_err(|e| ApiError::Internal(format!("Read chat: {}", e)))?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
     if messages.is_empty() {
         return Err(ApiError::BadRequest("No messages to archive".to_string()));
     }
 
     let archive_dir = dir.join("chat_archives");
-    std::fs::create_dir_all(&archive_dir).map_err(|e| ApiError::Internal(format!("Create archive dir: {}", e)))?;
+    std::fs::create_dir_all(&archive_dir)
+        .map_err(|e| ApiError::Internal(format!("Create archive dir: {}", e)))?;
 
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let archive_id = format!("{}_{}", ts, messages.len());
     let archive_path = archive_dir.join(format!("{}.json", archive_id));
 
-    let archive_content = serde_json::to_string_pretty(&messages).map_err(|e| ApiError::Internal(format!("Serialize archive: {}", e)))?;
-    std::fs::write(&archive_path, archive_content).map_err(|e| ApiError::Internal(format!("Write archive: {}", e)))?;
+    let archive_content = serde_json::to_string_pretty(&messages)
+        .map_err(|e| ApiError::Internal(format!("Serialize archive: {}", e)))?;
+    std::fs::write(&archive_path, archive_content)
+        .map_err(|e| ApiError::Internal(format!("Write archive: {}", e)))?;
 
     // Clear current conversation
-    std::fs::write(&chat_path, "[]").map_err(|e| ApiError::Internal(format!("Clear chat: {}", e)))?;
+    std::fs::write(&chat_path, "[]")
+        .map_err(|e| ApiError::Internal(format!("Clear chat: {}", e)))?;
 
     Ok(Json(serde_json::json!({
         "archive_id": archive_id,
@@ -3007,15 +3081,14 @@ async fn api_archive_chat(
 async fn api_list_chat_archives(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ChatArchiveInfo>>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let archive_dir = dir.join("chat_archives");
     if !archive_dir.exists() {
         return Ok(Json(Vec::new()));
     }
     let mut archives = Vec::new();
-    let entries = std::fs::read_dir(&archive_dir).map_err(|e| ApiError::Internal(format!("Read archive dir: {}", e)))?;
+    let entries = std::fs::read_dir(&archive_dir)
+        .map_err(|e| ApiError::Internal(format!("Read archive dir: {}", e)))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -3065,16 +3138,15 @@ async fn api_list_chat_archives(
 async fn api_get_chat_archive(
     Path((id, archive_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let archive_path = dir
         .join("chat_archives")
         .join(format!("{}.json", archive_id));
     if !archive_path.exists() {
         return Err(ApiError::NotFound("Archive not found".to_string()));
     }
-    let content = std::fs::read_to_string(&archive_path).map_err(|e| ApiError::Internal(format!("Read archive: {}", e)))?;
+    let content = std::fs::read_to_string(&archive_path)
+        .map_err(|e| ApiError::Internal(format!("Read archive: {}", e)))?;
     let messages: Vec<BirthChatMessage> = serde_json::from_str(&content).unwrap_or_default();
     let display_messages: Vec<BirthChatMessage> = messages
         .into_iter()
@@ -3156,18 +3228,17 @@ async fn api_operational_chat(
     Path(id): Path<String>,
     Json(body): Json<OperationalChatRequest>,
 ) -> Result<Json<OperationalChatResponseBody>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let config_path = agent_config_path(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let user_message = body.message.trim().to_string();
     let requested_router_mode = body.router_mode.unwrap_or(agentic::AgenticRouterMode::Auto);
     let attachment_ids = normalize_attachment_ids(&body.attachment_ids);
     if user_message.is_empty() && attachment_ids.is_empty() {
-        return Err(ApiError::BadRequest("message or attachment_ids is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "message or attachment_ids is required".to_string(),
+        ));
     }
 
     let chat_path = dir.join("operational_chat.json");
@@ -3195,12 +3266,10 @@ async fn api_operational_chat(
                         )
                     }
                     (true, PendingOperationalAction::CreateOrchestrationJob { request }) => {
-                        let mut jobs = list_jobs(&dir)
-                            .map_err(|e| ApiError::Internal(e))?;
+                        let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
                         let job = create_job(&mut jobs, request, chrono::Utc::now())
                             .map_err(|e| ApiError::BadRequest(e))?;
-                        save_jobs(&dir, &jobs)
-                            .map_err(|e| ApiError::Internal(e))?;
+                        save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
                         format!(
                             "Confirmed. Scheduled job \"{}\" is now active.\n\n- mode: {:?}\n- cron (UTC): {}\n- next run: {}",
                             job.name,
@@ -3250,8 +3319,7 @@ async fn api_operational_chat(
     let attachment_context_entries = if attachment_ids.is_empty() {
         Vec::new()
     } else {
-        load_attachment_context(&dir, &attachment_ids)
-            .map_err(|e| ApiError::BadRequest(e))?
+        load_attachment_context(&dir, &attachment_ids).map_err(|e| ApiError::BadRequest(e))?
     };
     let has_attachment_context = !attachment_context_entries.is_empty();
     let attachment_context_block = if has_attachment_context {
@@ -3317,7 +3385,8 @@ async fn api_operational_chat(
     };
 
     // Sync email accounts from agent config into the shared email skill accounts list.
-    routes::skills::sync_email_accounts(&config, &state.email_accounts, &state.skill_keychain).await;
+    routes::skills::sync_email_accounts(&config, &state.email_accounts, &state.skill_keychain)
+        .await;
 
     let runtime_ctx = RuntimeContext {
         agent_id: id.clone(),
@@ -3630,8 +3699,10 @@ async fn api_operational_chat(
     let response = if tier == ThinkingModelTier::Pro {
         let keyring_for_pro = ProviderKeyring::load(config.data_dir.clone())
             .unwrap_or_else(|_| ProviderKeyring::new(config.data_dir.clone()));
-        let council_providers =
-            resolve_council_providers(&keyring_for_pro, config.active_provider_preference.as_deref());
+        let council_providers = resolve_council_providers(
+            &keyring_for_pro,
+            config.active_provider_preference.as_deref(),
+        );
         if council_providers.len() >= 2 {
             let provider_configs: Vec<orion_router::council::ProviderConfig> = council_providers
                 .into_iter()
@@ -3933,7 +4004,9 @@ async fn api_operational_chat(
     // Execute synthetic configuration tools that need async APIs.
     for tr in &tool_requests {
         if tr.name == "register_email_account" {
-            match serde_json::from_value::<routes::skills::RegisterEmailAccountRequest>(tr.arguments.clone()) {
+            match serde_json::from_value::<routes::skills::RegisterEmailAccountRequest>(
+                tr.arguments.clone(),
+            ) {
                 Ok(req) => {
                     match routes::skills::register_email_account_internal(
                         &id,
@@ -4181,7 +4254,13 @@ async fn api_operational_chat(
                             .get("key")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        match execute_store_provider_key(&mut keyring, &mut config, provider, key, Some(&mut skill_kc)) {
+                        match execute_store_provider_key(
+                            &mut keyring,
+                            &mut config,
+                            provider,
+                            key,
+                            Some(&mut skill_kc),
+                        ) {
                             Ok(resolved) => {
                                 tracing::info!(
                                     provider = %resolved,
@@ -4233,7 +4312,13 @@ async fn api_operational_chat(
             if tool_executed.is_none() {
                 let detected = extract_api_keys_from_text(&raw_user_message);
                 for (provider, key_str) in detected {
-                    match execute_store_provider_key(&mut keyring, &mut config, provider, &key_str, Some(&mut skill_kc)) {
+                    match execute_store_provider_key(
+                        &mut keyring,
+                        &mut config,
+                        provider,
+                        &key_str,
+                        Some(&mut skill_kc),
+                    ) {
                         Ok(resolved) => {
                             tracing::info!(
                                 provider = %resolved,
@@ -4320,14 +4405,10 @@ async fn api_operational_chat_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<OperationalChatRequest>,
-) -> Result<
-    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    ApiError,
-> {
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
     // Validate agent exists
-    let _ = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let _ = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(32);
 
@@ -4370,7 +4451,11 @@ async fn api_operational_chat_stream(
                     .await;
             }
             Err(err) => {
-                let _ = tx.send(ChatStreamEvent::Error { message: err.to_string() }).await;
+                let _ = tx
+                    .send(ChatStreamEvent::Error {
+                        message: err.to_string(),
+                    })
+                    .await;
             }
         }
     });
@@ -4411,15 +4496,27 @@ async fn api_operational_chat_stream(
 
 #[derive(Debug, Clone)]
 enum ChatStreamEvent {
-    Status { phase: String },
+    Status {
+        phase: String,
+    },
     #[allow(dead_code)]
-    Token { text: String },
-    ToolLog { entry: serde_json::Value },
-    AgenticTaskLaunched { task_id: String, goal: String },
-    Done { response: serde_json::Value },
-    Error { message: String },
+    Token {
+        text: String,
+    },
+    ToolLog {
+        entry: serde_json::Value,
+    },
+    AgenticTaskLaunched {
+        task_id: String,
+        goal: String,
+    },
+    Done {
+        response: serde_json::Value,
+    },
+    Error {
+        message: String,
+    },
 }
-
 
 /// Initialize the skill registry: instantiate all built-in skill plugins
 /// and register them as Verified (first-party, shipped with the repo).
@@ -4592,7 +4689,8 @@ pub(crate) async fn launch_agentic_task_internal(
     }
 
     // Sync email accounts from agent config.
-    routes::skills::sync_email_accounts(&config, &state.email_accounts, &state.skill_keychain).await;
+    routes::skills::sync_email_accounts(&config, &state.email_accounts, &state.skill_keychain)
+        .await;
 
     // Load persisted agent-registered MCP servers into the shared registry.
     for mcp_def in &config.mcp_servers {
@@ -4739,7 +4837,10 @@ pub(crate) fn resolve_council_providers(
     result
 }
 
-pub(crate) fn append_operational_notice(agent_dir: &std::path::Path, content: &str) -> Result<(), String> {
+pub(crate) fn append_operational_notice(
+    agent_dir: &std::path::Path,
+    content: &str,
+) -> Result<(), String> {
     let chat_path = agent_dir.join("operational_chat.json");
     let mut updated: Vec<BirthChatMessage> = if chat_path.exists() {
         let existing = std::fs::read_to_string(&chat_path).map_err(|e| format!("Read: {}", e))?;
@@ -5016,8 +5117,7 @@ async fn api_proxy_status() -> Result<Json<ProxyStatusResponse>, ApiError> {
 }
 
 /// GET /api/proxy/allowlist — read the external proxy domain allowlist.
-async fn api_proxy_allowlist_get(
-) -> Result<Json<ProxyAllowlistResponse>, ApiError> {
+async fn api_proxy_allowlist_get() -> Result<Json<ProxyAllowlistResponse>, ApiError> {
     let path = proxy_allowlist_path();
     Ok(Json(ProxyAllowlistResponse {
         path: path.display().to_string(),
@@ -5030,13 +5130,17 @@ async fn api_proxy_allowlist_put(
     Json(body): Json<ProxyAllowlistUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !body.mentor_approved {
-        return Err(ApiError::Forbidden("mentor_approved=true is required for proxy allowlist updates".to_string()));
+        return Err(ApiError::Forbidden(
+            "mentor_approved=true is required for proxy allowlist updates".to_string(),
+        ));
     }
     let path = proxy_allowlist_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ApiError::Internal(format!("Create allowlist directory failed: {}", e)))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::Internal(format!("Create allowlist directory failed: {}", e)))?;
     }
-    std::fs::write(&path, body.content.as_bytes()).map_err(|e| ApiError::Internal(format!("Write allowlist failed: {}", e)))?;
+    std::fs::write(&path, body.content.as_bytes())
+        .map_err(|e| ApiError::Internal(format!("Write allowlist failed: {}", e)))?;
 
     // Best-effort live reload for local/docker dev setups.
     let reload_result = std::process::Command::new("sh")
@@ -5088,11 +5192,8 @@ async fn api_proxy_logs(
 async fn api_orchestration_jobs(
     Path(id): Path<String>,
 ) -> Result<Json<OrchestrationJobsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
     jobs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(OrchestrationJobsResponse { jobs }))
 }
@@ -5102,13 +5203,10 @@ async fn api_orchestration_job_create(
     Path(id): Path<String>,
     Json(body): Json<CreateOrchestrationJobRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
-    let job = create_job(&mut jobs, body, chrono::Utc::now())
-        .map_err(|e| ApiError::BadRequest(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let job =
+        create_job(&mut jobs, body, chrono::Utc::now()).map_err(|e| ApiError::BadRequest(e))?;
     save_jobs(&dir, &jobs).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(job))
 }
@@ -5118,11 +5216,8 @@ async fn api_orchestration_job_update(
     Path((id, job_id)): Path<(String, String)>,
     Json(body): Json<UpdateOrchestrationJobRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
     let updated = update_job(&mut jobs, &job_id, body, chrono::Utc::now()).map_err(|e| {
         if e.contains("not found") {
             ApiError::NotFound(e)
@@ -5139,11 +5234,8 @@ async fn api_orchestration_job_enable(
     Path((id, job_id)): Path<(String, String)>,
     Json(body): Json<SetOrchestrationJobEnabledRequest>,
 ) -> Result<Json<OrchestrationJob>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
     let updated =
         set_job_enabled(&mut jobs, &job_id, body.enabled, chrono::Utc::now()).map_err(|e| {
             if e.contains("not found") {
@@ -5160,11 +5252,8 @@ async fn api_orchestration_job_enable(
 async fn api_orchestration_job_delete(
     Path((id, job_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
     if !delete_job(&mut jobs, &job_id) {
         return Err(ApiError::NotFound("Job not found".to_string()));
     }
@@ -5177,17 +5266,12 @@ async fn api_orchestration_job_run_now(
     State(state): State<AppState>,
     Path((id, job_id)): Path<(String, String)>,
 ) -> Result<Json<JobRunNowResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
-    let mut jobs =
-        list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let mut jobs = list_jobs(&dir).map_err(|e| ApiError::Internal(e))?;
     let idx = jobs
         .iter()
         .position(|j| j.job_id == job_id)
-        .ok_or_else(|| {
-            ApiError::NotFound("Job not found".to_string())
-        })?;
+        .ok_or_else(|| ApiError::NotFound("Job not found".to_string()))?;
 
     let mut job = jobs.remove(idx);
     let run_result = run_orchestration_job_once(&state, &id, &dir, &mut job, "manual")
@@ -5203,12 +5287,9 @@ async fn api_orchestration_logs(
     Path(id): Path<String>,
     Query(query): Query<JobLogsQuery>,
 ) -> Result<Json<OrchestrationLogsResponse>, ApiError> {
-    let dir = agent_dir(&id).ok_or_else(|| {
-        ApiError::NotFound("Agent not found".to_string())
-    })?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
     let limit = query.limit.or(Some(50));
-    let logs =
-        load_logs(&dir, limit).map_err(|e| ApiError::Internal(e))?;
+    let logs = load_logs(&dir, limit).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(OrchestrationLogsResponse { logs }))
 }
 
@@ -5311,9 +5392,7 @@ async fn main() -> std::io::Result<()> {
         .filter(|s| !s.is_empty())
         .is_some();
     if in_container && !has_token {
-        tracing::error!(
-            "FATAL: ORION_API_TOKEN must be set when running in a container. Exiting."
-        );
+        tracing::error!("FATAL: ORION_API_TOKEN must be set when running in a container. Exiting.");
         std::process::exit(1);
     }
 
@@ -5384,7 +5463,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     // Initialize skill registry and executor
-    let skill_registry = init_skill_registry(Arc::clone(&skill_keychain), Arc::clone(&email_accounts));
+    let skill_registry =
+        init_skill_registry(Arc::clone(&skill_keychain), Arc::clone(&email_accounts));
     let skill_executor = Arc::new(SkillExecutor::new(Arc::clone(&skill_registry)));
 
     let state = AppState {
@@ -5466,7 +5546,10 @@ async fn main() -> std::io::Result<()> {
             get(api_get_mentor_name).put(api_set_mentor_name),
         )
         .route("/api/agents", post(api_create_agent))
-        .route("/api/agents/import", post(routes::identity::api_import_agent))
+        .route(
+            "/api/agents/import",
+            post(routes::identity::api_import_agent),
+        )
         .route("/api/agents/{id}/load", post(api_load_agent))
         .route("/api/agents/{id}/birth/state", get(api_birth_state))
         .route(
@@ -5559,7 +5642,10 @@ async fn main() -> std::io::Result<()> {
             "/api/agents/{id}/email/accounts",
             post(routes::skills::api_register_email_account),
         )
-        .route("/api/agents/{id}/skills", get(routes::skills::api_list_skills))
+        .route(
+            "/api/agents/{id}/skills",
+            get(routes::skills::api_list_skills),
+        )
         .route(
             "/api/agents/{id}/skills/missing-secrets",
             get(routes::skills::api_skills_missing_secrets),
@@ -5568,13 +5654,34 @@ async fn main() -> std::io::Result<()> {
             "/api/agents/{id}/skills/{skill_id}/execute",
             post(routes::skills::api_execute_skill),
         )
-        .route("/api/agents/{id}/agent/runs", get(routes::agent_runs::api_list_agentic_runs))
-        .route("/api/agents/{id}/agent/run", post(routes::agent_runs::api_agentic_run))
-        .route("/api/agents/{id}/agent/stream", get(routes::agent_runs::api_agentic_stream))
-        .route("/api/agents/{id}/agent/respond", post(routes::agent_runs::api_agentic_respond))
-        .route("/api/agents/{id}/agent/confirm", post(routes::agent_runs::api_agentic_confirm))
-        .route("/api/agents/{id}/agent/cancel", post(routes::agent_runs::api_agentic_cancel))
-        .route("/api/agents/{id}/agent/status", get(routes::agent_runs::api_agentic_status))
+        .route(
+            "/api/agents/{id}/agent/runs",
+            get(routes::agent_runs::api_list_agentic_runs),
+        )
+        .route(
+            "/api/agents/{id}/agent/run",
+            post(routes::agent_runs::api_agentic_run),
+        )
+        .route(
+            "/api/agents/{id}/agent/stream",
+            get(routes::agent_runs::api_agentic_stream),
+        )
+        .route(
+            "/api/agents/{id}/agent/respond",
+            post(routes::agent_runs::api_agentic_respond),
+        )
+        .route(
+            "/api/agents/{id}/agent/confirm",
+            post(routes::agent_runs::api_agentic_confirm),
+        )
+        .route(
+            "/api/agents/{id}/agent/cancel",
+            post(routes::agent_runs::api_agentic_cancel),
+        )
+        .route(
+            "/api/agents/{id}/agent/status",
+            get(routes::agent_runs::api_agentic_status),
+        )
         .route(
             "/api/agents/{id}/orchestration/jobs",
             get(api_orchestration_jobs).post(api_orchestration_job_create),
@@ -5599,10 +5706,22 @@ async fn main() -> std::io::Result<()> {
             "/api/agents/{id}/orchestration/logs",
             get(api_orchestration_logs),
         )
-        .route("/api/agents/{id}/identity", get(routes::identity::api_agent_identity))
-        .route("/api/agents/{id}/constitution", get(routes::identity::api_agent_constitution))
-        .route("/api/agents/{id}/verify", post(routes::identity::api_agent_verify))
-        .route("/api/agents/{id}/export", post(routes::identity::api_export_agent))
+        .route(
+            "/api/agents/{id}/identity",
+            get(routes::identity::api_agent_identity),
+        )
+        .route(
+            "/api/agents/{id}/constitution",
+            get(routes::identity::api_agent_constitution),
+        )
+        .route(
+            "/api/agents/{id}/verify",
+            post(routes::identity::api_agent_verify),
+        )
+        .route(
+            "/api/agents/{id}/export",
+            post(routes::identity::api_export_agent),
+        )
         .layer(axum::middleware::from_fn(auth_middleware))
         .layer(cors)
         .with_state(state);

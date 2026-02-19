@@ -89,8 +89,7 @@ impl PerplexitySearchSkill {
             .keychain
             .lock()
             .map_err(|e| SkillError::ToolFailed(format!("Failed to lock keychain: {}", e)))?;
-        kc
-            .get_secret("perplexity")
+        kc.get_secret("perplexity")
             .map(|s| s.to_string())
             .ok_or_else(|| {
                 SkillError::MissingSecret(

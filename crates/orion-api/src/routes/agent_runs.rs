@@ -6,8 +6,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::agentic::{
-    AgenticEvent, AgenticRunRequest, AgenticRunResponse, AgenticStatusResponse,
-    AgenticTaskStatus, CancelRequest, ConfirmationResponseRequest, MentorResponseRequest,
+    AgenticEvent, AgenticRunRequest, AgenticRunResponse, AgenticStatusResponse, AgenticTaskStatus,
+    CancelRequest, ConfirmationResponseRequest, MentorResponseRequest,
 };
 use crate::{agent_dir, launch_agentic_task_internal, ApiError, AppState};
 
@@ -38,8 +38,7 @@ pub(crate) async fn api_list_agentic_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<AgenticRunInfo>>, ApiError> {
-    let dir = agent_dir(&id)
-        .ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let mut runs: Vec<AgenticRunInfo> = Vec::new();
 
@@ -160,10 +159,8 @@ pub(crate) async fn api_agentic_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<AgenticStreamQuery>,
-) -> Result<
-    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    ApiError,
-> {
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
     let tasks = state.agentic_tasks.lock().await;
     let task_arc = tasks
         .get(&query.task)
@@ -295,9 +292,7 @@ pub(crate) async fn api_agentic_cancel(
         task.status,
         AgenticTaskStatus::Completed | AgenticTaskStatus::Failed | AgenticTaskStatus::Cancelled
     ) {
-        return Err(ApiError::BadRequest(
-            "Task is already finished".to_string(),
-        ));
+        return Err(ApiError::BadRequest("Task is already finished".to_string()));
     }
 
     let _ = task.cancel_tx.try_send(());

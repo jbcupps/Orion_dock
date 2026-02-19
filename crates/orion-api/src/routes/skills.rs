@@ -353,12 +353,13 @@ pub(crate) async fn api_list_skills(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SkillInfo>>, ApiError> {
     // Verify agent exists
-    let _config_path = agent_config_path(&id)
-        .ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let _config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
-    let skills_with_tiers = state.skill_registry.list_with_tiers().map_err(|e| {
-        ApiError::Internal(format!("Failed to list skills: {}", e))
-    })?;
+    let skills_with_tiers = state
+        .skill_registry
+        .list_with_tiers()
+        .map_err(|e| ApiError::Internal(format!("Failed to list skills: {}", e)))?;
 
     let mut result = Vec::new();
     for (manifest, tier) in skills_with_tiers {
@@ -394,8 +395,8 @@ pub(crate) async fn api_execute_skill(
     Json(body): Json<SkillExecuteRequest>,
 ) -> Result<Json<SkillExecuteResponse>, ApiError> {
     // Verify agent exists and birth is complete
-    let config_path = agent_config_path(&id)
-        .ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let config_path =
+        agent_config_path(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let config = AppConfig::load(&config_path)
         .map_err(|e| ApiError::Internal(format!("Load config: {}", e)))?;
@@ -508,8 +509,7 @@ pub(crate) async fn api_skills_missing_secrets(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<orion_skills::MissingSkillSecret>>, ApiError> {
-    let dir = agent_dir(&id)
-        .ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
+    let dir = agent_dir(&id).ok_or_else(|| ApiError::NotFound("Agent not found".to_string()))?;
 
     let skills_dir =
         PathBuf::from(std::env::var("ORION_SKILLS_DIR").unwrap_or_else(|_| "skills".to_string()));

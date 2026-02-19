@@ -81,11 +81,23 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| "auto".to_string());
 
         if let Some(key) = llm_key {
-            let _ = execute_store_provider_key(&mut keyring, config, &llm_provider, &key, Some(&mut skill_kc));
+            let _ = execute_store_provider_key(
+                &mut keyring,
+                config,
+                &llm_provider,
+                &key,
+                Some(&mut skill_kc),
+            );
             tracing::info!("UAT: Stored LLM provider key");
         }
         if let Some(key) = search_key {
-            let _ = execute_store_provider_key(&mut keyring, config, &search_provider, &key, Some(&mut skill_kc));
+            let _ = execute_store_provider_key(
+                &mut keyring,
+                config,
+                &search_provider,
+                &key,
+                Some(&mut skill_kc),
+            );
             tracing::info!("UAT: Stored search provider key");
         }
         orch.advance_to_genesis_with_path(genesis_path.clone())?;

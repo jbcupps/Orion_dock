@@ -14,8 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Known LLM providers that belong in the keyring (not the skill keychain).
-pub const KNOWN_LLM_PROVIDERS: &[&str] =
-    &["openai", "anthropic", "perplexity", "xai", "google"];
+pub const KNOWN_LLM_PROVIDERS: &[&str] = &["openai", "anthropic", "perplexity", "xai", "google"];
 
 /// Returns true if `name` is a known LLM provider.
 pub fn is_known_llm_provider(name: &str) -> bool {

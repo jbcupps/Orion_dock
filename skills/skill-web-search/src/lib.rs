@@ -146,8 +146,7 @@ impl Skill for WebSearchSkill {
                 .keychain
                 .lock()
                 .map_err(|e| SkillError::ToolFailed(format!("Keychain lock error: {}", e)))?;
-            kc
-                .get_secret("tavily")
+            kc.get_secret("tavily")
                 .map(|s| s.to_string())
                 .ok_or_else(|| {
                     SkillError::MissingSecret(

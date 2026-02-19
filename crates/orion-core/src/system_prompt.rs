@@ -414,7 +414,9 @@ Skills are registered but none are currently loaded. Ask your mentor about enabl
 
     section.push_str("## Core Capabilities\n\n");
     section.push_str("- Conversational assistance using your local and cloud minds\n");
-    section.push_str("- Store and manage API keys in your provider keyring and skill secrets in your keychain\n");
+    section.push_str(
+        "- Store and manage API keys in your provider keyring and skill secrets in your keychain\n",
+    );
     section.push_str("- Remember context across conversations\n");
 
     section

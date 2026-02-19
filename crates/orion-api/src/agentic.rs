@@ -14,7 +14,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use orion_birth::{execute_store_provider_key, BirthToolRequest};
 use orion_capabilities::cognitive::Message;
 use orion_core::system_prompt::{build_agentic_system_prompt, RuntimeContext, SkillToolEntry};
-use orion_core::{AppConfig, McpServerDefinition, ProviderKeyring, SkillKeychain, ThinkingModelTier};
+use orion_core::{
+    AppConfig, McpServerDefinition, ProviderKeyring, SkillKeychain, ThinkingModelTier,
+};
 use orion_skills::manifest::SkillId;
 use orion_skills::protocol::mcp::McpSkillRuntime;
 use orion_skills::skill::{Skill, ToolDescriptor};
@@ -142,9 +144,7 @@ impl AgenticTask {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status,
-            AgenticTaskStatus::Completed
-                | AgenticTaskStatus::Failed
-                | AgenticTaskStatus::Cancelled
+            AgenticTaskStatus::Completed | AgenticTaskStatus::Failed | AgenticTaskStatus::Cancelled
         )
     }
 
@@ -724,9 +724,10 @@ pub async fn run_agentic_loop(mut cfg: AgenticLoopConfig) {
             .iter()
             .find(|t| t.name == "register_email_account")
         {
-            let result_msg = match serde_json::from_value::<crate::routes::skills::RegisterEmailAccountRequest>(
-                email_req.arguments.clone(),
-            ) {
+            let result_msg = match serde_json::from_value::<
+                crate::routes::skills::RegisterEmailAccountRequest,
+            >(email_req.arguments.clone())
+            {
                 Ok(request) => match crate::routes::skills::register_email_account_internal(
                     &cfg.agent_id,
                     &cfg.skill_keychain,
@@ -1275,7 +1276,10 @@ fn truncate_output(s: &str, max_len: usize) -> String {
     }
 }
 
-fn resolve_ego_credentials(config: &AppConfig, keyring: &ProviderKeyring) -> (Option<String>, Option<String>) {
+fn resolve_ego_credentials(
+    config: &AppConfig,
+    keyring: &ProviderKeyring,
+) -> (Option<String>, Option<String>) {
     // Respect active provider preference if set.
     if let Some(ref pref) = config.active_provider_preference {
         let normalized = AppConfig::normalize_provider_name(pref);
@@ -1349,9 +1353,9 @@ async fn build_router_from_keyring(cfg: &AgenticLoopConfig) -> orion_router::IdE
         (ego_n, ego_k, sup)
     };
     let routing_mode = match cfg.router_mode {
-        AgenticRouterMode::Auto
-        | AgenticRouterMode::ThinkHard
-        | AgenticRouterMode::ThinkHarder => orion_core::RoutingMode::EgoPrimary,
+        AgenticRouterMode::Auto | AgenticRouterMode::ThinkHard | AgenticRouterMode::ThinkHarder => {
+            orion_core::RoutingMode::EgoPrimary
+        }
     };
     let tier = match cfg.router_mode {
         AgenticRouterMode::Auto => ThinkingModelTier::Fast,
@@ -1370,8 +1374,7 @@ async fn build_router_from_keyring(cfg: &AgenticLoopConfig) -> orion_router::IdE
     )
     .await;
     if let Some((sup_name, Some(key))) = sup_creds {
-        let (provider, _) =
-            orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
+        let (provider, _) = orion_router::build_ego_provider(sup_name.as_deref(), Some(key), None);
         if let Some(provider) = provider {
             router = router.with_superego_config(provider, sup_name, cfg.superego_l2_mode);
         }
@@ -1517,12 +1520,9 @@ async fn council_then_execute(
     };
 
     // Phase 1: Council reasoning.
-    let council_result = orion_router::council::run_council(
-        messages,
-        &provider_configs,
-        council_memory.as_ref(),
-    )
-    .await;
+    let council_result =
+        orion_router::council::run_council(messages, &provider_configs, council_memory.as_ref())
+            .await;
 
     let council_plan = match council_result {
         Ok(resp) => resp.content,
