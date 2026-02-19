@@ -93,6 +93,7 @@ export default function OperationalChat({
   const liveToolLogRef = useRef<ActivityLogItem[]>([]);
   // Captures SSE launch info mid-stream so it can be attached to the assistant message in onDone.
   const pendingLaunchRef = useRef<{ task_id: string; goal: string } | null>(null);
+  const reportedTaskResultsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -302,7 +303,7 @@ export default function OperationalChat({
       setLiveToolLog([]);
       liveToolLogRef.current = [];
       pendingLaunchRef.current = null;
-      const userMessage: ChatMessageItem = {
+      const userMessage: BirthChatMessageItem = {
         role: 'user',
         content: renderUserMessage(text, attachments),
       };
