@@ -30,10 +30,10 @@ This repository is one piece of a deliberate three-part identity ecosystem (see 
 
 ### Agent Soul Contract
 
-Every running agent instance carries the same archetype:
-- `soul.md` + `ethics.md` + `org-map.md`
-- Merged at birth into the runtime system prompt.
-- Skills always split: **tool** (code/env) + **how-to-use.md** (ego guidance).
+- soul.md (immutable)
+- ethics.md
+- org-map.md
+- **personality.md** (ego traits -- only document modifiable by Superego)
 
 ### Visual References
 
@@ -139,6 +139,15 @@ Birth runs **local-first** (pinned birth model); once a cloud API key is set, ro
 | Orchestration spawn_agentic          | No                    | Yes                    |
 
 Id is a heartbeat-class model. It must never be used for tool-calling, autonomous loops, or any task requiring function-calling reliability.
+
+### Superego in Enterprise Deployments
+
+- Periodic roll-ups always enabled.
+- Persistent Superego monitoring is automatically activated for any container with `CRITICALITY=high` label (financial, medical, safety hives).
+- Tweaks to personality.md are applied via in-container hot-reload (no restart required) and immediately re-signed by SAO.
+- All Superego actions are auditable via SAO → Phoenix project board sync.
+
+Soul.md remains read-only and is verified on every container start.
 
 ## Repository Layout
 
