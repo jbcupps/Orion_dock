@@ -180,15 +180,11 @@ pub use platform_crypto::{dpapi_decrypt, dpapi_encrypt};
 #[cfg(not(windows))]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // All DPAPI tests mutate the ORION_MASTER_KEY env var, so they must
-    // run sequentially to avoid races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_util::MASTER_KEY_ENV_LOCK;
 
     #[test]
     fn test_plaintext_fallback_without_master_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = MASTER_KEY_ENV_LOCK.lock().unwrap();
         // Ensure env var is unset for this test
         std::env::remove_var("ORION_MASTER_KEY");
         let data = b"hello secrets";
@@ -201,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip_with_master_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = MASTER_KEY_ENV_LOCK.lock().unwrap();
         std::env::set_var("ORION_MASTER_KEY", "test-key-roundtrip");
         let data = b"sensitive api key sk-abc123";
         let encrypted = dpapi_encrypt(data).unwrap();
@@ -216,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_version_byte_present() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = MASTER_KEY_ENV_LOCK.lock().unwrap();
         std::env::set_var("ORION_MASTER_KEY", "test-key-version");
         let encrypted = dpapi_encrypt(b"data").unwrap();
         assert_eq!(encrypted[0], 0x01);
@@ -227,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_legacy_plaintext_migration() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = MASTER_KEY_ENV_LOCK.lock().unwrap();
         // Data written without key (plaintext), then read with key set
         std::env::remove_var("ORION_MASTER_KEY");
         let data = b"legacy plaintext data";
@@ -243,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_encrypted_without_key_errors() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = MASTER_KEY_ENV_LOCK.lock().unwrap();
         // Encrypt with key
         std::env::set_var("ORION_MASTER_KEY", "test-key-error");
         let encrypted = dpapi_encrypt(b"secret").unwrap();

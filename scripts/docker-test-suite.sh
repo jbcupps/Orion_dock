@@ -23,7 +23,7 @@ cargo test --workspace --no-fail-fast
 # Frontend typecheck and build (Docker-only, no host Node required)
 if [[ -f "$REPO_ROOT/frontend/package.json" ]]; then
   echo "=== Frontend typecheck and build ==="
-  (cd "$REPO_ROOT/frontend" && npm ci 2>/dev/null || npm install)
+  (cd "$REPO_ROOT/frontend" && npm ci 2>/dev/null || npm install --legacy-peer-deps)
   (cd "$REPO_ROOT/frontend" && npm run typecheck)
   (cd "$REPO_ROOT/frontend" && npm run build)
 fi

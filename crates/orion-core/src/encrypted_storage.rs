@@ -29,6 +29,7 @@ mod tests {
 
     #[test]
     fn test_write_read_encrypted_roundtrip() {
+        let _guard = crate::test_util::MASTER_KEY_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("orion_enc_storage_test");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();

@@ -66,3 +66,13 @@ pub use superego::{
 pub use vault::{ExternalVault, ReadOnlyFileVault};
 pub use vault_migration::migrate_if_needed;
 pub use verifier::{write_sig_file, SigMeta, Verifier};
+
+/// Shared test utilities for env-var-dependent tests.
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::sync::Mutex;
+
+    /// Global lock for tests that read or mutate the `ORION_MASTER_KEY` env var.
+    /// All such tests must acquire this lock to avoid races.
+    pub static MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::new(());
+}

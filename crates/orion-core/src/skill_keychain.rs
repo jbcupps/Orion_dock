@@ -94,6 +94,7 @@ mod tests {
 
     #[test]
     fn test_keychain_roundtrip() {
+        let _guard = crate::test_util::MASTER_KEY_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("orion_keychain_test_rt");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -113,6 +114,7 @@ mod tests {
 
     #[test]
     fn test_keychain_empty_load() {
+        let _guard = crate::test_util::MASTER_KEY_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("orion_keychain_test_empty");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

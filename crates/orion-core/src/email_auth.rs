@@ -145,6 +145,7 @@ mod tests {
 
     #[test]
     fn test_oauth_roundtrip() {
+        let _guard = crate::test_util::MASTER_KEY_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("orion_email_auth_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -220,6 +221,7 @@ mod tests {
 
     #[test]
     fn test_revoke_removes_all_keys() {
+        let _guard = crate::test_util::MASTER_KEY_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("orion_email_revoke_test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
