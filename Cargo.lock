@@ -3210,7 +3210,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "cron",
  "futures-core",
@@ -3252,7 +3252,7 @@ name = "orion-birth"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "genesis-core",
@@ -3303,7 +3303,7 @@ name = "orion-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
  "directories",
@@ -3328,7 +3328,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "orion-core",
  "rand 0.9.2",
@@ -3386,7 +3386,7 @@ dependencies = [
  "async-imap",
  "async-native-tls",
  "async-trait",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "futures-util",
