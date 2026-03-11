@@ -1,5 +1,5 @@
 # Wraps official Ollama image to pull BIRTH_MODEL on startup (part of every deploy).
-FROM ollama/ollama:0.16.2
+FROM ollama/ollama:0.17.7
 ENV BIRTH_MODEL=qwen2.5:3b-instruct
 COPY docker/entrypoint-ollama.sh /entrypoint-ollama.sh
 RUN sed -i 's/\r$//' /entrypoint-ollama.sh && chmod +x /entrypoint-ollama.sh
